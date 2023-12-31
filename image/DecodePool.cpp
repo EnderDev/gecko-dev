@@ -137,14 +137,14 @@ bool DecodePool::IsShuttingDown() const { return mShuttingDown; }
 class DecodingTask final : public Task {
  public:
   explicit DecodingTask(RefPtr<IDecodingTask>&& aTask)
-      : Task(false, aTask->Priority() == TaskPriority::eLow
-                        ? EventQueuePriority::Normal
-                        : EventQueuePriority::RenderBlocking),
+      : Task(Kind::OffMainThreadOnly, aTask->Priority() == TaskPriority::eLow
+                                          ? EventQueuePriority::Normal
+                                          : EventQueuePriority::RenderBlocking),
         mTask(aTask) {}
 
-  bool Run() override {
+  TaskResult Run() override {
     mTask->Run();
-    return true;
+    return TaskResult::Complete;
   }
 
 #ifdef MOZ_COLLECTING_RUNNABLE_TELEMETRY

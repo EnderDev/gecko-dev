@@ -45,7 +45,7 @@ Project names are the repositories.  They can be:
 * `mozilla-central`
 * `mozilla-beta`
 * `mozilla-release`
-* `mozilla-esr102`
+* `mozilla-esr115`
 * ... A partial list can be found in taskcluster/gecko_taskgraph/util/attributes.py
 
 For try, this attribute applies only if ``-p all`` is specified.  All jobs can
@@ -257,7 +257,7 @@ toolchain-command
 =================
 An extra attribute used to communicate to the build system bootstrap code the
 command used to build the toolchain. This is useful because the commands are
-formatted differently depending on the worker type, sometimes unconveniently
+formatted differently depending on the worker type, sometimes inconveniently
 to parse afterwards.
 
 always_target
@@ -459,3 +459,13 @@ supports-artifact-builds
 ========================
 
 If false, the task requires a compiled build and will not work with artifact builds.
+
+primary-kind-dependency
+=======================
+
+For tasks that were derived from a group of dependencies, this attribute
+denotes which dependent kind is the `primary one`_.
+
+Typically this is set by the ``taskgraph.transforms.from_deps`` transforms.
+
+.. _primary one: https://taskcluster-taskgraph.readthedocs.io/en/latest/reference/transforms/from_deps.html#primary-kind

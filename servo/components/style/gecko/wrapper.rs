@@ -15,10 +15,11 @@
 //! the separation between the style system implementation and everything else.
 
 use crate::applicable_declarations::ApplicableDeclarationBlock;
+use crate::bloom::each_relevant_element_hash;
 use crate::context::{PostAnimationTasks, QuirksMode, SharedStyleContext, UpdateAnimationsTasks};
 use crate::data::ElementData;
 use crate::dom::{LayoutIterator, NodeInfo, OpaqueNode, TDocument, TElement, TNode, TShadowRoot};
-use crate::gecko::selector_parser::{NonTSPseudoClass, PseudoElement, SelectorImpl};
+use crate::gecko::selector_parser::{CustomState, NonTSPseudoClass, PseudoElement, SelectorImpl};
 use crate::gecko::snapshot_helpers;
 use crate::gecko_bindings::bindings;
 use crate::gecko_bindings::bindings::Gecko_ElementHasAnimations;
@@ -69,11 +70,13 @@ use dom::{DocumentState, ElementState};
 use euclid::default::Size2D;
 use fxhash::FxHashMap;
 use selectors::attr::{AttrSelectorOperation, CaseSensitivity, NamespaceConstraint};
+use selectors::bloom::{BloomFilter, BLOOM_HASH_MASK};
 use selectors::matching::VisitedHandlingMode;
 use selectors::matching::{ElementSelectorFlags, MatchingContext};
 use selectors::sink::Push;
 use selectors::{Element, OpaqueElement};
 use servo_arc::{Arc, ArcBorrow};
+use std::cell::Cell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::mem;
@@ -268,17 +271,9 @@ impl<'ln> GeckoNode<'ln> {
         self.flags_atomic().fetch_or(flags, Ordering::Relaxed);
     }
 
-    #[inline]
-    fn flags_atomic(&self) -> &AtomicU32 {
-        use std::cell::Cell;
-        let flags: &Cell<u32> = &(self.0)._base._base_1.mFlags;
-
-        #[allow(dead_code)]
-        fn static_assert() {
-            let _: [u8; std::mem::size_of::<Cell<u32>>()] = [0u8; std::mem::size_of::<AtomicU32>()];
-            let _: [u8; std::mem::align_of::<Cell<u32>>()] =
-                [0u8; std::mem::align_of::<AtomicU32>()];
-        }
+    fn flags_atomic_for(flags: &Cell<u32>) -> &AtomicU32 {
+        const_assert!(std::mem::size_of::<Cell<u32>>() == std::mem::size_of::<AtomicU32>());
+        const_assert!(std::mem::align_of::<Cell<u32>>() == std::mem::align_of::<AtomicU32>());
 
         // Rust doesn't provide standalone atomic functions like GCC/clang do
         // (via the atomic intrinsics) or via std::atomic_ref, but it guarantees
@@ -288,8 +283,28 @@ impl<'ln> GeckoNode<'ln> {
     }
 
     #[inline]
+    fn flags_atomic(&self) -> &AtomicU32 {
+        Self::flags_atomic_for(&self.0._base._base_1.mFlags)
+    }
+
+    #[inline]
     fn flags(&self) -> u32 {
         self.flags_atomic().load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn selector_flags_atomic(&self) -> &AtomicU32 {
+        Self::flags_atomic_for(&self.0.mSelectorFlags)
+    }
+
+    #[inline]
+    fn selector_flags(&self) -> u32 {
+        self.selector_flags_atomic().load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn set_selector_flags(&self, flags: u32) {
+        self.selector_flags_atomic().fetch_or(flags, Ordering::Relaxed);
     }
 
     #[inline]
@@ -598,11 +613,6 @@ impl<'le> GeckoElement<'le> {
         }
     }
 
-    #[inline]
-    fn iter_attrs(&self) -> impl Iterator<Item = &structs::AttrArray_InternalAttr> {
-        self.attrs().iter()
-    }
-
     #[inline(always)]
     fn get_part_attr(&self) -> Option<&structs::nsAttrValue> {
         if !self.has_part_attr() {
@@ -704,7 +714,7 @@ impl<'le> GeckoElement<'le> {
 
     #[inline]
     fn document_state(&self) -> DocumentState {
-        DocumentState::from_bits_retain(self.as_node().owner_doc().0.mDocumentState.bits)
+        DocumentState::from_bits_retain(self.as_node().owner_doc().0.mState.bits)
     }
 
     #[inline]
@@ -856,28 +866,61 @@ impl<'le> GeckoElement<'le> {
                 )
                 .is_ok()
     }
+
+    /// Get slow selector flags required for nth-of invalidation.
+    pub fn slow_selector_flags(&self) -> ElementSelectorFlags {
+        slow_selector_flags_from_node_selector_flags(self.as_node().selector_flags())
+    }
+}
+
+/// Convert slow selector flags from the raw `NodeSelectorFlags`.
+pub fn slow_selector_flags_from_node_selector_flags(flags: u32) -> ElementSelectorFlags {
+    use crate::gecko_bindings::structs::NodeSelectorFlags;
+    let mut result = ElementSelectorFlags::empty();
+    if flags & NodeSelectorFlags::HasSlowSelector.0 != 0 {
+        result.insert(ElementSelectorFlags::HAS_SLOW_SELECTOR);
+    }
+    if flags & NodeSelectorFlags::HasSlowSelectorLaterSiblings.0 != 0 {
+        result.insert(ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS);
+    }
+    result
 }
 
 /// Converts flags from the layout used by rust-selectors to the layout used
 /// by Gecko. We could align these and then do this without conditionals, but
 /// it's probably not worth the trouble.
 fn selector_flags_to_node_flags(flags: ElementSelectorFlags) -> u32 {
-    use crate::gecko_bindings::structs::*;
+    use crate::gecko_bindings::structs::NodeSelectorFlags;
     let mut gecko_flags = 0u32;
     if flags.contains(ElementSelectorFlags::HAS_SLOW_SELECTOR) {
-        gecko_flags |= NODE_HAS_SLOW_SELECTOR;
+        gecko_flags |= NodeSelectorFlags::HasSlowSelector.0;
     }
     if flags.contains(ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS) {
-        gecko_flags |= NODE_HAS_SLOW_SELECTOR_LATER_SIBLINGS;
+        gecko_flags |= NodeSelectorFlags::HasSlowSelectorLaterSiblings.0;
+    }
+    if flags.contains(ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH) {
+        gecko_flags |= NodeSelectorFlags::HasSlowSelectorNth.0;
     }
     if flags.contains(ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH_OF) {
-        gecko_flags |= NODE_HAS_SLOW_SELECTOR_NTH_OF;
+        gecko_flags |= NodeSelectorFlags::HasSlowSelectorNthOf.0;
     }
     if flags.contains(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR) {
-        gecko_flags |= NODE_HAS_EDGE_CHILD_SELECTOR;
+        gecko_flags |= NodeSelectorFlags::HasEdgeChildSelector.0;
     }
     if flags.contains(ElementSelectorFlags::HAS_EMPTY_SELECTOR) {
-        gecko_flags |= NODE_HAS_EMPTY_SELECTOR;
+        gecko_flags |= NodeSelectorFlags::HasEmptySelector.0;
+    }
+    if flags.contains(ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR) {
+        gecko_flags |= NodeSelectorFlags::RelativeSelectorAnchor.0;
+    }
+    if flags.contains(ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR_NON_SUBJECT) {
+        gecko_flags |= NodeSelectorFlags::RelativeSelectorAnchorNonSubject.0;
+    }
+    if flags.contains(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR) {
+        gecko_flags |= NodeSelectorFlags::RelativeSelectorSearchDirectionAncestor.0;
+    }
+    if flags.contains(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING) {
+        gecko_flags |= NodeSelectorFlags::RelativeSelectorSearchDirectionSibling.0;
     }
 
     gecko_flags
@@ -1169,6 +1212,20 @@ impl<'le> TElement for GeckoElement<'le> {
     }
 
     #[inline]
+    fn has_custom_state(&self, state: &CustomState) -> bool {
+        if !self.is_html_element() {
+            return false;
+        }
+        let check_state_ptr: *const nsAtom = state.0.as_ptr();
+        self.extended_slots().map_or(false, |slot| {
+            (&slot.mCustomStates).iter().any(|setstate| {
+                let setstate_ptr: *const nsAtom = setstate.mRawPtr;
+                setstate_ptr == check_state_ptr
+            })
+        })
+    }
+
+    #[inline]
     fn has_part_attr(&self) -> bool {
         self.as_node()
             .get_bool_flag(nsINode_BooleanFlag::ElementHasPart)
@@ -1192,7 +1249,7 @@ impl<'le> TElement for GeckoElement<'le> {
     where
         F: FnMut(&AtomIdent),
     {
-        for attr in self.iter_attrs() {
+        for attr in self.attrs() {
             unsafe {
                 AtomIdent::with(attr.mName.name(), |a| callback(a))
             }
@@ -1309,7 +1366,7 @@ impl<'le> TElement for GeckoElement<'le> {
             return None;
         }
 
-        PseudoElement::from_pseudo_type(unsafe { bindings::Gecko_GetImplementedPseudo(self.0) })
+        PseudoElement::from_pseudo_type(unsafe { bindings::Gecko_GetImplementedPseudo(self.0) }, None)
     }
 
     #[inline]
@@ -1702,6 +1759,25 @@ impl<'le> TElement for GeckoElement<'le> {
             }
         }
     }
+
+    fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {
+        let node_flags = selector_flags_to_node_flags(flags);
+        self.as_node().selector_flags() & node_flags == node_flags
+    }
+
+    fn relative_selector_search_direction(&self) -> Option<ElementSelectorFlags> {
+        use crate::gecko_bindings::structs::NodeSelectorFlags;
+        let flags = self.as_node().selector_flags();
+        if (flags & NodeSelectorFlags::RelativeSelectorSearchDirectionAncestorSibling.0) != 0 {
+            Some(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR_SIBLING)
+        } else if (flags & NodeSelectorFlags::RelativeSelectorSearchDirectionAncestor.0) != 0 {
+            Some(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR)
+        } else if (flags & NodeSelectorFlags::RelativeSelectorSearchDirectionSibling.0) != 0 {
+            Some(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING)
+        } else {
+            None
+        }
+    }
 }
 
 impl<'le> PartialEq for GeckoElement<'le> {
@@ -1813,7 +1889,7 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
         // Handle flags that apply to the element.
         let self_flags = flags.for_self();
         if !self_flags.is_empty() {
-            self.set_flags(selector_flags_to_node_flags(flags))
+            self.as_node().set_selector_flags(selector_flags_to_node_flags(flags))
         }
 
         // Handle flags that apply to the parent.
@@ -1821,14 +1897,14 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
         if !parent_flags.is_empty() {
             if let Some(p) = self.as_node().parent_node() {
                 if p.is_element() || p.is_shadow_root() {
-                    p.set_flags(selector_flags_to_node_flags(parent_flags));
+                    p.set_selector_flags(selector_flags_to_node_flags(parent_flags));
                 }
             }
         }
     }
 
     fn has_attr_in_no_namespace(&self, local_name: &LocalName) -> bool {
-        for attr in self.iter_attrs() {
+        for attr in self.attrs() {
             if attr.mName.mBits == local_name.as_ptr() as usize {
                 return true;
             }
@@ -1842,7 +1918,7 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
         local_name: &LocalName,
         operation: &AttrSelectorOperation<&AttrValue>,
     ) -> bool {
-        snapshot_helpers::attr_matches(self.iter_attrs(), ns, local_name, operation)
+        snapshot_helpers::attr_matches(self.attrs(), ns, local_name, operation)
     }
 
     #[inline]
@@ -1910,7 +1986,6 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
             NonTSPseudoClass::Valid |
             NonTSPseudoClass::Invalid |
             NonTSPseudoClass::MozBroken |
-            NonTSPseudoClass::MozLoading |
             NonTSPseudoClass::Required |
             NonTSPseudoClass::Optional |
             NonTSPseudoClass::ReadOnly |
@@ -1939,12 +2014,14 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
             NonTSPseudoClass::Hover |
             NonTSPseudoClass::MozAutofillPreview |
             NonTSPseudoClass::MozRevealed |
-            NonTSPseudoClass::MozValueEmpty |
-            NonTSPseudoClass::Dir(..) => self.state().intersects(pseudo_class.state_flag()),
+            NonTSPseudoClass::MozValueEmpty => self.state().intersects(pseudo_class.state_flag()),
+            // TODO: This applying only to HTML elements is weird.
+            NonTSPseudoClass::Dir(ref dir) => self.is_html_element() && self.state().intersects(dir.element_state()),
             NonTSPseudoClass::AnyLink => self.is_link(),
             NonTSPseudoClass::Link => {
                 self.is_link() && context.visited_handling().matches_unvisited()
             },
+            NonTSPseudoClass::CustomState(ref state) => self.has_custom_state(state),
             NonTSPseudoClass::Visited => {
                 self.is_link() && context.visited_handling().matches_visited()
             },
@@ -2094,5 +2171,10 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
     #[inline]
     fn ignores_nth_child_selectors(&self) -> bool {
         self.is_root_of_native_anonymous_subtree()
+    }
+
+    fn add_element_unique_hashes(&self, filter: &mut BloomFilter) -> bool {
+        each_relevant_element_hash(*self, |hash| filter.insert_hash(hash & BLOOM_HASH_MASK));
+        true
     }
 }

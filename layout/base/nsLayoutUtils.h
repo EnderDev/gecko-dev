@@ -100,6 +100,7 @@ class ImageBitmap;
 class InspectorFontFace;
 class OffscreenCanvas;
 class Selection;
+class VideoFrame;
 }  // namespace dom
 namespace gfx {
 struct RectCornerRadii;
@@ -2137,8 +2138,9 @@ class nsLayoutUtils {
   /**
    * Some frames with 'position: fixed' (nsStyleDisplay::mPosition ==
    * StylePositionProperty::Fixed) are not really fixed positioned, since
-   * they're inside an element with -moz-transform.  This function says
-   * whether such an element is a real fixed-pos element.
+   * they're inside a transformed element or other element that establishes a
+   * fixed-pos containing block).  This function says whether such an element is
+   * a real fixed-pos element.
    */
   static bool IsReallyFixedPos(const nsIFrame* aFrame);
 
@@ -2197,7 +2199,9 @@ class nsLayoutUtils {
      * we don't rescale during decode. */
     SFE_EXACT_SIZE_SURFACE = 1 << 6,
     /* Use orientation from image */
-    SFE_ORIENTATION_FROM_IMAGE = 1 << 7
+    SFE_ORIENTATION_FROM_IMAGE = 1 << 7,
+    /* Caller handles SFER::mCropRect.isSome() */
+    SFE_ALLOW_UNCROPPED_UNSCALED = 1 << 8,
   };
 
   // This function can be called on any thread.
@@ -2210,6 +2214,16 @@ class nsLayoutUtils {
     RefPtr<DrawTarget> target = nullptr;
     return SurfaceFromOffscreenCanvas(aOffscreenCanvas, aSurfaceFlags, target);
   }
+  // This function can be called on any thread.
+  static mozilla::SurfaceFromElementResult SurfaceFromVideoFrame(
+      mozilla::dom::VideoFrame* aVideoFrame, uint32_t aSurfaceFlags,
+      RefPtr<DrawTarget>& aTarget);
+  static mozilla::SurfaceFromElementResult SurfaceFromVideoFrame(
+      mozilla::dom::VideoFrame* aVideoFrame, uint32_t aSurfaceFlags = 0) {
+    RefPtr<DrawTarget> target = nullptr;
+    return SurfaceFromVideoFrame(aVideoFrame, aSurfaceFlags, target);
+  }
+  // This function can be called on any thread.
   static mozilla::SurfaceFromElementResult SurfaceFromImageBitmap(
       mozilla::dom::ImageBitmap* aImageBitmap, uint32_t aSurfaceFlags);
 
@@ -2942,18 +2956,18 @@ class nsLayoutUtils {
   static bool IsInvisibleBreak(nsINode* aNode,
                                nsIFrame** aNextLineFrame = nullptr);
 
-  static nsRect ComputeSVGViewBox(mozilla::dom::SVGViewportElement*);
+  static nsRect ComputeSVGOriginBox(mozilla::dom::SVGViewportElement*);
 
+  // Compute the geometry box for SVG layout. The caller should map the CSS box
+  // into the proper SVG box.
+  static nsRect ComputeSVGReferenceRect(nsIFrame*, StyleGeometryBox);
+
+  // Compute the geometry box for CSS layout. The caller should map the SVG box
+  // into the proper CSS box.
   static nsRect ComputeHTMLReferenceRect(const nsIFrame*, StyleGeometryBox);
 
-  static StyleGeometryBox CoordBoxToGeometryBox(mozilla::StyleCoordBox);
-
-  static nsRect ComputeGeometryBox(nsIFrame*, StyleGeometryBox);
-
-  static nsRect ComputeGeometryBox(nsIFrame*,
-                                   const mozilla::StyleShapeGeometryBox&);
-
-  static nsRect ComputeGeometryBox(nsIFrame*, const mozilla::StyleShapeBox&);
+  static nsRect ComputeClipPathGeometryBox(
+      nsIFrame*, const mozilla::StyleShapeGeometryBox&);
 
   static nsPoint ComputeOffsetToUserSpace(nsDisplayListBuilder* aBuilder,
                                           nsIFrame* aFrame);

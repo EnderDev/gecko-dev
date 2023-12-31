@@ -31,7 +31,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   SessionStore: "resource:///modules/sessionstore/SessionStore.sys.mjs",
   URILoadingHelper: "resource:///modules/URILoadingHelper.sys.mjs",
 });
-XPCOMUtils.defineLazyGetter(lazy, "gWidgetsBundle", function () {
+ChromeUtils.defineLazyGetter(lazy, "gWidgetsBundle", function () {
   const kUrl =
     "chrome://browser/locale/customizableui/customizableWidgets.properties";
   return Services.strings.createBundle(kUrl);
@@ -44,7 +44,7 @@ XPCOMUtils.defineLazyServiceGetter(
 );
 
 let gDebug;
-XPCOMUtils.defineLazyGetter(lazy, "log", () => {
+ChromeUtils.defineLazyGetter(lazy, "log", () => {
   let { ConsoleAPI } = ChromeUtils.importESModule(
     "resource://gre/modules/Console.sys.mjs"
   );
@@ -357,7 +357,7 @@ CustomizeMode.prototype = {
 
       let customizer = document.getElementById("customization-container");
       let browser = document.getElementById("browser");
-      browser.collapsed = true;
+      browser.hidden = true;
       customizer.hidden = false;
 
       this._wrapToolbarItemSync(CustomizableUI.AREA_TABSTRIP);
@@ -489,7 +489,7 @@ CustomizeMode.prototype = {
     let customizer = document.getElementById("customization-container");
     let browser = document.getElementById("browser");
     customizer.hidden = true;
-    browser.collapsed = false;
+    browser.hidden = false;
 
     window.gNavToolbox.removeEventListener("toolbarvisibilitychange", this);
 
@@ -1463,9 +1463,8 @@ CustomizeMode.prototype = {
       }
     }
 
-    // Add menu items for automatically switching to Touch mode in Windows Tablet Mode,
-    // which is only available in Windows 10.
-    if (AppConstants.isPlatformAndVersionAtLeast("win", "10")) {
+    // Add menu items for automatically switching to Touch mode in Windows Tablet Mode.
+    if (AppConstants.platform == "win") {
       let spacer = doc.getElementById("customization-uidensity-touch-spacer");
       let checkbox = doc.getElementById(
         "customization-uidensity-autotouchmode-checkbox"

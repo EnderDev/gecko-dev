@@ -13,24 +13,20 @@
 
 #include "gfxContext.h"
 #include "nsContentCreatorFunctions.h"
-#include "nsCSSPseudoElements.h"
 #include "nsCSSRendering.h"
 #include "nsDisplayList.h"
 #include "nsIContent.h"
 #include "nsLayoutUtils.h"
 #include "mozilla/dom/Document.h"
-#include "nsNameSpaceManager.h"
 #include "nsGkAtoms.h"
 #include "mozilla/dom/HTMLDataListElement.h"
 #include "mozilla/dom/HTMLInputElement.h"
 #include "mozilla/dom/HTMLOptionElement.h"
 #include "mozilla/dom/MutationEventBinding.h"
 #include "nsPresContext.h"
-#include "nsPresContextInlines.h"
 #include "nsNodeInfoManager.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/ServoStyleSet.h"
-#include "nsStyleConsts.h"
 #include "nsTArray.h"
 
 #ifdef ACCESSIBILITY
@@ -69,8 +65,7 @@ NS_QUERYFRAME_HEAD(nsRangeFrame)
   NS_QUERYFRAME_ENTRY(nsIAnonymousContentCreator)
 NS_QUERYFRAME_TAIL_INHERITING(nsContainerFrame)
 
-void nsRangeFrame::DestroyFrom(nsIFrame* aDestructRoot,
-                               PostDestroyData& aPostDestroyData) {
+void nsRangeFrame::Destroy(DestroyContext& aContext) {
   NS_ASSERTION(!GetPrevContinuation() && !GetNextContinuation(),
                "nsRangeFrame should not have continuations; if it does we "
                "need to call RegUnregAccessKey only for the first.");
@@ -78,47 +73,45 @@ void nsRangeFrame::DestroyFrom(nsIFrame* aDestructRoot,
   if (mListMutationObserver) {
     mListMutationObserver->Detach();
   }
-  aPostDestroyData.AddAnonymousContent(mTrackDiv.forget());
-  aPostDestroyData.AddAnonymousContent(mProgressDiv.forget());
-  aPostDestroyData.AddAnonymousContent(mThumbDiv.forget());
-  nsContainerFrame::DestroyFrom(aDestructRoot, aPostDestroyData);
+  aContext.AddAnonymousContent(mTrackDiv.forget());
+  aContext.AddAnonymousContent(mProgressDiv.forget());
+  aContext.AddAnonymousContent(mThumbDiv.forget());
+  nsContainerFrame::Destroy(aContext);
 }
 
-nsresult nsRangeFrame::MakeAnonymousDiv(Element** aResult,
-                                        PseudoStyleType aPseudoType,
-                                        nsTArray<ContentInfo>& aElements) {
-  nsCOMPtr<Document> doc = mContent->GetComposedDoc();
-  RefPtr<Element> resultElement = doc->CreateHTMLElement(nsGkAtoms::div);
+static already_AddRefed<Element> MakeAnonymousDiv(
+    Document& aDoc, PseudoStyleType aOldPseudoType,
+    PseudoStyleType aModernPseudoType,
+    nsTArray<nsIAnonymousContentCreator::ContentInfo>& aElements) {
+  RefPtr<Element> result = aDoc.CreateHTMLElement(nsGkAtoms::div);
 
   // Associate the pseudo-element with the anonymous child.
-  resultElement->SetPseudoElementType(aPseudoType);
+  if (StaticPrefs::layout_css_modern_range_pseudos_enabled()) {
+    result->SetPseudoElementType(aModernPseudoType);
+  } else {
+    result->SetPseudoElementType(aOldPseudoType);
+  }
 
   // XXX(Bug 1631371) Check if this should use a fallible operation as it
   // pretended earlier, or change the return type to void.
-  aElements.AppendElement(resultElement);
+  aElements.AppendElement(result);
 
-  resultElement.forget(aResult);
-  return NS_OK;
+  return result.forget();
 }
 
 nsresult nsRangeFrame::CreateAnonymousContent(
     nsTArray<ContentInfo>& aElements) {
-  nsresult rv;
-
+  Document* doc = mContent->OwnerDoc();
   // Create the ::-moz-range-track pseudo-element (a div):
-  rv = MakeAnonymousDiv(getter_AddRefs(mTrackDiv),
-                        PseudoStyleType::mozRangeTrack, aElements);
-  NS_ENSURE_SUCCESS(rv, rv);
-
+  mTrackDiv = MakeAnonymousDiv(*doc, PseudoStyleType::mozRangeTrack,
+                               PseudoStyleType::sliderTrack, aElements);
   // Create the ::-moz-range-progress pseudo-element (a div):
-  rv = MakeAnonymousDiv(getter_AddRefs(mProgressDiv),
-                        PseudoStyleType::mozRangeProgress, aElements);
-  NS_ENSURE_SUCCESS(rv, rv);
-
+  mProgressDiv = MakeAnonymousDiv(*doc, PseudoStyleType::mozRangeProgress,
+                                  PseudoStyleType::sliderFill, aElements);
   // Create the ::-moz-range-thumb pseudo-element (a div):
-  rv = MakeAnonymousDiv(getter_AddRefs(mThumbDiv),
-                        PseudoStyleType::mozRangeThumb, aElements);
-  return rv;
+  mThumbDiv = MakeAnonymousDiv(*doc, PseudoStyleType::mozRangeThumb,
+                               PseudoStyleType::sliderThumb, aElements);
+  return NS_OK;
 }
 
 void nsRangeFrame::AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
@@ -141,15 +134,13 @@ void nsRangeFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
   const nsStyleDisplay* disp = StyleDisplay();
   if (IsThemed(disp)) {
     DisplayBorderBackgroundOutline(aBuilder, aLists);
-    // Only create items for the thumb. Specifically, we do not want
-    // the track to paint, since *our* background is used to paint
-    // the track, and we don't want the unthemed track painting over
-    // the top of the themed track.
+    // Only create items for the thumb. Specifically, we do not want the track
+    // to paint, since *our* background is used to paint the track, and we don't
+    // want the unthemed track painting over the top of the themed track.
     // This logic is copied from
     // nsContainerFrame::BuildDisplayListForNonBlockChildren as
     // called by BuildDisplayListForInline.
-    nsIFrame* thumb = mThumbDiv->GetPrimaryFrame();
-    if (thumb) {
+    if (nsIFrame* thumb = mThumbDiv->GetPrimaryFrame()) {
       nsDisplayListSet set(aLists, aLists.Content());
       BuildDisplayListForChild(aBuilder, thumb, set, DisplayChildFlag::Inline);
     }
@@ -434,8 +425,10 @@ Decimal nsRangeFrame::GetValueAtEventPoint(WidgetGUIEvent* aEvent) {
     nscoord posOfPoint = mozilla::clamped(point.y, posAtStart, posAtEnd);
     // For a vertical range, the top (posAtStart) is the highest value, so we
     // subtract the fraction from 1.0 to get that polarity correct.
-    fraction = Decimal(1) -
-               Decimal(posOfPoint - posAtStart) / Decimal(traversableDistance);
+    fraction = Decimal(posOfPoint - posAtStart) / Decimal(traversableDistance);
+    if (IsUpwards()) {
+      fraction = Decimal(1) - fraction;
+    }
   }
 
   MOZ_ASSERT(fraction >= Decimal(0) && fraction <= Decimal(1));
@@ -572,7 +565,11 @@ void nsRangeFrame::DoUpdateThumbPosition(nsIFrame* aThumbFrame,
       nscoord traversableDistance =
           rangeContentBoxSize.height - thumbSize.height;
       newPosition.x += (rangeContentBoxSize.width - thumbSize.width) / 2;
-      newPosition.y += NSToCoordRound((1.0 - fraction) * traversableDistance);
+      if (IsUpwards()) {
+        newPosition.y += NSToCoordRound((1.0 - fraction) * traversableDistance);
+      } else {
+        newPosition.y += NSToCoordRound(fraction * traversableDistance);
+      }
     }
   }
   aThumbFrame->SetPosition(newPosition);
@@ -613,7 +610,9 @@ void nsRangeFrame::DoUpdateRangeProgressFrame(nsIFrame* aRangeProgressFrame,
   } else {
     nscoord progLength = NSToCoordRound(fraction * rangeContentBoxSize.height);
     progRect.x += (rangeContentBoxSize.width - progSize.width) / 2;
-    progRect.y += rangeContentBoxSize.height - progLength;
+    if (IsUpwards()) {
+      progRect.y += rangeContentBoxSize.height - progLength;
+    }
     progRect.height = progLength;
   }
   aRangeProgressFrame->SetRect(progRect);
@@ -706,7 +705,7 @@ LogicalSize nsRangeFrame::ComputeAutoSize(
 }
 
 nscoord nsRangeFrame::GetMinISize(gfxContext* aRenderingContext) {
-  auto pos = StylePosition();
+  const auto* pos = StylePosition();
   auto wm = GetWritingMode();
   if (pos->ISize(wm).HasPercent()) {
     // https://drafts.csswg.org/css-sizing-3/#percentage-sizing

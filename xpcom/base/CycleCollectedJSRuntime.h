@@ -281,7 +281,7 @@ class CycleCollectedJSRuntime {
                               const JS::GCDescription& aDesc);
   static void GCNurseryCollectionCallback(JSContext* aContext,
                                           JS::GCNurseryProgress aProgress,
-                                          JS::GCReason aReason);
+                                          JS::GCReason aReason, void* data);
   static void OutOfMemoryCallback(JSContext* aContext, void* aData);
 
   static bool ContextCallback(JSContext* aCx, unsigned aOperation, void* aData);
@@ -301,8 +301,16 @@ class CycleCollectedJSRuntime {
                       js::SliceBudget& aBudget);
 
  public:
-  void FinalizeDeferredThings(
-      CycleCollectedJSContext::DeferredFinalizeType aType);
+  enum DeferredFinalizeType {
+    // Never finalize immediately, because it would be unsafe.
+    FinalizeLater,
+    // Finalize later if we can, but it is okay to do it immediately.
+    FinalizeIncrementally,
+    // Finalize immediately, for shutdown or testing purposes.
+    FinalizeNow,
+  };
+
+  void FinalizeDeferredThings(DeferredFinalizeType aType);
 
   virtual void PrepareForForgetSkippable() = 0;
   virtual void BeginCycleCollectionCallback(mozilla::CCReason aReason) = 0;
@@ -450,15 +458,13 @@ class CycleCollectedJSRuntime {
   bool mHasPendingIdleGCTask;
 
   JS::GCSliceCallback mPrevGCSliceCallback;
-  JS::GCNurseryCollectionCallback mPrevGCNurseryCollectionCallback;
 
   mozilla::TimeStamp mLatestNurseryCollectionStart;
 
   JSHolderMap mJSHolders;
   Maybe<JSHolderMap::Iter> mHolderIter;
 
-  typedef nsTHashMap<nsFuncPtrHashKey<DeferredFinalizeFunction>, void*>
-      DeferredFinalizerTable;
+  using DeferredFinalizerTable = nsTHashMap<DeferredFinalizeFunction, void*>;
   DeferredFinalizerTable mDeferredFinalizerTable;
 
   RefPtr<IncrementalFinalizeRunnable> mFinalizeRunnable;

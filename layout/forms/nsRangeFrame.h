@@ -48,8 +48,7 @@ class nsRangeFrame final : public nsContainerFrame,
   NS_DECL_FRAMEARENA_HELPERS(nsRangeFrame)
 
   // nsIFrame overrides
-  virtual void DestroyFrom(nsIFrame* aDestructRoot,
-                           PostDestroyData& aPostDestroyData) override;
+  void Destroy(DestroyContext&) override;
 
   void BuildDisplayList(nsDisplayListBuilder* aBuilder,
                         const nsDisplayListSet& aLists) override;
@@ -115,6 +114,18 @@ class nsRangeFrame final : public nsContainerFrame,
     return GetWritingMode().IsPhysicalRTL();
   }
 
+  /**
+   * Returns true if the range progresses upwards (for vertical ranges in
+   * horizontal writing mode, or for bidi-RTL in vertical mode). Only
+   * relevant when IsHorizontal() is false.
+   */
+  bool IsUpwards() const {
+    MOZ_ASSERT(!IsHorizontal());
+    mozilla::WritingMode wm = GetWritingMode();
+    return wm.GetBlockDir() == mozilla::WritingMode::eBlockTB ||
+           wm.GetInlineDir() == mozilla::WritingMode::eInlineBTT;
+  }
+
   double GetMin() const;
   double GetMax() const;
   double GetValue() const;
@@ -166,9 +177,6 @@ class nsRangeFrame final : public nsContainerFrame,
   // Return our preferred size in the cross-axis (the axis perpendicular
   // to the direction of movement of the thumb).
   nscoord AutoCrossSize(mozilla::Length aEm);
-
-  nsresult MakeAnonymousDiv(Element** aResult, PseudoStyleType aPseudoType,
-                            nsTArray<ContentInfo>& aElements);
 
   // Helper function which reflows the anonymous div frames.
   void ReflowAnonymousContent(nsPresContext* aPresContext,

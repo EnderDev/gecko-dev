@@ -6,6 +6,7 @@
 #include "lib/jxl/dec_cache.h"
 
 #include "lib/jxl/blending.h"
+#include "lib/jxl/common.h"  // JXL_HIGH_PRECISION
 #include "lib/jxl/render_pipeline/stage_blending.h"
 #include "lib/jxl/render_pipeline/stage_chroma_upsampling.h"
 #include "lib/jxl/render_pipeline/stage_epf.h"
@@ -28,7 +29,7 @@ Status PassesDecoderState::PreparePipeline(ImageBundle* decoded,
                                            PipelineOptions options) {
   const FrameHeader& frame_header = shared->frame_header;
   size_t num_c = 3 + frame_header.nonserialized_metadata->m.num_extra_channels;
-  if ((frame_header.flags & FrameHeader::kNoise) != 0) {
+  if (options.render_noise && (frame_header.flags & FrameHeader::kNoise) != 0) {
     num_c += 3;
   }
 
@@ -110,8 +111,7 @@ Status PassesDecoderState::PreparePipeline(ImageBundle* decoded,
           CeilLog2Nonzero(frame_header.upsampling)));
     }
   }
-
-  if ((frame_header.flags & FrameHeader::kNoise) != 0) {
+  if (options.render_noise && (frame_header.flags & FrameHeader::kNoise) != 0) {
     builder.AddStage(GetConvolveNoiseStage(num_c - 3));
     builder.AddStage(GetAddNoiseStage(shared->image_features.noise_params,
                                       shared->cmap, num_c - 3));
@@ -139,6 +139,7 @@ Status PassesDecoderState::PreparePipeline(ImageBundle* decoded,
   }
 
   if (fast_xyb_srgb8_conversion) {
+#if !JXL_HIGH_PRECISION
     JXL_ASSERT(!NeedsBlending(this));
     JXL_ASSERT(!frame_header.CanBeReferenced() ||
                frame_header.save_before_color_transform);
@@ -149,6 +150,7 @@ Status PassesDecoderState::PreparePipeline(ImageBundle* decoded,
     builder.AddStage(GetFastXYBTosRGB8Stage(rgb_output, main_output.stride,
                                             width, height, is_rgba, has_alpha,
                                             alpha_c));
+#endif
   } else {
     bool linear = false;
     if (frame_header.color_transform == ColorTransform::kYCbCr) {

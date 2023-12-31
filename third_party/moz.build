@@ -7,6 +7,9 @@ with Files('moz.build'):
 with Files('aom/**'):
     BUG_COMPONENT = ('Core', 'Audio/Video: Playback')
 
+with Files('content_analysis_sdk/**'):
+    BUG_COMPONENT = ('Firefox', 'Data Loss Prevention')
+
 with Files('cups/**'):
     BUG_COMPONENT = ('Core', 'Printing: Setup')
 
@@ -47,6 +50,9 @@ with Files('xsimd/**'):
     BUG_COMPONENT = ('Firefox Build System', 'General')
 
 with Files('msgpack/**'):
+    BUG_COMPONENT = ('Firefox Build System', 'General')
+
+with Files('simde/**'):
     BUG_COMPONENT = ('Firefox Build System', 'General')
 
 with Files('sipcc/**'):

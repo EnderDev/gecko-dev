@@ -82,8 +82,7 @@ MOZ_TOOL_VARIABLES
 dnl Special win32 checks
 dnl ========================================================
 
-# Target the Windows 8.1 SDK by default
-WINVER=601
+WINVER=0A00
 
 case "$target" in
 *-mingw*)
@@ -148,8 +147,7 @@ case "$target" in
 
     AC_DEFINE_UNQUOTED(WINVER,0x$WINVER)
     AC_DEFINE_UNQUOTED(_WIN32_WINNT,0x$WINVER)
-    # Require OS features provided by IE 8.0 (Win7)
-    AC_DEFINE_UNQUOTED(_WIN32_IE,0x0800)
+    AC_DEFINE_UNQUOTED(_WIN32_IE,0x0A00)
 
     ;;
 esac
@@ -379,12 +377,7 @@ case "$target" in
         WIN32_GUI_EXE_LDFLAGS=-mwindows
     else
         TARGET_COMPILER_ABI=msvc
-        # aarch64 doesn't support subsystems below 6.02
-        if test "$CPU_ARCH" = "aarch64"; then
-            WIN32_SUBSYSTEM_VERSION=6.02
-        else
-            WIN32_SUBSYSTEM_VERSION=6.01
-        fi
+        WIN32_SUBSYSTEM_VERSION=10.0
         WIN32_CONSOLE_EXE_LDFLAGS=-SUBSYSTEM:CONSOLE,$WIN32_SUBSYSTEM_VERSION
         WIN32_GUI_EXE_LDFLAGS=-SUBSYSTEM:WINDOWS,$WIN32_SUBSYSTEM_VERSION
         DSO_LDOPTS=-SUBSYSTEM:WINDOWS,$WIN32_SUBSYSTEM_VERSION

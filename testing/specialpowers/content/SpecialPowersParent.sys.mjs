@@ -428,7 +428,7 @@ export class SpecialPowersParent extends JSWindowActorParent {
   _applyPrefs(actions) {
     let requiresRefresh = false;
     for (let pref of actions) {
-      // This logic should match PrefRequiresRefresh in reftest.jsm
+      // This logic should match PrefRequiresRefresh in reftest.sys.mjs
       requiresRefresh =
         requiresRefresh ||
         pref.name == "layout.css.prefers-color-scheme.content-override" ||
@@ -1176,17 +1176,6 @@ export class SpecialPowersParent extends JSWindowActorParent {
             }
           }
           return result;
-        }
-
-        case "SPImportInMainProcess": {
-          var message = { hadError: false, errorMessage: null };
-          try {
-            ChromeUtils.import(aMessage.data);
-          } catch (e) {
-            message.hadError = true;
-            message.errorMessage = e.toString();
-          }
-          return message;
         }
 
         case "SPCleanUpSTSData": {

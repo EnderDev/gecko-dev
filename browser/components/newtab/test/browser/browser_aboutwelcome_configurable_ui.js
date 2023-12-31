@@ -59,17 +59,18 @@ async function testAboutWelcomeLogoFor(logo = {}) {
   let expected = [
     `.brand-logo[src="${
       logo.imageURL ?? "chrome://branding/content/about-logo.svg"
-    }"][alt="${logo.alt ?? ""}"]${logo.height ? `[style*="height"]` : ""}${
-      logo.alt ? "" : `[role="presentation"]`
-    }`,
+    }"][alt=""]`,
   ];
   let unexpected = [];
-  if (!logo.height) {
-    unexpected.push(`.brand-logo[style*="height"]`);
-  }
-  if (logo.alt) {
-    unexpected.push(`.brand-logo[role="presentation"]`);
-  }
+  (logo.alt ? unexpected : expected).push('.brand-logo[role="presentation"]');
+  (logo.width ? expected : unexpected).push(`.brand-logo[style*="width"]`);
+  (logo.height ? expected : unexpected).push(`.brand-logo[style*="height"]`);
+  (logo.marginBlock ? expected : unexpected).push(
+    `.logo-container[style*="margin-block"]`
+  );
+  (logo.marginInline ? expected : unexpected).push(
+    `.logo-container[style*="margin-inline"]`
+  );
   (logo.darkModeImageURL ? expected : unexpected).push(
     `.logo-container source[media="(prefers-color-scheme: dark)"]${
       logo.darkModeImageURL ? `[srcset="${logo.darkModeImageURL}"]` : ""
@@ -195,6 +196,29 @@ add_task(async function test_aboutwelcome_with_empty_logo_spacing() {
 });
 
 /**
+ * Test rendering a screen with a "Title Logo"
+ */
+add_task(async function test_title_logo() {
+  const TEST_TITLE_LOGO_URL = "chrome://branding/content/icon64.png";
+  const TEST_CONTENT = makeTestContent("TITLE_LOGO", {
+    title_logo: {
+      imageURL: TEST_TITLE_LOGO_URL,
+    },
+  });
+  const TEST_JSON = JSON.stringify([TEST_CONTENT]);
+  let browser = await openAboutWelcome(TEST_JSON);
+
+  await test_screen_content(
+    browser,
+    "renders screen with title_logo",
+    // Expected selectors:
+    [".inline-icon-container"]
+  );
+
+  browser.closeBrowser();
+});
+
+/**
  * Test rendering a screen with a title with custom styles.
  */
 add_task(async function test_aboutwelcome_with_title_styles() {
@@ -255,6 +279,27 @@ add_task(async function test_aboutwelcome_with_background() {
 });
 
 /**
+ * Test rendering a screen with defined dimensions
+ */
+add_task(async function test_aboutwelcome_with_dimensions() {
+  const TEST_DIMENSIONS_CONTENT = makeTestContent("TEST_DIMENSIONS_STEP", {
+    width: "100px",
+    position: "center",
+  });
+
+  const TEST_DIMENSIONS_JSON = JSON.stringify([TEST_DIMENSIONS_CONTENT]);
+  let browser = await openAboutWelcome(TEST_DIMENSIONS_JSON);
+
+  await test_screen_content(
+    browser,
+    "renders screen with defined dimensions",
+    // Expected selectors:
+    [`div.main-content[style*='width: 100px;']`]
+  );
+  browser.closeBrowser();
+});
+
+/**
  * Test rendering a screen with a dismiss button
  */
 add_task(async function test_aboutwelcome_dismiss_button() {
@@ -263,10 +308,17 @@ add_task(async function test_aboutwelcome_dismiss_button() {
       // Use 2 screens to test that the message is dismissed, not navigated
       [1, 2].map(i =>
         makeTestContent(`TEST_DISMISS_STEP_${i}`, {
-          dismiss_button: { action: { dismiss: true } },
+          dismiss_button: { action: { dismiss: true }, size: "small" },
         })
       )
     )
+  );
+
+  await test_screen_content(
+    browser,
+    "renders screen with dismiss button",
+    // Expected selectors:
+    ['div.section-main button.dismiss-button[button-size="small"]']
   );
 
   // Click dismiss button
@@ -316,7 +368,7 @@ add_task(async function test_aboutwelcome_split_position() {
     // Expected styles:
     {
       // Override default text-link styles
-      "background-color": "rgba(21, 20, 26, 0.07)",
+      "background-color": "color(srgb 0.0823529 0.0784314 0.101961 / 0.07)",
       color: "rgb(21, 20, 26)",
     }
   );
@@ -491,7 +543,7 @@ add_task(async function test_aboutwelcome_with_progress_bar() {
     // Progress bar should have a gray background.
     is(
       content.window.getComputedStyle(progressBar)["background-color"],
-      "rgba(21, 20, 26, 0.25)",
+      "color(srgb 0.0823529 0.0784314 0.101961 / 0.25)",
       "Correct progress bar background"
     );
 
@@ -574,7 +626,10 @@ add_task(async function test_aboutwelcome_logo_selection() {
     reducedMotionImageURL: "chrome://branding/content/icon64.png",
     darkModeReducedMotionImageURL: "chrome://branding/content/icon128.png",
     alt: "TEST_LOGO_SELECTION_ALT",
+    width: "16px",
     height: "16px",
+    marginBlock: "0px",
+    marginInline: "0px",
   });
   // Test a screen config with no animated/static logos
   await testAboutWelcomeLogoFor({

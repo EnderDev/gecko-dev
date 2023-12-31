@@ -39,6 +39,7 @@
 #include "mozilla/RelativeLuminanceUtils.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/TelemetryScalarEnums.h"
+#include "mozilla/Try.h"
 
 #include "gfxPlatform.h"
 #include "gfxFont.h"
@@ -149,11 +150,6 @@ static const char sIntPrefs[][45] = {
     "accessibility.tabfocus",  // Weird one...
     "ui.chosenMenuItemsShouldBlink",
     "ui.windowsAccentColorInTitlebar",
-    "ui.windowsDefaultTheme",
-    "ui.dwmCompositor",
-    "ui.windowsClassic",
-    "ui.windowsGlass",
-    "ui.macGraphiteTheme",
     "ui.macBigSurTheme",
     "ui.macRTL",
     "ui.alertNotificationOrigin",
@@ -192,6 +188,7 @@ static const char sIntPrefs[][45] = {
     "ui.dynamicRange",
     "ui.videoDynamicRange",
     "ui.panelAnimations",
+    "ui.hideCursorWhileTyping",
 };
 
 static_assert(ArrayLength(sIntPrefs) == size_t(LookAndFeel::IntID::End),
@@ -251,12 +248,10 @@ static const char sColorPrefs[][41] = {
     "ui.window",
     "ui.windowframe",
     "ui.windowtext",
-    "ui.-moz-buttondefault",
     "ui.-moz-default-color",
     "ui.-moz-default-background-color",
     "ui.-moz-dialog",
     "ui.-moz-dialogtext",
-    "ui.-moz-dragtargetzone",
     "ui.-moz-cellhighlight",
     "ui.-moz_cellhighlighttext",
     "ui.selecteditem",
@@ -266,35 +261,23 @@ static const char sColorPrefs[][41] = {
     "ui.-moz_menuhover",
     "ui.-moz_menuhoverdisabled",
     "ui.-moz_menuhovertext",
-    "ui.-moz_menubartext",
     "ui.-moz_menubarhovertext",
     "ui.-moz_eventreerow",
     "ui.-moz_oddtreerow",
     "ui.-moz-buttonactivetext",
     "ui.-moz-buttonactiveface",
     "ui.-moz-buttondisabledface",
-    "ui.-moz_mac_chrome_active",
-    "ui.-moz_mac_chrome_inactive",
+    "ui.-moz-headerbar",
+    "ui.-moz-headerbartext",
+    "ui.-moz-headerbarinactive",
+    "ui.-moz-headerbarinactivetext",
     "ui.-moz-mac-defaultbuttontext",
     "ui.-moz-mac-focusring",
-    "ui.-moz-mac-menuselect",
-    "ui.-moz-mac-menushadow",
-    "ui.-moz-mac-menutextdisable",
-    "ui.-moz-mac-menutextselect",
     "ui.-moz_mac_disabledtoolbartext",
-    "ui.-moz-mac-secondaryhighlight",
-    "ui.-moz-mac-menupopup",
-    "ui.-moz-mac-menuitem",
-    "ui.-moz-mac-active-menuitem",
-    "ui.-moz-mac-source-list",
-    "ui.-moz-mac-source-list-selection",
-    "ui.-moz-mac-active-source-list-selection",
-    "ui.-moz-mac-tooltip",
+    "ui.-moz-mac-sidebar",
     "ui.accentcolor",
     "ui.accentcolortext",
     "ui.-moz-autofill-background",
-    "ui.-moz-win-mediatext",
-    "ui.-moz-win-communicationstext",
     "ui.-moz-nativehyperlinktext",
     "ui.-moz-nativevisitedhyperlinktext",
     "ui.-moz-hyperlinktext",
@@ -488,34 +471,17 @@ void nsXPLookAndFeel::OnPrefChanged(const char* aPref, void* aClosure) {
   }
 }
 
-bool LookAndFeel::WindowsNonNativeMenusEnabled() {
-  switch (StaticPrefs::browser_display_windows_non_native_menus()) {
-    case 0:
-      return false;
-    case 1:
-      return true;
-    default:
-#ifdef XP_WIN
-      return IsWin10OrLater();
-#else
-      return false;
-#endif
-  }
-}
-
 static constexpr struct {
   nsLiteralCString mName;
   widget::ThemeChangeKind mChangeKind =
       widget::ThemeChangeKind::MediaQueriesOnly;
 } kMediaQueryPrefs[] = {
-    {"browser.display.windows.non_native_menus"_ns},
     // Affects whether standins are used for the accent color.
     {"widget.non-native-theme.use-theme-accent"_ns,
      widget::ThemeChangeKind::Style},
-    // These two affect system colors on Windows.
+    // These three affect system colors on Windows.
     {"widget.windows.uwp-system-colors.enabled"_ns,
      widget::ThemeChangeKind::Style},
-    // These two affect system colors on Windows.
     {"widget.windows.uwp-system-colors.highlight-accent"_ns,
      widget::ThemeChangeKind::Style},
     // Affects env().
@@ -531,9 +497,6 @@ static constexpr struct {
     // need to re-layout.
     {"browser.theme.toolbar-theme"_ns, widget::ThemeChangeKind::AllBits},
     {"browser.theme.content-theme"_ns},
-    {"mathml.legacy_maction_and_semantics_implementations.disabled"_ns},
-    {"mathml.ms_lquote_rquote_attributes.disabled"_ns},
-    {"dom.element.popover.enabled"_ns},
 };
 
 // Read values from the user's preferences.
@@ -547,8 +510,6 @@ void nsXPLookAndFeel::Init() {
   // protects against some other process writing to our static variables.
   sInitialized = true;
 
-  RecomputeColorSchemes();
-
   if (XRE_IsParentProcess()) {
     nsLayoutUtils::RecomputeSmoothScrollDefault();
   }
@@ -561,7 +522,7 @@ void nsXPLookAndFeel::Init() {
   // that start with that string.
   Preferences::RegisterCallback(OnPrefChanged, "accessibility.tabfocus");
 
-  for (auto& pref : kMediaQueryPrefs) {
+  for (const auto& pref : kMediaQueryPrefs) {
     Preferences::RegisterCallback(
         [](const char*, void* aChangeKind) {
           auto changeKind =
@@ -652,9 +613,15 @@ nscolor nsXPLookAndFeel::GetStandinForNativeColor(ColorID aID,
       COLOR(SpellCheckerUnderline, 0xff, 0x00, 0x00)
       COLOR(TextSelectDisabledBackground, 0xaa, 0xaa, 0xaa)
 
-      // CSS 2 colors:
+      // Titlebar colors
       COLOR(Activeborder, 0xB4, 0xB4, 0xB4)
-      COLOR(Activecaption, 0x99, 0xB4, 0xD1)
+      COLOR(Inactiveborder, 0xB4, 0xB4, 0xB4)
+      COLOR(Activecaption, 0xF0, 0xF0, 0xF4)
+      COLOR(Inactivecaption, 0xF0, 0xF0, 0xF4)
+      COLOR(Captiontext, 0x00, 0x00, 0x00)
+      COLOR(Inactivecaptiontext, 0x00, 0x00, 0x00)
+
+      // CSS 2 colors:
       COLOR(Appworkspace, 0xAB, 0xAB, 0xAB)
       COLOR(Background, 0x00, 0x00, 0x00)
       COLOR(Buttonhighlight, 0xFF, 0xFF, 0xFF)
@@ -670,13 +637,9 @@ nscolor nsXPLookAndFeel::GetStandinForNativeColor(ColorID aID,
       COLOR(Buttontext, 0x00, 0x00, 0x00)
       COLOR(MozComboboxtext, 0x00, 0x00, 0x00)
 
-      COLOR(Captiontext, 0x00, 0x00, 0x00)
       COLOR(Graytext, 0x6D, 0x6D, 0x6D)
       COLOR(Highlight, 0x33, 0x99, 0xFF)
       COLOR(Highlighttext, 0xFF, 0xFF, 0xFF)
-      COLOR(Inactiveborder, 0xF4, 0xF7, 0xFC)
-      COLOR(Inactivecaption, 0xBF, 0xCD, 0xDB)
-      COLOR(Inactivecaptiontext, 0x43, 0x4E, 0x54)
       COLOR(Infobackground, 0xFF, 0xFF, 0xE1)
       COLOR(Infotext, 0x00, 0x00, 0x00)
       COLOR(Menu, 0xF0, 0xF0, 0xF0)
@@ -693,7 +656,6 @@ nscolor nsXPLookAndFeel::GetStandinForNativeColor(ColorID aID,
       COLOR(Window, 0xFF, 0xFF, 0xFF)
       COLOR(Windowframe, 0x64, 0x64, 0x64)
       COLOR(Windowtext, 0x00, 0x00, 0x00)
-      COLOR(MozButtondefault, 0x69, 0x69, 0x69)
       COLOR(Field, 0xFF, 0xFF, 0xFF)
       COLORA(MozDisabledfield, 0xFF, 0xFF, 0xFF, 128)
       COLOR(Fieldtext, 0x00, 0x00, 0x00)
@@ -701,7 +663,6 @@ nscolor nsXPLookAndFeel::GetStandinForNativeColor(ColorID aID,
       COLOR(MozDialogtext, 0x00, 0x00, 0x00)
       COLOR(MozColheadertext, 0x00, 0x00, 0x00)
       COLOR(MozColheaderhovertext, 0x00, 0x00, 0x00)
-      COLOR(MozDragtargetzone, 0xFF, 0xFF, 0xFF)
       COLOR(MozCellhighlight, 0xF0, 0xF0, 0xF0)
       COLOR(MozCellhighlighttext, 0x00, 0x00, 0x00)
       COLOR(Selecteditem, 0x33, 0x99, 0xFF)
@@ -712,30 +673,13 @@ nscolor nsXPLookAndFeel::GetStandinForNativeColor(ColorID aID,
       COLOR(MozButtonactivetext, 0x00, 0x00, 0x00)
       COLOR(MozMenuhover, 0x33, 0x99, 0xFF)
       COLOR(MozMenuhovertext, 0x00, 0x00, 0x00)
-      COLOR(MozMenubartext, 0x00, 0x00, 0x00)
       COLOR(MozMenubarhovertext, 0x00, 0x00, 0x00)
       COLOR(MozMenuhoverdisabled, 0xF0, 0xF0, 0xF0)
       COLOR(MozEventreerow, 0xFF, 0xFF, 0xFF)
       COLOR(MozOddtreerow, 0xFF, 0xFF, 0xFF)
-      COLOR(MozMacChromeActive, 0xB2, 0xB2, 0xB2)
-      COLOR(MozMacChromeInactive, 0xE1, 0xE1, 0xE1)
       COLOR(MozMacFocusring, 0x60, 0x9D, 0xD7)
-      COLOR(MozMacMenuselect, 0x38, 0x75, 0xD7)
-      COLOR(MozMacMenushadow, 0xA3, 0xA3, 0xA3)
-      COLOR(MozMacMenutextdisable, 0x88, 0x88, 0x88)
-      COLOR(MozMacMenutextselect, 0xFF, 0xFF, 0xFF)
       COLOR(MozMacDisabledtoolbartext, 0x3F, 0x3F, 0x3F)
-      COLOR(MozMacSecondaryhighlight, 0xD4, 0xD4, 0xD4)
-      COLOR(MozMacMenupopup, 0xe6, 0xe6, 0xe6)
-      COLOR(MozMacMenuitem, 0xe6, 0xe6, 0xe6)
-      COLOR(MozMacActiveMenuitem, 0x0a, 0x64, 0xdc)
-      COLOR(MozMacSourceList, 0xf7, 0xf7, 0xf7)
-      COLOR(MozMacSourceListSelection, 0xc8, 0xc8, 0xc8)
-      COLOR(MozMacActiveSourceListSelection, 0x0a, 0x64, 0xdc)
-      COLOR(MozMacTooltip, 0xf7, 0xf7, 0xf7)
       // Seems to be the default color (hardcoded because of bug 1065998)
-      COLOR(MozWinMediatext, 0xFF, 0xFF, 0xFF)
-      COLOR(MozWinCommunicationstext, 0xFF, 0xFF, 0xFF)
       COLOR(MozNativehyperlinktext, 0x00, 0x66, 0xCC)
       COLOR(MozNativevisitedhyperlinktext, 0x55, 0x1A, 0x8B)
     default:
@@ -788,6 +732,11 @@ Maybe<nscolor> nsXPLookAndFeel::GenericDarkColor(ColorID aID) {
     case ColorID::MozComboboxtext:
     case ColorID::MozButtonhovertext:
     case ColorID::MozButtonactivetext:
+    case ColorID::MozHeaderbartext:
+    case ColorID::MozHeaderbarinactivetext:
+    case ColorID::Captiontext:
+    case ColorID::Inactivecaptiontext:  // TODO(emilio): Maybe make
+                                        // Inactivecaptiontext Graytext?
       color = kWindowText;
       break;
     case ColorID::Buttonshadow:
@@ -849,6 +798,16 @@ Maybe<nscolor> nsXPLookAndFeel::GenericDarkColor(ColorID aID) {
       // (browser.active_color.dark). See bug 1755564 for some analysis and
       // other options too.
       color = NS_RGB(0xff, 0x66, 0x66);
+      break;
+    case ColorID::Activeborder:
+    case ColorID::Inactiveborder:
+      color = NS_RGB(57, 57, 57);
+      break;
+    case ColorID::MozHeaderbar:
+    case ColorID::MozHeaderbarinactive:
+    case ColorID::Activecaption:
+    case ColorID::Inactivecaption:
+      color = NS_RGB(28, 27, 34);
       break;
     default:
       return Nothing();
@@ -1172,7 +1131,6 @@ void nsXPLookAndFeel::RefreshImpl() {
   sFontCache.Clear();
   sFloatCache.Clear();
   sIntCache.Clear();
-  RecomputeColorSchemes();
 
   if (XRE_IsParentProcess()) {
     nsLayoutUtils::RecomputeSmoothScrollDefault();
@@ -1204,6 +1162,7 @@ void nsXPLookAndFeel::RecordTelemetry() {
 
 namespace mozilla {
 
+bool LookAndFeel::sGlobalThemeChanged;
 static widget::ThemeChangeKind sGlobalThemeChangeKind{0};
 
 void LookAndFeel::NotifyChangedAllWindows(widget::ThemeChangeKind aKind) {
@@ -1240,7 +1199,7 @@ void LookAndFeel::DoHandleGlobalThemeChange() {
   LookAndFeel::Refresh();
 
   // Reset default background and foreground colors for the document since they
-  // may be using system colors.
+  // may be using system colors, color scheme, etc.
   PreferenceSheet::Refresh();
 
   // Vector images (SVG) may be using theme colors so we discard all cached
@@ -1306,11 +1265,6 @@ static bool ShouldUseStandinsForNativeColorForNonNativeTheme(
          !aPrefs.NonNativeThemeShouldBeHighContrast();
 }
 
-ColorScheme LookAndFeel::sChromeColorScheme;
-ColorScheme LookAndFeel::sContentColorScheme;
-bool LookAndFeel::sColorSchemeInitialized;
-bool LookAndFeel::sGlobalThemeChanged;
-
 bool LookAndFeel::IsDarkColor(nscolor aColor) {
   // Given https://www.w3.org/TR/WCAG20/#contrast-ratiodef, this is the
   // threshold that tells us whether contrast is better against white or black.
@@ -1333,75 +1287,13 @@ bool LookAndFeel::IsDarkColor(nscolor aColor) {
          RelativeLuminanceUtils::Compute(aColor) < kThreshold;
 }
 
-auto LookAndFeel::ColorSchemeSettingForChrome() -> ChromeColorSchemeSetting {
-  switch (StaticPrefs::browser_theme_toolbar_theme()) {
-    case 0:  // Dark
-      return ChromeColorSchemeSetting::Dark;
-    case 1:  // Light
-      return ChromeColorSchemeSetting::Light;
-    default:
-      return ChromeColorSchemeSetting::System;
-  }
-}
-
-ColorScheme LookAndFeel::ThemeDerivedColorSchemeForContent() {
-  switch (StaticPrefs::browser_theme_content_theme()) {
-    case 0:  // Dark
-      return ColorScheme::Dark;
-    case 1:  // Light
-      return ColorScheme::Light;
-    default:
-      return SystemColorScheme();
-  }
-}
-
-void LookAndFeel::RecomputeColorSchemes() {
-  sColorSchemeInitialized = true;
-
-  sChromeColorScheme = [] {
-    switch (ColorSchemeSettingForChrome()) {
-      case ChromeColorSchemeSetting::Light:
-        return ColorScheme::Light;
-      case ChromeColorSchemeSetting::Dark:
-        return ColorScheme::Dark;
-      case ChromeColorSchemeSetting::System:
-        break;
-    }
-    return SystemColorScheme();
-  }();
-
-  sContentColorScheme = [] {
-    switch (StaticPrefs::layout_css_prefers_color_scheme_content_override()) {
-      case 0:
-        return ColorScheme::Dark;
-      case 1:
-        return ColorScheme::Light;
-      default:
-        return ThemeDerivedColorSchemeForContent();
-    }
-  }();
-}
-
 ColorScheme LookAndFeel::ColorSchemeForStyle(
     const dom::Document& aDoc, const StyleColorSchemeFlags& aFlags,
     ColorSchemeMode aMode) {
-  using Choice = PreferenceSheet::Prefs::ColorSchemeChoice;
-
   const auto& prefs = PreferenceSheet::PrefsFor(aDoc);
-  switch (prefs.mColorSchemeChoice) {
-    case Choice::Standard:
-      break;
-    case Choice::UserPreferred:
-      return aDoc.PreferredColorScheme();
-    case Choice::Light:
-      return ColorScheme::Light;
-    case Choice::Dark:
-      return ColorScheme::Dark;
-  }
-
   StyleColorSchemeFlags style(aFlags);
   if (!style) {
-    style.bits = aDoc.GetColorSchemeBits();
+    style._0 = aDoc.GetColorSchemeBits();
   }
   const bool supportsDark = bool(style & StyleColorSchemeFlags::DARK);
   const bool supportsLight = bool(style & StyleColorSchemeFlags::LIGHT);
@@ -1414,13 +1306,13 @@ ColorScheme LookAndFeel::ColorSchemeForStyle(
     // the content supports.
     return supportsDark ? ColorScheme::Dark : ColorScheme::Light;
   }
-  // No value specified. Chrome docs always supports both, so use the preferred
-  // color-scheme.
-  if (aMode == ColorSchemeMode::Preferred ||
-      nsContentUtils::IsChromeDoc(&aDoc)) {
+  // No value specified. Chrome docs, and forced-colors mode always supports
+  // both, so use the preferred color-scheme.
+  if (aMode == ColorSchemeMode::Preferred || aDoc.ChromeRulesEnabled() ||
+      !prefs.mUseDocumentColors) {
     return aDoc.PreferredColorScheme();
   }
-  // Default content to light.
+  // Otherwise default content to light.
   return ColorScheme::Light;
 }
 
@@ -1563,9 +1455,8 @@ Modifiers LookAndFeel::GetMenuAccessKeyModifiers() {
     case dom::KeyboardEvent_Binding::DOM_VK_ALT:
       return MODIFIER_ALT;
     case dom::KeyboardEvent_Binding::DOM_VK_META:
-      return MODIFIER_META;
     case dom::KeyboardEvent_Binding::DOM_VK_WIN:
-      return MODIFIER_OS;
+      return MODIFIER_META;
     default:
       return 0;
   }

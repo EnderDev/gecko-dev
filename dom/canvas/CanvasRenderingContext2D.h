@@ -27,6 +27,7 @@
 #include "gfxUtils.h"
 #include "nsICanvasRenderingContextInternal.h"
 #include "nsColor.h"
+#include "nsRFPService.h"
 #include "nsIFrame.h"
 
 class gfxFontGroup;
@@ -48,9 +49,9 @@ enum class LayersBackend : int8_t;
 
 namespace dom {
 class
-    HTMLImageElementOrSVGImageElementOrHTMLCanvasElementOrHTMLVideoElementOrOffscreenCanvasOrImageBitmap;
+    HTMLImageElementOrSVGImageElementOrHTMLCanvasElementOrHTMLVideoElementOrOffscreenCanvasOrImageBitmapOrVideoFrame;
 using CanvasImageSource =
-    HTMLImageElementOrSVGImageElementOrHTMLCanvasElementOrHTMLVideoElementOrOffscreenCanvasOrImageBitmap;
+    HTMLImageElementOrSVGImageElementOrHTMLCanvasElementOrHTMLVideoElementOrOffscreenCanvasOrImageBitmapOrVideoFrame;
 class ImageBitmap;
 class ImageData;
 class UTF8StringOrCanvasGradientOrCanvasPattern;
@@ -95,6 +96,8 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
     // corresponds to changes to the old bindings made in bug 745025
     return mCanvasElement->GetOriginalCanvas();
   }
+
+  void GetContextAttributes(CanvasRenderingContext2DSettings& aSettings) const;
 
   void OnMemoryPressure() override;
   void OnBeforePaintTransaction() override;
@@ -315,6 +318,24 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
     }
   }
 
+  CanvasFontStretch FontStretch() { return CurrentState().fontStretch; }
+  void SetFontStretch(const CanvasFontStretch& aFontStretch) {
+    if (CurrentState().fontStretch != aFontStretch) {
+      CurrentState().fontStretch = aFontStretch;
+      CurrentState().fontGroup = nullptr;
+    }
+  }
+
+  CanvasFontVariantCaps FontVariantCaps() {
+    return CurrentState().fontVariantCaps;
+  }
+  void SetFontVariantCaps(const CanvasFontVariantCaps& aFontVariantCaps) {
+    if (CurrentState().fontVariantCaps != aFontVariantCaps) {
+      CurrentState().fontVariantCaps = aFontVariantCaps;
+      CurrentState().fontGroup = nullptr;
+    }
+  }
+
   CanvasTextRendering TextRendering() { return CurrentState().textRendering; }
   void SetTextRendering(const CanvasTextRendering& aTextRendering) {
     CurrentState().textRendering = aTextRendering;
@@ -328,6 +349,13 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
   void EnsureCapped() {
     if (mPathPruned) {
       mPathBuilder->LineTo(mPathBuilder->CurrentPoint());
+      mPathPruned = false;
+    }
+  }
+
+  void EnsureActivePath() {
+    if (mPathPruned && !mPathBuilder->IsActive()) {
+      mPathBuilder->MoveTo(mPathBuilder->CurrentPoint());
       mPathPruned = false;
     }
   }
@@ -370,6 +398,7 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
       mPathPruned = true;
       return;
     }
+    EnsureActivePath();
     mPathBuilder->QuadraticBezierTo(cp1, cp2);
     mPathPruned = false;
   }
@@ -503,6 +532,8 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
   enum class Style : uint8_t { STROKE = 0, FILL, MAX };
 
   void LineTo(const mozilla::gfx::Point& aPoint) {
+    mFeatureUsage |= CanvasFeatureUsage::LineTo;
+
     if (!aPoint.IsFinite()) {
       return;
     }
@@ -510,6 +541,7 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
       mPathPruned = true;
       return;
     }
+    EnsureActivePath();
     mPathBuilder->LineTo(aPoint);
     mPathPruned = false;
   }
@@ -525,6 +557,7 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
       mPathPruned = true;
       return;
     }
+    EnsureActivePath();
     mPathBuilder->BezierTo(aCP1, aCP2, aCP3);
     mPathPruned = false;
   }
@@ -537,9 +570,12 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
   /**
    * Update CurrentState().filter with the filter description for
    * CurrentState().filterChain.
-   * Flushes the PresShell, so the world can change if you call this function.
+   * Flushes the PresShell if aFlushIsNeeded is true, so the world can change
+   * if you call this function.
    */
-  MOZ_CAN_RUN_SCRIPT_BOUNDARY void UpdateFilter();
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY void UpdateFilter(bool aFlushIfNeeded);
+
+  CanvasFeatureUsage FeatureUsage() const { return mFeatureUsage; }
 
  protected:
   /**
@@ -623,6 +659,12 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
   // Clears the target and updates mOpaque based on mOpaqueAttrValue and
   // mContextAttributesHasAlpha.
   void UpdateIsOpaque();
+
+  // Shared implementation for Stroke() and Stroke(CanvasPath) methods.
+  void StrokeImpl(const mozilla::gfx::Path& aPath);
+
+  // Shared implementation for Fill() methods.
+  void FillImpl(const mozilla::gfx::Path& aPath);
 
   /**
    * Creates the error target, if it doesn't exist
@@ -742,6 +784,8 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
 
     return CurrentState().font;
   }
+
+  bool GetEffectiveWillReadFrequently() const;
 
   // Member vars
   int32_t mWidth, mHeight;
@@ -877,7 +921,7 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
   const gfx::FilterDescription& EnsureUpdatedFilter() {
     bool isWriteOnly = mCanvasElement && mCanvasElement->IsWriteOnly();
     if (CurrentState().filterSourceGraphicTainted != isWriteOnly) {
-      UpdateFilter();
+      UpdateFilter(/* aFlushIfNeeded = */ true);
       EnsureTarget();
     }
     MOZ_ASSERT(CurrentState().filterSourceGraphicTainted == isWriteOnly);
@@ -890,10 +934,11 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
 
   // text
 
+ public:
+  gfxFontGroup* GetCurrentFontStyle();
+
  protected:
   enum class TextDrawOperation : uint8_t { FILL, STROKE, MEASURE };
-
-  gfxFontGroup* GetCurrentFontStyle();
 
   /**
    * Implementation of the fillText, strokeText, and measure functions with
@@ -961,6 +1006,8 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
     CanvasTextBaseline textBaseline = CanvasTextBaseline::Alphabetic;
     CanvasDirection textDirection = CanvasDirection::Inherit;
     CanvasFontKerning fontKerning = CanvasFontKerning::Auto;
+    CanvasFontStretch fontStretch = CanvasFontStretch::Normal;
+    CanvasFontVariantCaps fontVariantCaps = CanvasFontVariantCaps::Normal;
     CanvasTextRendering textRendering = CanvasTextRendering::Auto;
 
     gfx::Float letterSpacing = 0.0f;
@@ -1086,6 +1133,10 @@ class CanvasRenderingContext2D : public nsICanvasRenderingContextInternal,
 
   bool mWriteOnly;
   bool mClipsNeedConverting = false;
+
+  uint8_t mFillTextCalls = 0;
+  // Flags used by the fingerprinting detection heuristic
+  CanvasFeatureUsage mFeatureUsage = CanvasFeatureUsage::None;
 
   virtual void AddZoneWaitingForGC();
   virtual void AddAssociatedMemory();

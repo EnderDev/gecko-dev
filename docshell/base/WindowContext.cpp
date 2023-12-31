@@ -13,11 +13,13 @@
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/UserActivationIPCUtils.h"
 #include "mozilla/PermissionDelegateIPCUtils.h"
+#include "mozilla/RFPTargetIPCUtils.h"
 #include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StaticPtr.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "nsGlobalWindowInner.h"
 #include "nsIScriptError.h"
+#include "nsIWebProgressListener.h"
 #include "nsIXULRuntime.h"
 #include "nsRefPtrHashtable.h"
 #include "nsContentUtils.h"
@@ -227,8 +229,20 @@ bool WindowContext::CanSet(FieldIndex<IDX_IsThirdPartyTrackingResourceWindow>,
   return CheckOnlyOwningProcessCanSet(aSource);
 }
 
+bool WindowContext::CanSet(FieldIndex<IDX_UsingStorageAccess>,
+                           const bool& aUsingStorageAccess,
+                           ContentParent* aSource) {
+  return CheckOnlyOwningProcessCanSet(aSource);
+}
+
 bool WindowContext::CanSet(FieldIndex<IDX_ShouldResistFingerprinting>,
                            const bool& aShouldResistFingerprinting,
+                           ContentParent* aSource) {
+  return CheckOnlyOwningProcessCanSet(aSource);
+}
+
+bool WindowContext::CanSet(FieldIndex<IDX_OverriddenFingerprintingSettings>,
+                           const Maybe<RFPTarget>& aValue,
                            ContentParent* aSource) {
   return CheckOnlyOwningProcessCanSet(aSource);
 }
@@ -456,7 +470,8 @@ void WindowContext::AddSecurityState(uint32_t aStateFlags) {
                nsIWebProgressListener::STATE_BLOCKED_MIXED_DISPLAY_CONTENT |
                nsIWebProgressListener::STATE_BLOCKED_MIXED_ACTIVE_CONTENT |
                nsIWebProgressListener::STATE_HTTPS_ONLY_MODE_UPGRADED |
-               nsIWebProgressListener::STATE_HTTPS_ONLY_MODE_UPGRADE_FAILED)) ==
+               nsIWebProgressListener::STATE_HTTPS_ONLY_MODE_UPGRADE_FAILED |
+               nsIWebProgressListener::STATE_HTTPS_ONLY_MODE_UPGRADED_FIRST)) ==
                  aStateFlags,
              "Invalid flags specified!");
 

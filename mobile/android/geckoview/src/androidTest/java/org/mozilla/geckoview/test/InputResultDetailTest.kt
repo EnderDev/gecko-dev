@@ -8,11 +8,8 @@ import org.hamcrest.Matchers.* // ktlint-disable no-wildcard-imports
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.geckoview.GeckoResult
-import org.mozilla.geckoview.GeckoSession
-import org.mozilla.geckoview.GeckoSession.ContentDelegate
 import org.mozilla.geckoview.PanZoomController
 import org.mozilla.geckoview.PanZoomController.InputResultDetail
-import org.mozilla.geckoview.test.rule.GeckoSessionTestRule
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.WithDisplay
 
 @RunWith(AndroidJUnit4::class)
@@ -22,11 +19,8 @@ class InputResultDetailTest : BaseSessionTest() {
 
     private fun setupDocument(documentPath: String) {
         mainSession.loadTestPath(documentPath)
-        sessionRule.waitUntilCalled(object : ContentDelegate {
-            @GeckoSessionTestRule.AssertCalled(count = 1)
-            override fun onFirstContentfulPaint(session: GeckoSession) {
-            }
-        })
+        mainSession.waitForPageStop()
+        mainSession.promiseAllPaintsDone()
         mainSession.flushApzRepaints()
     }
 
@@ -121,13 +115,7 @@ class InputResultDetailTest : BaseSessionTest() {
                             PanZoomController.SCROLLABLE_FLAG_NONE
                         }
 
-                        // FIXME: There are a couple of bugs here:
-                        //  1. In the case where touch-action allows the scrolling, the
-                        //     overscroll directions shouldn't depend on the presence of
-                        //     an event handler, but they do.
-                        //  2. In the case where touch-action doesn't allow the scrolling,
-                        //     the overscroll directions should probably be NONE.
-                        var expectedOverscrollDirections = if (touchAction != "none" && !scrollable && event) {
+                        var expectedOverscrollDirections = if (touchAction == "none") {
                             PanZoomController.OVERSCROLL_FLAG_NONE
                         } else {
                             (PanZoomController.OVERSCROLL_FLAG_HORIZONTAL or PanZoomController.OVERSCROLL_FLAG_VERTICAL)
@@ -446,6 +434,10 @@ class InputResultDetailTest : BaseSessionTest() {
             """.trimIndent(),
         )
 
+        // Explicitly call `waitForRoundTrip()` to make sure the above event listeners
+        // have set up in the content.
+        mainSession.waitForRoundTrip()
+
         mainSession.flushApzRepaints()
 
         val downTime = SystemClock.uptimeMillis()
@@ -497,5 +489,61 @@ class InputResultDetailTest : BaseSessionTest() {
         )
 
         mainSession.panZoomController.onTouchEvent(up)
+    }
+
+    @WithDisplay(width = 100, height = 100)
+    @Test
+    fun testTouchCancelBeforeFirstTouchMove() {
+        setupDocument(ROOT_100VH_HTML_PATH)
+
+        // Setup a touchmove event listener preventing scrolling.
+        mainSession.evaluateJS(
+            """
+            window.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+            }, { passive: false });
+            """.trimIndent(),
+        )
+
+        // Explicitly call `waitForRoundTrip()` to make sure the above event listener
+        // has been set up in the content.
+        mainSession.waitForRoundTrip()
+
+        mainSession.flushApzRepaints()
+
+        // Send a touchstart. The result will not be produced yet because
+        // we will wait for the first touchmove.
+        val downTime = SystemClock.uptimeMillis()
+        val down = MotionEvent.obtain(
+            downTime,
+            SystemClock.uptimeMillis(),
+            MotionEvent.ACTION_DOWN,
+            50f,
+            50f,
+            0,
+        )
+        val result = mainSession.panZoomController.onTouchEventForDetailResult(down)
+
+        // Before any touchmove, send a touchcancel.
+        val cancel = MotionEvent.obtain(
+            downTime,
+            SystemClock.uptimeMillis(),
+            MotionEvent.ACTION_CANCEL,
+            50f,
+            50f,
+            0,
+        )
+        mainSession.panZoomController.onTouchEvent(cancel)
+
+        // Check that the touchcancel results in the same response as if
+        // the touchmove was prevented.
+        val value = sessionRule.waitForResult(result)
+        assertResultDetail(
+            "testTouchCancelBeforeFirstTouchMove",
+            value,
+            PanZoomController.INPUT_RESULT_HANDLED_CONTENT,
+            PanZoomController.SCROLLABLE_FLAG_NONE,
+            (PanZoomController.OVERSCROLL_FLAG_HORIZONTAL or PanZoomController.OVERSCROLL_FLAG_VERTICAL),
+        )
     }
 }

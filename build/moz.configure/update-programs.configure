@@ -4,6 +4,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+
 # Updater
 # ==============================================================
 @depends(build_project)
@@ -182,7 +183,10 @@ set_config("MOZ_DEFAULT_BROWSER_AGENT", default_agent_flag)
 # ==============================================================================
 @depends(target, build_project)
 def notification_server_default(target, build_project):
-    return target.os == "WINNT" and build_project == "browser"
+    return target.os == "WINNT" and build_project in (
+        "browser",
+        "comm/mail",
+    )
 
 
 option(

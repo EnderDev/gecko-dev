@@ -15,6 +15,7 @@
 #include "mozilla/layers/LayersTypes.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/RefPtr.h"
+#include "mozilla/UniquePtr.h"
 #include "nsCycleCollectionParticipant.h"
 
 struct JSContext;
@@ -124,7 +125,7 @@ class OffscreenCanvas final : public DOMEventTargetHelper,
   // on worker thread.
   static bool PrefEnabledOnWorkerThread(JSContext* aCx, JSObject* aObj);
 
-  OffscreenCanvasCloneData* ToCloneData();
+  UniquePtr<OffscreenCanvasCloneData> ToCloneData(JSContext* aCx);
 
   void UpdateDisplayData(const OffscreenCanvasDisplayData& aData);
 
@@ -148,6 +149,8 @@ class OffscreenCanvas final : public DOMEventTargetHelper,
   }
 
   bool MayNeuter() const { return !mNeutered && !mCurrentContext; }
+
+  void SetSize(const nsIntSize& aSize, ErrorResult& aRv);
 
   nsIPrincipal* GetExpandedReader() const { return mExpandedReader; }
 

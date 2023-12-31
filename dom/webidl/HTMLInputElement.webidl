@@ -22,7 +22,14 @@ enum SelectionMode {
 
 interface XULControllers;
 
-[Exposed=Window]
+[Exposed=Window,
+ InstrumentedProps=(capture,
+                    incremental,
+                    onsearch,
+                    popoverTargetAction,
+                    popoverTargetElement,
+                    webkitEntries,
+                    webkitdirectory)]
 interface HTMLInputElement : HTMLElement {
   [HTMLConstructor] constructor();
 
@@ -133,7 +140,7 @@ interface HTMLInputElement : HTMLElement {
   [Throws]
   undefined setSelectionRange(unsigned long start, unsigned long end, optional DOMString direction);
 
-  [Throws, Pref="dom.input.showPicker"]
+  [Throws]
   undefined showPicker();
 
   // also has obsolete members
@@ -230,6 +237,8 @@ HTMLInputElement includes MozEditableElement;
 HTMLInputElement includes MozImageLoadingContent;
 
 HTMLInputElement includes PopoverInvokerElement;
+
+HTMLInputElement includes InvokerElement;
 
 // https://wicg.github.io/entries-api/#idl-index
 partial interface HTMLInputElement {

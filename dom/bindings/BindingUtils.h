@@ -1969,10 +1969,9 @@ void DoTraceSequence(JSTracer* trc, nsTArray<T>& seq);
 
 // Class used to trace sequences, with specializations for various
 // sequence types.
-template <typename T,
-          bool isDictionary = std::is_base_of<DictionaryBase, T>::value,
-          bool isTypedArray = std::is_base_of<AllTypedArraysBase, T>::value,
-          bool isOwningUnion = std::is_base_of<AllOwningUnionBase, T>::value>
+template <typename T, bool isDictionary = is_dom_dictionary<T>,
+          bool isTypedArray = is_dom_typed_array<T>,
+          bool isOwningUnion = is_dom_owning_union<T>>
 class SequenceTracer {
   explicit SequenceTracer() = delete;  // Should never be instantiated
 };
@@ -2954,6 +2953,15 @@ bool CreateGlobal(JSContext* aCx, T* aNative, nsWrapperCache* aCache,
 
     if (!CreateGlobalOptions<T>::PostCreateGlobal(aCx, aGlobal)) {
       return false;
+    }
+
+    // Initializing this at this point for nsGlobalWindowInner makes no sense,
+    // because GetRTPCallerType doesn't return the correct result before
+    // the global is completely initialized with a document.
+    if constexpr (!std::is_base_of_v<nsGlobalWindowInner, T>) {
+      JS::SetRealmReduceTimerPrecisionCallerType(
+          js::GetNonCCWObjectRealm(aGlobal),
+          RTPCallerTypeToToken(aNative->GetRTPCallerType()));
     }
   }
 

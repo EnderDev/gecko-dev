@@ -16,13 +16,13 @@ binutils-2.31.1:
         strip-components: 1
         add-prefix: binutils-source/
 
-binutils-2.36.1:
-    description: binutils 2.36.1 source code
+binutils-2.41:
+    description: binutils 2.41 source code
     fetch:
         type: static-url
-        url: https://ftp.gnu.org/gnu/binutils/binutils-2.36.1.tar.xz
-        sha256: e81d9edf373f193af428a0f256674aea62a9d74dfe93f65192d4eae030b0f3b0
-        size: 22772248
+        url: https://ftp.gnu.org/gnu/binutils/binutils-2.41.tar.xz
+        sha256: ae9a5789e23459e59606e6714723f2d3ffc31c03174191ef0d015bdf06007450
+        size: 26765692
         gpg-signature:
             sig-url: "{url}.sig"
             key-path: build/unix/build-binutils/3A24BC1E8FB409FA9F14371813FCEF89DD9E3C4F.key
@@ -109,7 +109,7 @@ mpc-1.0.3:
     description: mpc 1.0.3 source code
     fetch:
         type: static-url
-        url: http://www.multiprecision.org/downloads/mpc-1.0.3.tar.gz
+        url: https://ftp.gnu.org/gnu/mpc/mpc-1.0.3.tar.gz
         sha256: 617decc6ea09889fb08ede330917a00b16809b8db88c29c31bfbb49cbf88ecc3
         size: 669925
         gpg-signature:
@@ -160,16 +160,13 @@ wix-3.14.0:
         sha256: 923892298f37514622c58cbbd9c2cadf2822d9bb53df8ee83aaeb05280777611
         size: 34664320
 
-zlib-1.2.13:
-    description: zlib 1.2.13 source code
+zlib-1.3:
+    description: zlib 1.3 source code
     fetch:
         type: static-url
-        url: https://zlib.net/zlib-1.2.13.tar.gz
-        sha256: b3a24de97a8fdbc835b9833169501030b8977031bcb54b3b3ac13740f846ab30
-        size: 1497445
-        gpg-signature:
-            sig-url: "{url}.asc"
-            key-path: build/unix/build-gcc/5ED46A6721D365587791E2AA783FCD8E58BCAFBA.key
+        url: https://zlib.net/fossils/zlib-1.3.tar.gz
+        sha256: ff0ba4c292013dbc27530b3a81e1f9a813cd39de01ca5e0f8bf355702efa593e
+        size: 1495873
 
 nsis-3.07:
     description: nsis 3.07 source code
@@ -216,12 +213,12 @@ wine:
         strip-components: 1
         add-prefix: wine-source/
 
-cbindgen-0.24.3:
+cbindgen-0.26.0:
     description: cbindgen source code
     fetch:
         type: git
-        repo: https://github.com/eqrion/cbindgen
-        revision: f43ccfc047a1a160267f32355c5e5e7154a2665a
+        repo: https://github.com/mozilla/cbindgen
+        revision: 703b53c06f9fe2dbc0193d67626558cfa84a0f62
 
 cctools-port:
     description: cctools-port source code
@@ -249,7 +246,7 @@ libdmg-hfsplus:
     fetch:
         type: git
         repo: https://github.com/mozilla/libdmg-hfsplus/
-        revision: 2ee327795680101d36f9700bd0fb618362237718
+        revision: a0a959bd25370c1c0a00c9ec525e3e78285adbf9
 
 hfsplus-tools:
     description: hfstools-plus source code
@@ -293,15 +290,15 @@ grcov:
     fetch:
         type: git
         repo: https://github.com/mozilla/grcov
-        revision: 6ccd61964a0ab60d193394f18c0986eb37d14b9e
+        revision: 322fc39acacd75aca0ff1c0a1ec2a3e91f04011c
 
 sccache:
     description: sccache source code
     fetch:
         type: git
         repo: https://github.com/mozilla/sccache
-        # 0.4.1 release
-        revision: d0d1beadd2739653ed878055215c0d9b7decb3b9
+        # 0.5.4 release + a few patches
+        revision: a21e9f89e161d38cb078fcdb42cdcff1d7c0356b
 
 fxc2:
     description: fxc2 source code
@@ -315,7 +312,7 @@ mingw-w64:
     fetch:
         type: git
         repo: https://git.code.sf.net/p/mingw-w64/mingw-w64
-        revision: f9500e2d85b9400c0982518663660a127e1dc61a
+        revision: 319de5d6e83f23171aea3257b2bd1435d6dbfe89
 
 mingw-w64-trunk:
     description: mingw-w64 master branch source code
@@ -340,12 +337,12 @@ android-ndk-rs:
         repo: https://github.com/jamienicol/android-ndk-rs
         revision: 595f4e14a78371e3ab59b12f7bd8131f2ec5b4a1
 
-clang-7.0:
-    description: clang 7.0.0 source code
+clang-8.0:
+    description: clang 8.0.0 source code
     fetch:
         type: git
         repo: https://github.com/llvm/llvm-project
-        revision: 00b161b8971bc6d3cb55f13502288b8fe0dbaa42
+        revision: d2298e74235598f15594fe2c99bbac870a507c59
 
 clang-14:
     description: clang 14.0.5 source code
@@ -354,12 +351,12 @@ clang-14:
         repo: https://github.com/llvm/llvm-project
         revision: 4bc1d0b51c8e488d78ab69c8b19cfbcd1f7db6a4
 
-clang-16:
-    description: clang 16.0.4 source code
+clang-17:
+    description: clang 17.0.2 source code
     fetch:
         type: git
         repo: https://github.com/llvm/llvm-project
-        revision: ae42196bc493ffe877a7e3dff8be32035dea4d07
+        revision: b2417f51dbbd7435eb3aaf203de24de6754da50e
 
 clang-trunk:
     description: clang main branch source code
@@ -373,13 +370,20 @@ clang-trunk:
 # We build stable rust from source so the resulting compiler acts as a nightly
 # rust compiler, allowing to use unstable features like -Zbuild-std and
 # sanitizers.
-rust-1.69.0:
-    description: Rust 1.69.0 source code
+rust-1.73.0:
+    description: Rust 1.73.0 source code
     fetch:
         type: git
         include-dot-git: true
         repo: https://github.com/rust-lang/rust/
-        revision: 84c898d65adf2f39a5a98507f1fe0ce10a2b8dbc
+        revision: cc66ad468955717ab92600c770da8c1601a4ff33
+
+wasi-sdk-11:
+    description: wasi-sdk-11 source code
+    fetch:
+        type: git
+        repo: https://github.com/WebAssembly/wasi-sdk
+        revision: ceabbfe181599bca83d81e087a229797e472c09c
 
 wasi-sdk:
     description: wasi-sdk-20 source code
@@ -414,7 +418,7 @@ dump-syms:
     fetch:
         type: git
         repo: https://github.com/mozilla/dump_syms/
-        revision: 7cb5f5243f87c562a44259ecb79675ea07842a8f
+        revision: b1951e4ccec48a2e97460a7ec40be35aa79e0037
 
 rust-minidump:
     description: rust-minidump 0.15.2 source code (for minidump-stackwalk)
@@ -428,7 +432,7 @@ fix-stacks:
     fetch:
         type: git
         repo: https://github.com/mozilla/fix-stacks/
-        revision: cfa7048e437c6778b066e7ecb5ce834eb8c3efe7
+        revision: 1fb1bcc8cb4dd65fbe342853954651563a0a88e7
 
 winchecksec:
     description: winchecksec source code
@@ -594,12 +598,12 @@ pkgconf:
         strip-components: 1
         add-prefix: pkgconf/
 
-afl-2.5:
-    description: AFL 2.5x source
+afl-plus-plus-4.0:
+    description: AFL++ 4.0x source
     fetch:
         type: git
-        repo: https://github.com/google/AFL
-        revision: e75894a889fe854c02b9435186bd1e2927d6d490
+        repo: https://github.com/AFLplusplus/AFLplusplus
+        revision: d09950f4bb98431576b872436f0fbf773ab895db
 
 cargo-vet:
     description: cargo-vet source
@@ -613,7 +617,18 @@ symbol-scrapers:
     fetch:
         type: git
         repo: http://github.com/mozilla/symbol-scrapers
-        revision: 91cb0fb5f4a4eb5f64f255d54cd287123758c0f1
+        revision: 6142272b22aea3496fab8ff7a33d92d7c20caa5d
+
+xz-5.4.4:
+    description: xz 5.4.4 source code
+    fetch:
+        type: static-url
+        url: https://tukaani.org/xz/xz-5.4.4.tar.gz
+        sha256: aae39544e254cfd27e942d35a048d592959bd7a79f9a624afb0498bb5613bdf8
+        size: 2874706
+        artifact-name: xz-source.tar.zst
+        strip-components: 1
+        add-prefix: xz-source/
 
 cpython-3.8.10:
     description: cpython 3.8.10 source code

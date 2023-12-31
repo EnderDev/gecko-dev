@@ -96,7 +96,7 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
         &mut self,
         layout: &super::PipelineLayout,
         stages: wgt::ShaderStages,
-        offset: u32,
+        offset_bytes: u32,
         data: &[u32],
     ) {
         todo!()
@@ -246,7 +246,10 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
         todo!()
     }
 
-    unsafe fn begin_compute_pass(&mut self, desc: &crate::ComputePassDescriptor) {
+    unsafe fn begin_compute_pass<'a>(
+        &mut self,
+        desc: &crate::ComputePassDescriptor<'a, super::Api>,
+    ) {
         todo!()
     }
 

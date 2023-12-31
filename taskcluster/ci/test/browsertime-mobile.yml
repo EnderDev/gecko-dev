@@ -16,10 +16,10 @@ job-defaults:
                 by-test-platform:
                     android-hw.*-aarch64.*/.*:
                         index: mobile.v3.firefox-android.apks.fenix-nightly.latest.arm64-v8a
-                        name: build/fenix/arm64-v8a/target.apk
+                        name: build/target.arm64-v8a.apk
                     default:
                         index: mobile.v3.firefox-android.apks.fenix-nightly.latest.armeabi-v7a
-                        name: build/fenix/armeabi-v7a/target.apk
+                        name: build/target.armeabi-v7a.apk
             refbrow:
                 by-test-platform:
                     android-hw.*-aarch64.*/.*:
@@ -57,7 +57,19 @@ job-defaults:
         by-app:
             chrome-m:
                 - .*shippable-qr.*
+            cstm-car-m:
+                - .*shippable-qr.*
             default: []
+    fetches:
+        toolchain:
+            by-app:
+                cstm-car-m:
+                    - android-custom-car
+                    - linux64-minidump-stackwalk
+                    - linux64-fix-stacks
+                default:
+                    - linux64-minidump-stackwalk
+                    - linux64-fix-stacks
 
 browsertime-tp6m:
     <<: &tp6m-defaults
@@ -292,11 +304,11 @@ browsertime-tp6m-profiling:
             android-hw-(a51).*aarch64-shippable-qr/opt: [mozilla-central]
             default: []
 
-browsertime-speedometer-mobile:
+browsertime-benchmark-speedometer-mobile:
     description: Browsertime Speedometer on Android
     run-without-variant: false
     raptor:
-        apps: [geckoview, fenix, chrome-m]
+        apps: [geckoview, fenix, chrome-m, cstm-car-m]
     tier:
         by-app:
             fenix: 1
@@ -314,11 +326,11 @@ browsertime-speedometer-mobile:
         extra-options:
             - --test=speedometer
 
-browsertime-speedometer3-mobile:
+browsertime-benchmark-speedometer3-mobile:
     description: Browsertime Speedometer 3 on Android
     run-without-variant: false
     raptor:
-        apps: [geckoview, fenix, chrome-m]
+        apps: [geckoview, fenix, chrome-m, cstm-car-m]
     tier:
         by-app:
             fenix: 2
@@ -337,7 +349,27 @@ browsertime-speedometer3-mobile:
         extra-options:
             - --test=speedometer3
 
-browsertime-unity-webgl-mobile:
+browsertime-benchmark-motionmark:
+    description: Raptor (browsertime) Motionmark benchmark tests
+    run-without-variant: false
+    raptor:
+        apps: [fenix, chrome-m, geckoview]
+        subtests:
+            - [motionmark-animometer, mm-a]
+            - [motionmark-animometer-ramp, mm-ar]
+            - [motionmark-htmlsuite, mm-h]
+            - [motionmark-htmlsuite-ramp, mm-hr]
+    run-on-projects:
+        by-app:
+            chrome-m: []
+            default:
+                by-test-platform:
+                    android-hw-a51-.*aarch64-shippable-qr.*: [mozilla-central]
+                    default: []
+    treeherder-symbol: Btime()
+    tier: 2
+
+browsertime-benchmark-unity-webgl-mobile:
     description: Browsertime Unity WebGL on Android
     run-without-variant: false
     raptor:

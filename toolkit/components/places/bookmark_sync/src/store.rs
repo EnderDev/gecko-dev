@@ -551,11 +551,6 @@ fn update_local_items_in_places<'t>(
         statement.execute()?;
     }
 
-    // Trigger frecency updates for all new origins.
-    debug!(driver, "Updating origins for new URLs");
-    controller.err_if_aborted()?;
-    db.exec("DELETE FROM moz_updateoriginsinsert_temp")?;
-
     // Build a table of new and updated items.
     debug!(driver, "Staging apply remote item ops");
     for chunk in ops.apply_remote_items.chunks(db.variable_limit()? / 3) {
@@ -746,11 +741,6 @@ fn update_local_items_in_places<'t>(
 
     debug!(driver, "Applying remote items");
     apply_remote_items(db, driver, controller)?;
-
-    // Trigger frecency updates for all affected origins.
-    debug!(driver, "Updating origins for changed URLs");
-    controller.err_if_aborted()?;
-    db.exec("DELETE FROM moz_updateoriginsupdate_temp")?;
 
     // Fires the `applyNewLocalStructure` trigger.
     debug!(driver, "Applying new local structure");
@@ -1104,7 +1094,8 @@ fn stage_items_to_upload(
         "INSERT OR IGNORE INTO itemsToUpload(id, guid, syncChangeCounter,
                                              parentGuid, parentTitle, dateAdded,
                                              type, title, placeId, isQuery, url,
-                                             keyword, position, tagFolderName)
+                                             keyword, position, tagFolderName,
+                                             unknownFields)
          {}
          JOIN itemsToApply n ON n.mergedGuid = b.guid
          WHERE n.localDateAddedMicroseconds < n.remoteDateAddedMicroseconds",
@@ -1118,7 +1109,8 @@ fn stage_items_to_upload(
                                                  parentGuid, parentTitle,
                                                  dateAdded, type, title,
                                                  placeId, isQuery, url, keyword,
-                                                 position, tagFolderName)
+                                                 position, tagFolderName,
+                                                 unknownFields)
              {}
              WHERE b.guid IN ({})",
             UploadItemsFragment("b"),
@@ -1304,10 +1296,12 @@ impl fmt::Display for UploadItemsFragment {
                        (SELECT keyword FROM moz_keywords WHERE place_id = h.id),
                        {0}.position,
                        (SELECT get_query_param(substr(url, 7), 'tag')
-                        WHERE substr(h.url, 1, 6) = 'place:') AS tagFolderName
+                        WHERE substr(h.url, 1, 6) = 'place:') AS tagFolderName,
+                        v.unknownFields
                 FROM moz_bookmarks {0}
                 JOIN moz_bookmarks p ON p.id = {0}.parent
-                LEFT JOIN moz_places h ON h.id = {0}.fk",
+                LEFT JOIN moz_places h ON h.id = {0}.fk
+                LEFT JOIN items v ON v.guid = {0}.guid",
             self.0
         )
     }

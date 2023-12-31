@@ -1,4 +1,4 @@
-// |jit-test| skip-if: !getBuildConfiguration()['decorators']
+// |jit-test| skip-if: !getBuildConfiguration("decorators")
 
 load(libdir + "asserts.js");
 
@@ -52,6 +52,10 @@ class C {
   };
   @dec1 42 = 1;
   @dec2 [43];
+  @dec2 static #x12 = 1;
+  getX12() {
+    return C.#x12;
+  }
 }
 
 
@@ -61,15 +65,36 @@ assertEq(c.x2, 1);
 assertEq(dec2Called, true);
 assertEq(c.x6, 2);
 assertEq(c.x7, 2);
-assertEq(c.x8, 4);
-assertEq(c.x9, 2);
+assertEq(c.x8, 2);
+assertEq(C.x9, 2);
 assertEq(c.getX10(), 2);
 assertEq(c.getX11(), 4);
 assertEq(c[42], 1);
 assertEq(c[43], 2);
+assertEq(c.getX12(), 2);
 
 assertThrowsInstanceOf(() => {
   class D {
     @(() => { return "hello!"; }) f(x) { return x; }
   }
 }, TypeError), "Returning a value other than undefined or a callable throws.";
+
+const decoratorOrder = [];
+function makeOrderedDecorator(order) {
+  return function (value, context) {
+    decoratorOrder.push(order);
+    return value;
+  }
+}
+
+class D {
+  @makeOrderedDecorator(1) @makeOrderedDecorator(2) @makeOrderedDecorator(3)
+  x = 1;
+}
+
+let d = new D();
+assertEq(decoratorOrder.length, 3);
+assertEq(decoratorOrder[0], 3);
+assertEq(decoratorOrder[1], 2);
+assertEq(decoratorOrder[2], 1);
+assertEq(d.x, 1);

@@ -7,6 +7,7 @@
 #include "mozilla/dom/WebGPUBinding.h"
 #include "Adapter.h"
 
+#include <algorithm>
 #include "Device.h"
 #include "Instance.h"
 #include "SupportedFeatures.h"
@@ -126,10 +127,7 @@ static Maybe<ffi::WGPUFeatures> ToWGPUFeatures(
       return Some(WGPUFeatures_RG11B10UFLOAT_RENDERABLE);
 
     case dom::GPUFeatureName::Bgra8unorm_storage:
-#ifdef WGPUFeatures_BGRA8UNORM_STORAGE
-#  error fix todo
-#endif
-      return Nothing();  // TODO
+      return Some(WGPUFeatures_BGRA8UNORM_STORAGE);
 
     case dom::GPUFeatureName::Float32_filterable:
 #ifdef WGPUFeatures_FLOAT32_FILTERABLE
@@ -217,7 +215,7 @@ Adapter::~Adapter() { Cleanup(); }
 void Adapter::Cleanup() {
   if (mValid && mBridge && mBridge->CanSend()) {
     mValid = false;
-    mBridge->SendAdapterDestroy(mId);
+    mBridge->SendAdapterDrop(mId);
   }
 }
 
@@ -407,9 +405,8 @@ already_AddRefed<dom::Promise> Adapter::RequestDevice(
         }
 
         const auto& limit = itr->second;
-        const auto& requestedValue = entry.mValue;
-        const auto supportedValueF64 = GetLimit(*mLimits->mFfi, limit);
-        const auto supportedValue = static_cast<uint64_t>(supportedValueF64);
+        uint64_t requestedValue = entry.mValue;
+        const auto supportedValue = GetLimit(*mLimits->mFfi, limit);
         if (StringBeginsWith(keyU8, "max"_ns)) {
           if (requestedValue > supportedValue) {
             nsPrintfCString msg(
@@ -420,6 +417,9 @@ already_AddRefed<dom::Promise> Adapter::RequestDevice(
             promise->MaybeRejectWithOperationError(msg);
             return;
           }
+          // Clamp to default if lower than default
+          requestedValue =
+              std::max(requestedValue, GetLimit(deviceLimits, limit));
         } else {
           MOZ_ASSERT(StringBeginsWith(keyU8, "min"_ns));
           if (requestedValue < supportedValue) {
@@ -431,16 +431,20 @@ already_AddRefed<dom::Promise> Adapter::RequestDevice(
             promise->MaybeRejectWithOperationError(msg);
             return;
           }
-        }
-        if (StringEndsWith(keyU8, "Alignment"_ns)) {
-          if (!IsPowerOfTwo(requestedValue)) {
-            nsPrintfCString msg(
-                "requestDevice: Request for limit '%s' must be a power of two, "
-                "was %s.",
-                keyU8.get(), std::to_string(requestedValue).c_str());
-            promise->MaybeRejectWithOperationError(msg);
-            return;
+          if (StringEndsWith(keyU8, "Alignment"_ns)) {
+            if (!IsPowerOfTwo(requestedValue)) {
+              nsPrintfCString msg(
+                  "requestDevice: Request for limit '%s' must be a power of "
+                  "two, "
+                  "was %s.",
+                  keyU8.get(), std::to_string(requestedValue).c_str());
+              promise->MaybeRejectWithOperationError(msg);
+              return;
+            }
           }
+          /// Clamp to default if higher than default
+          requestedValue =
+              std::min(requestedValue, GetLimit(deviceLimits, limit));
         }
 
         SetLimit(&deviceLimits, limit, requestedValue);

@@ -280,16 +280,16 @@ impl super::DeviceShared {
         &self,
         buffer: &'a super::Buffer,
         ranges: I,
-    ) -> impl 'a + Iterator<Item = vk::MappedMemoryRange> {
-        let block = buffer.block.lock();
+    ) -> Option<impl 'a + Iterator<Item = vk::MappedMemoryRange>> {
+        let block = buffer.block.as_ref()?.lock();
         let mask = self.private_caps.non_coherent_map_mask;
-        ranges.map(move |range| {
+        Some(ranges.map(move |range| {
             vk::MappedMemoryRange::builder()
                 .memory(*block.memory())
                 .offset((block.offset() + range.start) & !mask)
                 .size((range.end - range.start + mask) & !mask)
                 .build()
-        })
+        }))
     }
 
     unsafe fn free_resources(&self) {
@@ -680,6 +680,17 @@ impl super::Device {
         }
     }
 
+    /// # Safety
+    ///
+    /// - `vk_buffer`'s memory must be managed by the caller
+    /// - Externally imported buffers can't be mapped by `wgpu`
+    pub unsafe fn buffer_from_raw(vk_buffer: vk::Buffer) -> super::Buffer {
+        super::Buffer {
+            raw: vk_buffer,
+            block: None,
+        }
+    }
+
     fn create_shader_module_impl(
         &self,
         spv: &[u32],
@@ -712,7 +723,9 @@ impl super::Device {
                     entry_point: stage.entry_point.to_string(),
                     shader_stage: naga_stage,
                 };
-                let needs_temp_options = !runtime_checks || !binding_map.is_empty();
+                let needs_temp_options = !runtime_checks
+                    || !binding_map.is_empty()
+                    || naga_shader.debug_source.is_some();
                 let mut temp_options;
                 let options = if needs_temp_options {
                     temp_options = self.naga_options.clone();
@@ -720,13 +733,22 @@ impl super::Device {
                         temp_options.bounds_check_policies = naga::proc::BoundsCheckPolicies {
                             index: naga::proc::BoundsCheckPolicy::Unchecked,
                             buffer: naga::proc::BoundsCheckPolicy::Unchecked,
-                            image: naga::proc::BoundsCheckPolicy::Unchecked,
+                            image_load: naga::proc::BoundsCheckPolicy::Unchecked,
+                            image_store: naga::proc::BoundsCheckPolicy::Unchecked,
                             binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
                         };
                     }
                     if !binding_map.is_empty() {
                         temp_options.binding_map = binding_map.clone();
                     }
+
+                    if let Some(ref debug) = naga_shader.debug_source {
+                        temp_options.debug_info = Some(naga::back::spv::DebugInfo {
+                            source_code: &debug.source_code,
+                            file_name: debug.file_name.as_ref().as_ref(),
+                        })
+                    }
+
                     &temp_options
                 } else {
                     &self.naga_options
@@ -868,16 +890,18 @@ impl crate::Device<super::Api> for super::Device {
 
         Ok(super::Buffer {
             raw,
-            block: Mutex::new(block),
+            block: Some(Mutex::new(block)),
         })
     }
     unsafe fn destroy_buffer(&self, buffer: super::Buffer) {
         unsafe { self.shared.raw.destroy_buffer(buffer.raw, None) };
-        unsafe {
-            self.mem_allocator
-                .lock()
-                .dealloc(&*self.shared, buffer.block.into_inner())
-        };
+        if let Some(block) = buffer.block {
+            unsafe {
+                self.mem_allocator
+                    .lock()
+                    .dealloc(&*self.shared, block.into_inner())
+            };
+        }
     }
 
     unsafe fn map_buffer(
@@ -885,48 +909,56 @@ impl crate::Device<super::Api> for super::Device {
         buffer: &super::Buffer,
         range: crate::MemoryRange,
     ) -> Result<crate::BufferMapping, crate::DeviceError> {
-        let size = range.end - range.start;
-        let mut block = buffer.block.lock();
-        let ptr = unsafe { block.map(&*self.shared, range.start, size as usize)? };
-        let is_coherent = block
-            .props()
-            .contains(gpu_alloc::MemoryPropertyFlags::HOST_COHERENT);
-        Ok(crate::BufferMapping { ptr, is_coherent })
+        if let Some(ref block) = buffer.block {
+            let size = range.end - range.start;
+            let mut block = block.lock();
+            let ptr = unsafe { block.map(&*self.shared, range.start, size as usize)? };
+            let is_coherent = block
+                .props()
+                .contains(gpu_alloc::MemoryPropertyFlags::HOST_COHERENT);
+            Ok(crate::BufferMapping { ptr, is_coherent })
+        } else {
+            Err(crate::DeviceError::OutOfMemory)
+        }
     }
     unsafe fn unmap_buffer(&self, buffer: &super::Buffer) -> Result<(), crate::DeviceError> {
-        unsafe { buffer.block.lock().unmap(&*self.shared) };
-        Ok(())
+        if let Some(ref block) = buffer.block {
+            unsafe { block.lock().unmap(&*self.shared) };
+            Ok(())
+        } else {
+            Err(crate::DeviceError::OutOfMemory)
+        }
     }
 
     unsafe fn flush_mapped_ranges<I>(&self, buffer: &super::Buffer, ranges: I)
     where
         I: Iterator<Item = crate::MemoryRange>,
     {
-        let vk_ranges = self.shared.make_memory_ranges(buffer, ranges);
-
-        unsafe {
-            self.shared
-                .raw
-                .flush_mapped_memory_ranges(
-                    &smallvec::SmallVec::<[vk::MappedMemoryRange; 32]>::from_iter(vk_ranges),
-                )
+        if let Some(vk_ranges) = self.shared.make_memory_ranges(buffer, ranges) {
+            unsafe {
+                self.shared
+                    .raw
+                    .flush_mapped_memory_ranges(
+                        &smallvec::SmallVec::<[vk::MappedMemoryRange; 32]>::from_iter(vk_ranges),
+                    )
+            }
+            .unwrap();
         }
-        .unwrap();
     }
     unsafe fn invalidate_mapped_ranges<I>(&self, buffer: &super::Buffer, ranges: I)
     where
         I: Iterator<Item = crate::MemoryRange>,
     {
-        let vk_ranges = self.shared.make_memory_ranges(buffer, ranges);
-
-        unsafe {
-            self.shared
-                .raw
-                .invalidate_mapped_memory_ranges(
-                    &smallvec::SmallVec::<[vk::MappedMemoryRange; 32]>::from_iter(vk_ranges),
-                )
+        if let Some(vk_ranges) = self.shared.make_memory_ranges(buffer, ranges) {
+            unsafe {
+                self.shared
+                    .raw
+                    .invalidate_mapped_memory_ranges(&smallvec::SmallVec::<
+                        [vk::MappedMemoryRange; 32],
+                    >::from_iter(vk_ranges))
+            }
+            .unwrap();
         }
-        .unwrap();
     }
 
     unsafe fn create_texture(
@@ -948,11 +980,7 @@ impl crate::Device<super::Api> for super::Device {
             wgt_view_formats = desc.view_formats.clone();
             wgt_view_formats.push(desc.format);
 
-            if self.shared_instance().driver_api_version >= vk::API_VERSION_1_2
-                || self
-                    .enabled_device_extensions()
-                    .contains(&vk::KhrImageFormatListFn::name())
-            {
+            if self.shared.private_caps.image_format_list {
                 vk_view_formats = desc
                     .view_formats
                     .iter()
@@ -1121,7 +1149,7 @@ impl crate::Device<super::Api> for super::Device {
         }
 
         if desc.anisotropy_clamp != 1 {
-            // We only enable anisotropy if it is supported, and wgpu-hal interface guarentees
+            // We only enable anisotropy if it is supported, and wgpu-hal interface guarantees
             // the clamp is in the range [1, 16] which is always supported if anisotropy is.
             vk_info = vk_info
                 .anisotropy_enable(true)
@@ -1166,20 +1194,15 @@ impl crate::Device<super::Api> for super::Device {
             free: Vec::new(),
             discarded: Vec::new(),
             rpass_debug_marker_active: false,
+            end_of_pass_timer_query: None,
         })
     }
     unsafe fn destroy_command_encoder(&self, cmd_encoder: super::CommandEncoder) {
         unsafe {
-            if !cmd_encoder.free.is_empty() {
-                self.shared
-                    .raw
-                    .free_command_buffers(cmd_encoder.raw, &cmd_encoder.free)
-            }
-            if !cmd_encoder.discarded.is_empty() {
-                self.shared
-                    .raw
-                    .free_command_buffers(cmd_encoder.raw, &cmd_encoder.discarded)
-            }
+            // `vkDestroyCommandPool` also frees any command buffers allocated
+            // from that pool, so there's no need to explicitly call
+            // `vkFreeCommandBuffers` on `cmd_encoder`'s `free` and `discarded`
+            // fields.
             self.shared.raw.destroy_command_pool(cmd_encoder.raw, None);
         }
     }
@@ -1500,11 +1523,20 @@ impl crate::Device<super::Api> for super::Device {
                     });
                 }
                 let mut naga_options = self.naga_options.clone();
+                naga_options.debug_info =
+                    naga_shader
+                        .debug_source
+                        .as_ref()
+                        .map(|d| naga::back::spv::DebugInfo {
+                            source_code: d.source_code.as_ref(),
+                            file_name: d.file_name.as_ref().as_ref(),
+                        });
                 if !desc.runtime_checks {
                     naga_options.bounds_check_policies = naga::proc::BoundsCheckPolicies {
                         index: naga::proc::BoundsCheckPolicy::Unchecked,
                         buffer: naga::proc::BoundsCheckPolicy::Unchecked,
-                        image: naga::proc::BoundsCheckPolicy::Unchecked,
+                        image_load: naga::proc::BoundsCheckPolicy::Unchecked,
+                        image_store: naga::proc::BoundsCheckPolicy::Unchecked,
                         binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
                     };
                 }
@@ -1556,7 +1588,7 @@ impl crate::Device<super::Api> for super::Device {
             multiview: desc.multiview,
             ..Default::default()
         };
-        let mut stages = ArrayVec::<_, 2>::new();
+        let mut stages = ArrayVec::<_, { crate::MAX_CONCURRENT_SHADER_STAGES }>::new();
         let mut vertex_buffers = Vec::with_capacity(desc.vertex_buffers.len());
         let mut vertex_attributes = Vec::new();
 
@@ -1611,7 +1643,8 @@ impl crate::Device<super::Api> for super::Device {
         let mut vk_rasterization = vk::PipelineRasterizationStateCreateInfo::builder()
             .polygon_mode(conv::map_polygon_mode(desc.primitive.polygon_mode))
             .front_face(conv::map_front_face(desc.primitive.front_face))
-            .line_width(1.0);
+            .line_width(1.0)
+            .depth_clamp_enable(desc.primitive.unclipped_depth);
         if let Some(face) = desc.primitive.cull_mode {
             vk_rasterization = vk_rasterization.cull_mode(conv::map_cull_face(face))
         }
@@ -1621,13 +1654,6 @@ impl crate::Device<super::Api> for super::Device {
                 .build();
         if desc.primitive.conservative {
             vk_rasterization = vk_rasterization.push_next(&mut vk_rasterization_conservative_state);
-        }
-        let mut vk_depth_clip_state =
-            vk::PipelineRasterizationDepthClipStateCreateInfoEXT::builder()
-                .depth_clip_enable(false)
-                .build();
-        if desc.primitive.unclipped_depth {
-            vk_rasterization = vk_rasterization.push_next(&mut vk_depth_clip_state);
         }
 
         let mut vk_depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder();

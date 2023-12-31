@@ -1,29 +1,54 @@
-From: Dan Minor <dminor@mozilla.com>
-Date: Fri, 13 Nov 2020 14:34:00 -0500
-Subject: Bug 1654112 - Fully quality AudioLevel::kUri in channel_send.cc. r=ng
+From: Nico Grunbaum <na-g@nostrum.com>
+Date: Thu, 18 Feb 2021 17:23:00 -0800
+Subject: Bug 1654112 - fix device_info_ds pid and Windows constants includes;
+ r=pehrsons
 
-Differential Revision: https://phabricator.services.mozilla.com/D130082
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/7163801a480d607005042292ed9e4fbb892f440d
+Upstreaming bug 1697385
+
+Differential Revision: https://phabricator.services.mozilla.com/D107899
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/24809d566449907edea49ea47528065ad0f76910
 ---
- audio/channel_send.cc | 4 ++--
- 1 file changed, 2 insertions(+), 2 deletions(-)
+ modules/video_capture/windows/device_info_ds.cc | 3 ++-
+ modules/video_capture/windows/device_info_ds.h  | 6 +++++-
+ 2 files changed, 7 insertions(+), 2 deletions(-)
 
-diff --git a/audio/channel_send.cc b/audio/channel_send.cc
-index 3e734aab45..508bbd615a 100644
---- a/audio/channel_send.cc
-+++ b/audio/channel_send.cc
-@@ -696,9 +696,9 @@ void ChannelSend::SetSendAudioLevelIndicationStatus(bool enable, int id) {
-   RTC_DCHECK_RUN_ON(&worker_thread_checker_);
-   include_audio_level_indication_.store(enable);
-   if (enable) {
--    rtp_rtcp_->RegisterRtpHeaderExtension(AudioLevel::Uri(), id);
-+    rtp_rtcp_->RegisterRtpHeaderExtension(webrtc::AudioLevel::Uri(), id);
-   } else {
--    rtp_rtcp_->DeregisterSendRtpHeaderExtension(AudioLevel::Uri());
-+    rtp_rtcp_->DeregisterSendRtpHeaderExtension(webrtc::AudioLevel::Uri());
-   }
- }
+diff --git a/modules/video_capture/windows/device_info_ds.cc b/modules/video_capture/windows/device_info_ds.cc
+index 9d22f42f4d..f6927281f3 100644
+--- a/modules/video_capture/windows/device_info_ds.cc
++++ b/modules/video_capture/windows/device_info_ds.cc
+@@ -172,7 +172,8 @@ int32_t DeviceInfoDS::GetDeviceName(uint32_t deviceNumber,
+                                     char* deviceUniqueIdUTF8,
+                                     uint32_t deviceUniqueIdUTF8Length,
+                                     char* productUniqueIdUTF8,
+-                                    uint32_t productUniqueIdUTF8Length) {
++                                    uint32_t productUniqueIdUTF8Length,
++                                    pid_t* pid) {
+   MutexLock lock(&_apiLock);
+   const int32_t result = GetDeviceInfo(
+       deviceNumber, deviceNameUTF8, deviceNameLength, deviceUniqueIdUTF8,
+diff --git a/modules/video_capture/windows/device_info_ds.h b/modules/video_capture/windows/device_info_ds.h
+index ed2a726d6f..e6dfaed366 100644
+--- a/modules/video_capture/windows/device_info_ds.h
++++ b/modules/video_capture/windows/device_info_ds.h
+@@ -12,8 +12,11 @@
+ #define MODULES_VIDEO_CAPTURE_MAIN_SOURCE_WINDOWS_DEVICE_INFO_DS_H_
  
--- 
-2.34.1
-
+ #include <dshow.h>
++#include <Ks.h>
++#include <dbt.h>
+ 
+ #include "modules/video_capture/device_info_impl.h"
++#include "modules/video_capture/video_capture.h"
+ #include "modules/video_capture/video_capture_impl.h"
+ 
+ namespace webrtc {
+@@ -47,7 +50,8 @@ class DeviceInfoDS : public DeviceInfoImpl {
+                         char* deviceUniqueIdUTF8,
+                         uint32_t deviceUniqueIdUTF8Length,
+                         char* productUniqueIdUTF8,
+-                        uint32_t productUniqueIdUTF8Length) override;
++                        uint32_t productUniqueIdUTF8Length,
++                        pid_t* pid) override;
+ 
+   /*
+    * Display OS /capture device specific settings dialog

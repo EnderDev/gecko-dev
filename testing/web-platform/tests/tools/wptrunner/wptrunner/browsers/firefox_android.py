@@ -45,11 +45,11 @@ def check_args(**kwargs):
 def browser_kwargs(logger, test_type, run_info_data, config, **kwargs):
     return {"adb_binary": kwargs["adb_binary"],
             "webdriver_binary": kwargs["webdriver_binary"],
-            "webdriver_args": kwargs["webdriver_args"],
+            "webdriver_args": kwargs["webdriver_args"].copy(),
             "package_name": kwargs["package_name"],
             "device_serial": kwargs["device_serial"],
             "prefs_root": kwargs["prefs_root"],
-            "extra_prefs": kwargs["extra_prefs"],
+            "extra_prefs": kwargs["extra_prefs"].copy(),
             "test_type": test_type,
             "debug_info": kwargs["debug_info"],
             "symbols_path": kwargs["symbols_path"],
@@ -57,7 +57,7 @@ def browser_kwargs(logger, test_type, run_info_data, config, **kwargs):
             "certutil_binary": kwargs["certutil_binary"],
             "ca_certificate_path": config.ssl_config["ca_cert_path"],
             "stackfix_dir": kwargs["stackfix_dir"],
-            "binary_args": kwargs["binary_args"],
+            "binary_args": kwargs["binary_args"].copy(),
             "timeout_multiplier": get_timeout_multiplier(test_type,
                                                          run_info_data,
                                                          **kwargs),
@@ -71,7 +71,7 @@ def browser_kwargs(logger, test_type, run_info_data, config, **kwargs):
             "tests_root": config.doc_root,
             "specialpowers_path": kwargs["specialpowers_path"],
             "debug_test": kwargs["debug_test"],
-            "env_extras" : dict([x.split('=') for x in kwargs.get("env", [])])}
+            "env_extras": dict([x.split('=') for x in kwargs.get("env", [])])}
 
 
 def executor_kwargs(logger, test_type, test_environment, run_info_data,
@@ -125,7 +125,6 @@ class ProfileCreator(FirefoxProfileCreator):
             "dom.disable_open_during_load": False,
             "places.history.enabled": False,
             "dom.send_after_paint_to_content": True,
-            "network.preload": True,
             "browser.tabs.remote.autostart": True,
         })
 
@@ -356,7 +355,6 @@ class FirefoxAndroidWdSpecBrowser(FirefoxWdSpecBrowser):
     def get_env(self, binary, debug_info, headless, chaos_mode_flags):
         env = get_environ(chaos_mode_flags)
         env["RUST_BACKTRACE"] = "1"
-        del env["MOZ_DISABLE_NONLOCAL_CONNECTIONS"]
         return env
 
     def executor_browser(self):

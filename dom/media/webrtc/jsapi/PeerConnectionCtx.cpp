@@ -165,7 +165,7 @@ SharedWebrtcState::SharedWebrtcState(
     RefPtr<AbstractThread> aCallWorkerThread,
     webrtc::AudioState::Config&& aAudioStateConfig,
     RefPtr<webrtc::AudioDecoderFactory> aAudioDecoderFactory,
-    UniquePtr<webrtc::WebRtcKeyValueConfig> aTrials)
+    UniquePtr<webrtc::FieldTrialsView> aTrials)
     : mCallWorkerThread(std::move(aCallWorkerThread)),
       mAudioStateConfig(std::move(aAudioStateConfig)),
       mAudioDecoderFactory(std::move(aAudioDecoderFactory)),
@@ -310,6 +310,8 @@ static void RecordCommonRtpTelemetry(const T& list, const T& lastList,
                                 : WEBRTC_VIDEO_QUALITY_OUTBOUND_PACKETLOSS_RATE)
                      : (isAudio ? WEBRTC_AUDIO_QUALITY_INBOUND_PACKETLOSS_RATE
                                 : WEBRTC_VIDEO_QUALITY_INBOUND_PACKETLOSS_RATE);
+        // Because this is an integer and we would like some extra precision
+        // the unit is per mille (1/1000) instead of percent (1/100).
         Accumulate(id, (s.mPacketsLost.Value() * 1000) / total);
       }
     }
@@ -486,7 +488,7 @@ void PeerConnectionCtx::AddPeerConnection(const std::string& aKey,
                            MediaThreadType::WEBRTC_CALL_THREAD)
                        .release());
 
-    UniquePtr<webrtc::WebRtcKeyValueConfig> trials =
+    UniquePtr<webrtc::FieldTrialsView> trials =
         WrapUnique(new NoTrialsConfig());
 
     mSharedWebrtcState = MakeAndAddRef<SharedWebrtcState>(

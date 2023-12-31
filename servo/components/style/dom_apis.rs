@@ -8,14 +8,18 @@
 use crate::context::QuirksMode;
 use crate::dom::{TDocument, TElement, TNode, TShadowRoot};
 use crate::invalidation::element::invalidation_map::Dependency;
-use crate::invalidation::element::invalidator::{DescendantInvalidationLists, Invalidation};
+use crate::invalidation::element::invalidator::{
+    DescendantInvalidationLists, Invalidation, SiblingTraversalMap,
+};
 use crate::invalidation::element::invalidator::{InvalidationProcessor, InvalidationVector};
 use crate::selector_parser::SelectorImpl;
 use crate::values::AtomIdent;
 use selectors::attr::CaseSensitivity;
 use selectors::matching::{
-    self, IgnoreNthChildForInvalidation, MatchingContext, MatchingMode, NeedsSelectorFlags,
+    self, MatchingForInvalidation, MatchingContext, MatchingMode, NeedsSelectorFlags,
+    SelectorCaches,
 };
+use selectors::attr::{AttrSelectorOperation, NamespaceConstraint};
 use selectors::parser::{Combinator, Component, LocalName};
 use selectors::{Element, SelectorList};
 use smallvec::SmallVec;
@@ -29,15 +33,15 @@ pub fn element_matches<E>(
 where
     E: Element,
 {
-    let mut nth_index_cache = Default::default();
+    let mut selector_caches = SelectorCaches::default();
 
     let mut context = MatchingContext::new(
         MatchingMode::Normal,
         None,
-        &mut nth_index_cache,
+        &mut selector_caches,
         quirks_mode,
         NeedsSelectorFlags::No,
-        IgnoreNthChildForInvalidation::No,
+        MatchingForInvalidation::No,
     );
     context.scope_element = Some(element.opaque());
     context.current_host = element.containing_shadow_host().map(|e| e.opaque());
@@ -53,15 +57,15 @@ pub fn element_closest<E>(
 where
     E: Element,
 {
-    let mut nth_index_cache = Default::default();
+    let mut selector_caches = SelectorCaches::default();
 
     let mut context = MatchingContext::new(
         MatchingMode::Normal,
         None,
-        &mut nth_index_cache,
+        &mut selector_caches,
         quirks_mode,
         NeedsSelectorFlags::No,
-        IgnoreNthChildForInvalidation::No,
+        MatchingForInvalidation::No,
     );
     context.scope_element = Some(element.opaque());
     context.current_host = element.containing_shadow_host().map(|e| e.opaque());
@@ -136,18 +140,19 @@ impl<E: TElement> SelectorQuery<E> for QueryFirst {
     }
 }
 
-struct QuerySelectorProcessor<'a, E, Q>
+struct QuerySelectorProcessor<'a, 'b, E, Q>
 where
     E: TElement + 'a,
     Q: SelectorQuery<E>,
     Q::Output: 'a,
 {
     results: &'a mut Q::Output,
-    matching_context: MatchingContext<'a, E::Impl>,
+    matching_context: MatchingContext<'b, E::Impl>,
+    traversal_map: SiblingTraversalMap<E>,
     dependencies: &'a [Dependency],
 }
 
-impl<'a, E, Q> InvalidationProcessor<'a, E> for QuerySelectorProcessor<'a, E, Q>
+impl<'a, 'b, E, Q> InvalidationProcessor<'a, 'b, E> for QuerySelectorProcessor<'a, 'b, E, Q>
 where
     E: TElement + 'a,
     Q: SelectorQuery<E>,
@@ -203,8 +208,12 @@ where
         false
     }
 
-    fn matching_context(&mut self) -> &mut MatchingContext<'a, E::Impl> {
+    fn matching_context(&mut self) -> &mut MatchingContext<'b, E::Impl> {
         &mut self.matching_context
+    }
+
+    fn sibling_traversal_map(&self) -> &SiblingTraversalMap<E> {
+        &self.traversal_map
     }
 
     fn should_process_descendants(&mut self, _: E) -> bool {
@@ -437,7 +446,6 @@ where
     E: TElement,
     Q: SelectorQuery<E>,
 {
-    // TODO: Maybe we could implement a fast path for [name=""]?
     match *component {
         Component::ExplicitUniversalType => {
             collect_all_elements::<E, Q, _>(root, results, |_| true)
@@ -448,6 +456,34 @@ where
         Component::LocalName(ref local_name) => {
             collect_all_elements::<E, Q, _>(root, results, |element| {
                 local_name_matches(element, local_name)
+            })
+        },
+        Component::AttributeInNoNamespaceExists {
+            ref local_name,
+            ref local_name_lower,
+        } => {
+            collect_all_elements::<E, Q, _>(root, results, |element| {
+                element.has_attr_in_no_namespace(matching::select_name(&element, local_name, local_name_lower))
+            })
+        },
+        Component::AttributeInNoNamespace {
+            ref local_name,
+            ref value,
+            operator,
+            case_sensitivity,
+        } => {
+            let empty_namespace = selectors::parser::namespace_empty_string::<E::Impl>();
+            let namespace_constraint = NamespaceConstraint::Specific(&empty_namespace);
+            collect_all_elements::<E, Q, _>(root, results, |element| {
+                element.attr_matches(
+                    &namespace_constraint,
+                    local_name,
+                    &AttrSelectorOperation::WithValue {
+                        operator,
+                        case_sensitivity: matching::to_unconditional_case_sensitivity(case_sensitivity, &element),
+                        value,
+                    },
+                )
             })
         },
         ref other => {
@@ -496,11 +532,11 @@ where
 {
     // We need to return elements in document order, and reordering them
     // afterwards is kinda silly.
-    if selector_list.0.len() > 1 {
+    if selector_list.len() > 1 {
         return Err(());
     }
 
-    let selector = &selector_list.0[0];
+    let selector = &selector_list.slice()[0];
     let class_and_id_case_sensitivity = matching_context.classes_and_ids_case_sensitivity();
     // Let's just care about the easy cases for now.
     if selector.len() == 1 {
@@ -708,16 +744,16 @@ pub fn query_selector<E, Q>(
 {
     use crate::invalidation::element::invalidator::TreeStyleInvalidator;
 
-    let mut nth_index_cache = Default::default();
+    let mut selector_caches = SelectorCaches::default();
     let quirks_mode = root.owner_doc().quirks_mode();
 
     let mut matching_context = MatchingContext::new(
         MatchingMode::Normal,
         None,
-        &mut nth_index_cache,
+        &mut selector_caches,
         quirks_mode,
         NeedsSelectorFlags::No,
-        IgnoreNthChildForInvalidation::No,
+        MatchingForInvalidation::No,
     );
     let root_element = root.as_element();
     matching_context.scope_element = root_element.map(|e| e.opaque());
@@ -746,19 +782,20 @@ pub fn query_selector<E, Q>(
     // A selector with a combinator needs to have a length of at least 3: A
     // simple selector, a combinator, and another simple selector.
     let invalidation_may_be_useful = may_use_invalidation == MayUseInvalidation::Yes &&
-        selector_list.0.iter().any(|s| s.len() > 2);
+        selector_list.slice().iter().any(|s| s.len() > 2);
 
     if root_element.is_some() || !invalidation_may_be_useful {
         query_selector_slow::<E, Q>(root, selector_list, results, &mut matching_context);
     } else {
         let dependencies = selector_list
-            .0
+            .slice()
             .iter()
             .map(|selector| Dependency::for_full_selector_invalidation(selector.clone()))
             .collect::<SmallVec<[_; 5]>>();
         let mut processor = QuerySelectorProcessor::<E, Q> {
             results,
             matching_context,
+            traversal_map: SiblingTraversalMap::default(),
             dependencies: &dependencies,
         };
 

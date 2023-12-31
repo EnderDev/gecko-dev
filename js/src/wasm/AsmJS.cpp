@@ -24,6 +24,7 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/Sprintf.h"  // SprintfLiteral
+#include "mozilla/Try.h"      // MOZ_TRY*
 #include "mozilla/Utf8.h"     // mozilla::Utf8Unit
 #include "mozilla/Variant.h"
 
@@ -36,6 +37,7 @@
 #include "frontend/FrontendContext.h"     // js::FrontendContext
 #include "frontend/FunctionSyntaxKind.h"  // FunctionSyntaxKind
 #include "frontend/ParseNode.h"
+#include "frontend/Parser-macros.h"  // MOZ_TRY_*
 #include "frontend/Parser.h"
 #include "frontend/ParserAtom.h"     // ParserAtomsTable, TaggedParserAtomIndex
 #include "frontend/SharedContext.h"  // TopLevelFunction
@@ -64,11 +66,14 @@
 #include "vm/TypedArrayObject.h"
 #include "vm/Warnings.h"  // js::WarnNumberASCII
 #include "wasm/WasmCompile.h"
+#include "wasm/WasmFeatures.h"
 #include "wasm/WasmGenerator.h"
 #include "wasm/WasmInstance.h"
 #include "wasm/WasmIonCompile.h"
 #include "wasm/WasmJS.h"
+#include "wasm/WasmModuleTypes.h"
 #include "wasm/WasmSerialize.h"
+#include "wasm/WasmSignalHandlers.h"
 #include "wasm/WasmValidate.h"
 
 #include "frontend/SharedContext-inl.h"
@@ -654,7 +659,7 @@ static inline bool IsUseOfName(ParseNode* pn, TaggedParserAtomIndex name) {
 }
 
 static inline bool IsIgnoredDirectiveName(TaggedParserAtomIndex atom) {
-  return atom != TaggedParserAtomIndex::WellKnown::useStrict();
+  return atom != TaggedParserAtomIndex::WellKnown::use_strict_();
 }
 
 static inline bool IsIgnoredDirective(ParseNode* pn) {
@@ -723,10 +728,7 @@ static bool ParseVarOrConstStatement(AsmJSParser<Unit>& parser,
     return true;
   }
 
-  *var = parser.statementListItem(YieldIsName);
-  if (!*var) {
-    return false;
-  }
+  MOZ_TRY_VAR_OR_RETURN(*var, parser.statementListItem(YieldIsName), false);
 
   MOZ_ASSERT((*var)->isKind(ParseNodeKind::VarStmt) ||
              (*var)->isKind(ParseNodeKind::ConstDecl));
@@ -1768,14 +1770,12 @@ class MOZ_STACK_CLASS ModuleValidatorShared {
       index += funcImportMap_.count();
     }
 
-    MutableElemSegment seg = js_new<ElemSegment>();
-    if (!seg) {
-      return false;
-    }
-    seg->elemType = RefType::func();
-    seg->tableIndex = tableIndex;
-    seg->offsetIfActive = Some(InitExpr(LitVal(uint32_t(0))));
-    seg->elemFuncIndices = std::move(elems);
+    ModuleElemSegment seg = ModuleElemSegment();
+    seg.elemType = RefType::func();
+    seg.tableIndex = tableIndex;
+    seg.offsetIfActive = Some(InitExpr(LitVal(uint32_t(0))));
+    seg.encoding = ModuleElemSegment::Encoding::Indices;
+    seg.elemIndices = std::move(elems);
     return moduleEnv_.elemSegments.append(std::move(seg));
   }
 
@@ -1955,9 +1955,9 @@ class MOZ_STACK_CLASS ModuleValidator : public ModuleValidatorShared {
     auto& ts = tokenStream();
     ErrorMetadata metadata;
     if (ts.computeErrorMetadata(&metadata, AsVariant(offset))) {
-      if (ts.anyCharsAccess().options().throwOnAsmJSValidationFailureOption) {
-        ReportCompileErrorLatin1(fc_, std::move(metadata), nullptr,
-                                 JSMSG_USE_ASM_TYPE_FAIL, &args);
+      if (ts.anyCharsAccess().options().throwOnAsmJSValidationFailure()) {
+        ReportCompileErrorLatin1VA(fc_, std::move(metadata), nullptr,
+                                   JSMSG_USE_ASM_TYPE_FAIL, &args);
       } else {
         // asm.js type failure is indicated by calling one of the fail*
         // functions below.  These functions always return false to
@@ -2106,7 +2106,7 @@ class MOZ_STACK_CLASS ModuleValidator : public ModuleValidatorShared {
   }
 
   SharedModule finish() {
-    MOZ_ASSERT(!moduleEnv_.usesMemory());
+    MOZ_ASSERT(moduleEnv_.numMemories() == 0);
     if (memory_.usage != MemoryUsage::None) {
       Limits limits;
       limits.shared = memory_.usage == MemoryUsage::Shared ? Shareable::True
@@ -2114,7 +2114,9 @@ class MOZ_STACK_CLASS ModuleValidator : public ModuleValidatorShared {
       limits.initial = memory_.minPages();
       limits.maximum = Nothing();
       limits.indexType = IndexType::I32;
-      moduleEnv_.memory = Some(MemoryDesc(limits));
+      if (!moduleEnv_.memories.append(MemoryDesc(limits))) {
+        return nullptr;
+      }
     }
     MOZ_ASSERT(moduleEnv_.funcs.empty());
     if (!moduleEnv_.funcs.resize(funcImportMap_.count() + funcDefs_.length())) {
@@ -2145,6 +2147,9 @@ class MOZ_STACK_CLASS ModuleValidator : public ModuleValidatorShared {
     }
 
     moduleEnv_.numFuncImports = funcImportMap_.count();
+
+    // All globals (inits and imports) are imports from Wasm point of view.
+    moduleEnv_.numGlobalImports = moduleEnv_.globals.length();
 
     MOZ_ASSERT(asmJSMetadata_->asmJSFuncNames.empty());
     if (!asmJSMetadata_->asmJSFuncNames.resize(funcImportMap_.count())) {
@@ -2777,11 +2782,7 @@ static bool CheckModuleArgument(ModuleValidatorShared& m, ParseNode* arg,
     return false;
   }
 
-  if (!CheckModuleLevelName(m, arg, *name)) {
-    return false;
-  }
-
-  return true;
+  return CheckModuleLevelName(m, arg, *name);
 }
 
 static bool CheckModuleArguments(ModuleValidatorShared& m,
@@ -2815,11 +2816,7 @@ static bool CheckModuleArguments(ModuleValidatorShared& m,
   if (arg3 && !CheckModuleArgument(m, arg3, &arg3Name)) {
     return false;
   }
-  if (!m.initBufferArgumentName(arg3Name)) {
-    return false;
-  }
-
-  return true;
+  return m.initBufferArgumentName(arg3Name);
 }
 
 static bool CheckPrecedingStatements(ModuleValidatorShared& m,
@@ -3571,11 +3568,7 @@ static bool WriteArrayAccessFlags(FunctionValidatorShared& f,
   }
 
   // asm.js doesn't have constant offsets, so just encode a 0.
-  if (!f.encoder().writeVarU32(0)) {
-    return false;
-  }
-
-  return true;
+  return f.encoder().writeVarU32(0);
 }
 
 template <typename Unit>
@@ -4115,12 +4108,8 @@ static bool CheckFuncPtrTableAgainstExisting(ModuleValidator<Unit>& m,
     return false;
   }
 
-  if (!m.declareFuncPtrTable(std::move(sig), name, usepn->pn_pos.begin, mask,
-                             tableIndex)) {
-    return false;
-  }
-
-  return true;
+  return m.declareFuncPtrTable(std::move(sig), name, usepn->pn_pos.begin, mask,
+                               tableIndex);
 }
 
 template <typename Unit>
@@ -4829,11 +4818,7 @@ static bool CheckConditional(FunctionValidator<Unit>& f, ParseNode* ternary,
         thenType.toChars(), elseType.toChars());
   }
 
-  if (!f.popIf(typeAt, type->toWasmBlockSignatureType())) {
-    return false;
-  }
-
-  return true;
+  return f.popIf(typeAt, type->toWasmBlockSignatureType());
 }
 
 template <typename Unit>
@@ -5404,11 +5389,7 @@ static bool CheckLoopConditionOnEntry(FunctionValidator<Unit>& f,
   }
 
   // brIf (i32.eqz $f) $out
-  if (!f.writeBreakIf()) {
-    return false;
-  }
-
-  return true;
+  return f.writeBreakIf();
 }
 
 template <typename Unit>
@@ -5635,10 +5616,7 @@ static bool CheckLabel(FunctionValidator<Unit>& f, ParseNode* labeledStmt) {
     return false;
   }
 
-  if (!f.popUnbreakableBlock(&labels)) {
-    return false;
-  }
-  return true;
+  return f.popUnbreakableBlock(&labels);
 }
 
 template <typename Unit>
@@ -5817,10 +5795,7 @@ static bool CheckSwitch(FunctionValidator<Unit>& f, ParseNode* switchStmt) {
     if (!CheckSwitchExpr(f, switchExpr)) {
       return false;
     }
-    if (!f.encoder().writeOp(Op::Drop)) {
-      return false;
-    }
-    return true;
+    return f.encoder().writeOp(Op::Drop);
   }
 
   if (!CheckDefaultAtEnd(f, stmt)) {
@@ -6091,11 +6066,11 @@ static bool ParseFunction(ModuleValidator<Unit>& m, FunctionNode** funNodeOut,
     return false;
   }
 
-  FunctionNode* funNode = m.parser().handler_.newFunction(
-      FunctionSyntaxKind::Statement, m.parser().pos());
-  if (!funNode) {
-    return false;
-  }
+  FunctionNode* funNode;
+  MOZ_TRY_VAR_OR_RETURN(funNode,
+                        m.parser().handler_.newFunction(
+                            FunctionSyntaxKind::Statement, m.parser().pos()),
+                        false);
 
   ParseContext* outerpc = m.parser().pc_;
   Directives directives(outerpc);
@@ -6400,10 +6375,9 @@ static bool CheckModuleReturn(ModuleValidator<Unit>& m) {
   }
   ts.anyCharsAccess().ungetToken();
 
-  ParseNode* returnStmt = m.parser().statementListItem(YieldIsName);
-  if (!returnStmt) {
-    return false;
-  }
+  ParseNode* returnStmt;
+  MOZ_TRY_VAR_OR_RETURN(returnStmt, m.parser().statementListItem(YieldIsName),
+                        false);
 
   ParseNode* returnExpr = ReturnExpr(returnStmt);
   if (!returnExpr) {
@@ -6803,7 +6777,7 @@ static bool CheckBuffer(JSContext* cx, const AsmJSMetadata& metadata,
   }
   JSObject* bufferObj = &bufferVal.toObject();
 
-  if (metadata.usesSharedMemory()) {
+  if (metadata.memories[0].isShared()) {
     if (!bufferObj->is<SharedArrayBufferObject>()) {
       return LinkFail(
           cx, "shared views can only be constructed onto SharedArrayBuffer");
@@ -6843,8 +6817,9 @@ static bool CheckBuffer(JSContext* cx, const AsmJSMetadata& metadata,
   // This check is sufficient without considering the size of the loaded datum
   // because heap loads and stores start on an aligned boundary and the heap
   // byteLength has larger alignment.
-  uint64_t minMemoryLength =
-      metadata.usesMemory() ? metadata.memory->initialLength32() : 0;
+  uint64_t minMemoryLength = metadata.memories.length() != 0
+                                 ? metadata.memories[0].initialLength32()
+                                 : 0;
   MOZ_ASSERT((minMemoryLength - 1) <= INT32_MAX);
   if (memoryLength < minMemoryLength) {
     UniqueChars msg(JS_smprintf("ArrayBuffer byteLength of 0x%" PRIx64
@@ -6942,23 +6917,24 @@ static bool TryInstantiate(JSContext* cx, CallArgs args, const Module& module,
   HandleValue importVal = args.get(1);
   HandleValue bufferVal = args.get(2);
 
-  // Re-check HasPlatformSupport(cx) since this varies per-thread and
-  // 'module' may have been produced on a parser thread.
-  if (!HasPlatformSupport(cx)) {
-    return LinkFail(cx, "no platform support");
+  MOZ_RELEASE_ASSERT(HasPlatformSupport());
+
+  if (!wasm::EnsureFullSignalHandlers(cx)) {
+    return LinkFail(cx, "failed to install signal handlers");
   }
 
   Rooted<ImportValues> imports(cx);
 
-  if (module.metadata().usesMemory()) {
-    RootedArrayBufferObject buffer(cx);
+  if (module.metadata().memories.length() != 0) {
+    MOZ_ASSERT(module.metadata().memories.length() == 1);
+    Rooted<ArrayBufferObject*> buffer(cx);
     if (!CheckBuffer(cx, metadata, bufferVal, &buffer)) {
       return false;
     }
 
-    imports.get().memory =
-        WasmMemoryObject::create(cx, buffer, /* isHuge= */ false, nullptr);
-    if (!imports.get().memory) {
+    Rooted<WasmMemoryObject*> memory(
+        cx, WasmMemoryObject::create(cx, buffer, /* isHuge= */ false, nullptr));
+    if (!memory || !imports.get().memories.append(memory)) {
       return false;
     }
   }
@@ -6979,7 +6955,7 @@ static bool HandleInstantiationFailure(JSContext* cx, CallArgs args,
                                        const AsmJSMetadata& metadata) {
   using js::frontend::FunctionSyntaxKind;
 
-  Rooted<JSAtom*> name(cx, args.callee().as<JSFunction>().explicitName());
+  Rooted<JSAtom*> name(cx, args.callee().as<JSFunction>().fullExplicitName());
 
   if (cx->isExceptionPending()) {
     return false;
@@ -7010,7 +6986,7 @@ static bool HandleInstantiationFailure(JSContext* cx, CallArgs args,
   options.setMutedErrors(source->mutedErrors())
       .setFile(source->filename())
       .setNoScriptRval(false);
-  options.asmJSOption = AsmJSOption::DisabledByLinker;
+  options.setAsmJSOption(AsmJSOption::DisabledByLinker);
 
   // The exported function inherits an implicit strict context if the module
   // also inherited it somehow.
@@ -7090,7 +7066,7 @@ static bool SuccessfulValidation(frontend::ParserBase& parser,
 }
 
 static bool TypeFailureWarning(frontend::ParserBase& parser, const char* str) {
-  if (parser.options().throwOnAsmJSValidationFailureOption) {
+  if (parser.options().throwOnAsmJSValidationFailure()) {
     parser.errorNoOffset(JSMSG_USE_ASM_TYPE_FAIL, str ? str : "");
     return false;
   }
@@ -7105,11 +7081,11 @@ static bool TypeFailureWarning(frontend::ParserBase& parser, const char* str) {
 // asm.js requires Ion to be available on the current hardware/OS and to be
 // enabled for wasm, since asm.js compilation goes via wasm.
 static bool IsAsmJSCompilerAvailable(JSContext* cx) {
-  return HasPlatformSupport(cx) && WasmCompilerForAsmJSAvailable(cx);
+  return HasPlatformSupport() && WasmCompilerForAsmJSAvailable(cx);
 }
 
 static bool EstablishPreconditions(frontend::ParserBase& parser) {
-  switch (parser.options().asmJSOption) {
+  switch (parser.options().asmJSOption()) {
     case AsmJSOption::DisabledByAsmJSPref:
       return TypeFailureWarning(
           parser, "Asm.js optimizer disabled by 'asmjs' runtime option");
@@ -7297,7 +7273,7 @@ JSString* js::AsmJSModuleToString(JSContext* cx, HandleFunction fun,
     if (!out.append("function ")) {
       return nullptr;
     }
-    if (fun->explicitName() && !out.append(fun->explicitName())) {
+    if (fun->fullExplicitName() && !out.append(fun->fullExplicitName())) {
       return nullptr;
     }
     if (!out.append("() {\n    [native code]\n}")) {
@@ -7346,8 +7322,8 @@ JSString* js::AsmJSFunctionToString(JSContext* cx, HandleFunction fun) {
 
   if (!haveSource) {
     // asm.js functions can't be anonymous
-    MOZ_ASSERT(fun->explicitName());
-    if (!out.append(fun->explicitName())) {
+    MOZ_ASSERT(fun->fullExplicitName());
+    if (!out.append(fun->fullExplicitName())) {
       return nullptr;
     }
     if (!out.append("() {\n    [native code]\n}")) {

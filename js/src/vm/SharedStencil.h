@@ -23,6 +23,7 @@
 #include "frontend/TypedIndex.h"   // js::frontend::TypedIndex
 
 #include "js/AllocPolicy.h"            // js::SystemAllocPolicy
+#include "js/ColumnNumber.h"           // JS::LimitedColumnNumberOneOrigin
 #include "js/TypeDecls.h"              // JSContext,jsbytecode
 #include "js/UniquePtr.h"              // js::UniquePtr
 #include "js/Vector.h"                 // js::Vector
@@ -191,7 +192,8 @@ struct SourceExtent {
   SourceExtent() = default;
 
   SourceExtent(uint32_t sourceStart, uint32_t sourceEnd, uint32_t toStringStart,
-               uint32_t toStringEnd, uint32_t lineno, uint32_t column)
+               uint32_t toStringEnd, uint32_t lineno,
+               JS::LimitedColumnNumberOneOrigin column)
       : sourceStart(sourceStart),
         sourceEnd(sourceEnd),
         toStringStart(toStringStart),
@@ -200,11 +202,11 @@ struct SourceExtent {
         column(column) {}
 
   static SourceExtent makeGlobalExtent(uint32_t len) {
-    return SourceExtent(0, len, 0, len, 1, 0);
+    return SourceExtent(0, len, 0, len, 1, JS::LimitedColumnNumberOneOrigin());
   }
 
-  static SourceExtent makeGlobalExtent(uint32_t len, uint32_t lineno,
-                                       uint32_t column) {
+  static SourceExtent makeGlobalExtent(
+      uint32_t len, uint32_t lineno, JS::LimitedColumnNumberOneOrigin column) {
     return SourceExtent(0, len, 0, len, lineno, column);
   }
 
@@ -219,8 +221,10 @@ struct SourceExtent {
   uint32_t toStringEnd = 0;
 
   // Line and column of |sourceStart_| position.
-  uint32_t lineno = 1;  // 1-indexed.
-  uint32_t column = 0;  // Count of Code Points
+  // Line number (1-origin).
+  uint32_t lineno = 1;
+  // Column number in UTF-16 code units.
+  JS::LimitedColumnNumberOneOrigin column;
 
   FunctionKey toFunctionKey() const {
     // In eval("x=>1"), the arrow function will have a sourceStart of 0 which
@@ -399,7 +403,7 @@ class MutableScriptFlags : public EnumFlags<MutableScriptFlagsEnum> {
 //  L3:
 // ----
 //
-// NOTE: The notes() array must have been null-padded such that
+// NOTE: The notes() array must have been padded such that
 //       flags/code/notes together have uint32_t alignment.
 //
 // The labels shown are recorded as byte-offsets relative to 'this'. This is to
@@ -550,20 +554,21 @@ class alignas(uint32_t) ImmutableScriptData final : public TrailingArray {
 
  public:
   // The code() and note() arrays together maintain an target alignment by
-  // padding the source notes with null. This allows arrays with stricter
-  // alignment requirements to follow them.
+  // padding the source notes with padding bytes. This allows arrays with
+  // stricter alignment requirements to follow them.
   static constexpr size_t CodeNoteAlign = sizeof(uint32_t);
 
-  // Compute number of null notes to pad out source notes with.
+  // Compute number of padding notes to pad out source notes with.
   static uint32_t ComputeNotePadding(uint32_t codeLength, uint32_t noteLength) {
     uint32_t flagLength = sizeof(Flags);
-    uint32_t nullLength =
+    uint32_t paddingLength =
         CodeNoteAlign - (flagLength + codeLength + noteLength) % CodeNoteAlign;
 
-    // The source notes must have at least one null-terminator.
-    MOZ_ASSERT(nullLength >= 1);
+    if (paddingLength == CodeNoteAlign) {
+      return 0;
+    }
 
-    return nullLength;
+    return paddingLength;
   }
 
   // Span over all raw bytes in this struct and its trailing arrays.

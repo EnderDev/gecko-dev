@@ -10,7 +10,9 @@ use crate::gecko_bindings::structs::ScreenColorGamut;
 use crate::media_queries::{Device, MediaType};
 use crate::queries::feature::{AllowsRanges, Evaluator, FeatureFlags, QueryFeatureDescription};
 use crate::queries::values::Orientation;
+use crate::queries::condition::KleeneValue;
 use crate::values::computed::{CSSPixelLength, Context, Ratio, Resolution};
+use crate::values::AtomString;
 use app_units::Au;
 use euclid::default::Size2D;
 
@@ -572,12 +574,6 @@ pub enum Platform {
     Macos,
     /// Matches any Windows version.
     Windows,
-    /// Matches only Windows 7.
-    WindowsWin7,
-    /// Matches only Windows 8.
-    WindowsWin8,
-    /// Matches windows 10 and actually matches windows 11 too, as of right now.
-    WindowsWin10,
 }
 
 fn eval_moz_platform(_: &Context, query_value: Option<Platform>) -> bool {
@@ -614,12 +610,15 @@ fn eval_scripting(context: &Context, query_value: Option<Scripting>) -> bool {
     }
 }
 
-fn eval_moz_windows_non_native_menus(context: &Context) -> bool {
-    unsafe { bindings::Gecko_MediaFeatures_WindowsNonNativeMenus(context.device().document()) }
-}
-
 fn eval_moz_overlay_scrollbars(context: &Context) -> bool {
     unsafe { bindings::Gecko_MediaFeatures_UseOverlayScrollbars(context.device().document()) }
+}
+
+fn eval_moz_bool_pref(_: &Context, pref: Option<&AtomString>) -> KleeneValue {
+    let Some(pref) = pref else { return KleeneValue::False };
+    KleeneValue::from(unsafe {
+        bindings::Gecko_ComputeBoolPrefMediaQuery(pref.as_ptr())
+    })
 }
 
 fn get_lnf_int(int_id: i32) -> i32 {
@@ -664,37 +663,12 @@ macro_rules! lnf_int_feature {
     }};
 }
 
-/// bool pref-based features are an slightly less convenient to start using
-/// version of @supports -moz-bool-pref, but with some benefits, mainly that
-/// they can support dynamic changes, and don't require a pref lookup every time
-/// they're used.
-///
-/// In order to use them you need to make sure that the pref defined as a static
-/// pref, with `rust: true`. The feature name needs to be defined in
-/// `StaticAtoms.py` just like the others. In order to support dynamic changes,
-/// you also need to add them to kMediaQueryPrefs in nsXPLookAndFeel.cpp
-#[allow(unused)]
-macro_rules! bool_pref_feature {
-    ($feature_name:expr, $pref:tt) => {{
-        fn __eval(_: &Context) -> bool {
-            static_prefs::pref!($pref)
-        }
-
-        feature!(
-            $feature_name,
-            AllowsRanges::No,
-            Evaluator::BoolInteger(__eval),
-            FeatureFlags::CHROME_AND_UA_ONLY,
-        )
-    }};
-}
-
 /// Adding new media features requires (1) adding the new feature to this
 /// array, with appropriate entries (and potentially any new code needed
 /// to support new types in these entries and (2) ensuring that either
 /// nsPresContext::MediaFeatureValuesChanged is called when the value that
 /// would be returned by the evaluator function could change.
-pub static MEDIA_FEATURES: [QueryFeatureDescription; 67] = [
+pub static MEDIA_FEATURES: [QueryFeatureDescription; 59] = [
     feature!(
         atom!("width"),
         AllowsRanges::Yes,
@@ -959,15 +933,15 @@ pub static MEDIA_FEATURES: [QueryFeatureDescription; 67] = [
         FeatureFlags::CHROME_AND_UA_ONLY,
     ),
     feature!(
-        atom!("-moz-windows-non-native-menus"),
-        AllowsRanges::No,
-        Evaluator::BoolInteger(eval_moz_windows_non_native_menus),
-        FeatureFlags::CHROME_AND_UA_ONLY,
-    ),
-    feature!(
         atom!("-moz-overlay-scrollbars"),
         AllowsRanges::No,
         Evaluator::BoolInteger(eval_moz_overlay_scrollbars),
+        FeatureFlags::CHROME_AND_UA_ONLY,
+    ),
+    feature!(
+        atom!("-moz-bool-pref"),
+        AllowsRanges::No,
+        Evaluator::String(eval_moz_bool_pref),
         FeatureFlags::CHROME_AND_UA_ONLY,
     ),
     lnf_int_feature!(
@@ -991,17 +965,12 @@ pub static MEDIA_FEATURES: [QueryFeatureDescription; 67] = [
         get_scrollbar_end_forward
     ),
     lnf_int_feature!(atom!("-moz-menubar-drag"), MenuBarDrag),
-    lnf_int_feature!(atom!("-moz-windows-default-theme"), WindowsDefaultTheme),
-    lnf_int_feature!(atom!("-moz-mac-graphite-theme"), MacGraphiteTheme),
     lnf_int_feature!(atom!("-moz-mac-big-sur-theme"), MacBigSurTheme),
     lnf_int_feature!(atom!("-moz-mac-rtl"), MacRTL),
     lnf_int_feature!(
         atom!("-moz-windows-accent-color-in-titlebar"),
         WindowsAccentColorInTitlebar
     ),
-    lnf_int_feature!(atom!("-moz-windows-compositor"), DWMCompositor),
-    lnf_int_feature!(atom!("-moz-windows-classic"), WindowsClassic),
-    lnf_int_feature!(atom!("-moz-windows-glass"), WindowsGlass),
     lnf_int_feature!(atom!("-moz-swipe-animation-enabled"), SwipeAnimationEnabled),
     lnf_int_feature!(atom!("-moz-gtk-csd-available"), GTKCSDAvailable),
     lnf_int_feature!(atom!("-moz-gtk-csd-minimize-button"), GTKCSDMinimizeButton),
@@ -1013,16 +982,4 @@ pub static MEDIA_FEATURES: [QueryFeatureDescription; 67] = [
     ),
     lnf_int_feature!(atom!("-moz-system-dark-theme"), SystemUsesDarkTheme),
     lnf_int_feature!(atom!("-moz-panel-animations"), PanelAnimations),
-    // media query for MathML Core's implementation of maction/semantics
-    bool_pref_feature!(
-        atom!("-moz-mathml-core-maction-and-semantics"),
-        "mathml.legacy_maction_and_semantics_implementations.disabled"
-    ),
-    // media query for MathML Core's implementation of ms
-    bool_pref_feature!(
-        atom!("-moz-mathml-core-ms"),
-        "mathml.ms_lquote_rquote_attributes.disabled"
-    ),
-    // media query for popover attribute
-    bool_pref_feature!(atom!("-moz-popover-enabled"), "dom.element.popover.enabled"),
 ];

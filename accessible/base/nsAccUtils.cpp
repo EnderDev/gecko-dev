@@ -5,7 +5,6 @@
 
 #include "nsAccUtils.h"
 
-#include "LocalAccessible-inl.h"
 #include "AccAttributes.h"
 #include "ARIAMap.h"
 #include "nsCoreUtils.h"
@@ -14,15 +13,13 @@
 #include "DocAccessibleParent.h"
 #include "HyperTextAccessible.h"
 #include "nsIAccessibleTypes.h"
-#include "Role.h"
+#include "mozilla/a11y/Role.h"
 #include "States.h"
 #include "TextLeafAccessible.h"
 
 #include "nsIBaseWindow.h"
 #include "nsIDocShellTreeOwner.h"
 #include "nsIDOMXULContainerElement.h"
-#include "nsISimpleEnumerator.h"
-#include "mozilla/a11y/PDocAccessibleChild.h"
 #include "mozilla/a11y/RemoteAccessible.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Element.h"
@@ -324,12 +321,17 @@ LayoutDeviceIntPoint nsAccUtils::GetScreenCoordsForParent(
 
 LayoutDeviceIntPoint nsAccUtils::GetScreenCoordsForWindow(
     Accessible* aAccessible) {
+  LayoutDeviceIntPoint coords(0, 0);
   a11y::LocalAccessible* localAcc = aAccessible->AsLocal();
   if (!localAcc) {
     localAcc = aAccessible->AsRemote()->OuterDocOfRemoteBrowser();
+    if (!localAcc) {
+      // This could be null if the tab is closing but the document is still
+      // being shut down.
+      return coords;
+    }
   }
 
-  LayoutDeviceIntPoint coords(0, 0);
   nsCOMPtr<nsIDocShellTreeItem> treeItem(
       nsCoreUtils::GetDocShellFor(localAcc->GetNode()));
   if (!treeItem) return coords;

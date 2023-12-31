@@ -3,8 +3,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-#include <stdio.h>
-
 #include <cmath>
 #include <vector>
 
@@ -12,7 +10,6 @@
 #include "lib/jpegli/test_utils.h"
 #include "lib/jpegli/testing.h"
 #include "lib/jxl/base/byte_order.h"
-#include "lib/jxl/base/file_io.h"
 #include "lib/jxl/base/status.h"
 #include "lib/jxl/sanitizers.h"
 
@@ -244,7 +241,8 @@ TEST_P(InputSuspensionTestParam, InputOutputLockStepNonBuffered) {
     while (jpegli_read_header(&cinfo, TRUE) == JPEG_SUSPENDED) {
       JXL_CHECK(src.LoadNextChunk());
     }
-    SetDecompressParams(dparams, &cinfo, true);
+    SetDecompressParams(dparams, &cinfo);
+    jpegli_set_output_format(&cinfo, dparams.data_type, dparams.endianness);
     if (config.jparams.add_marker) {
       EXPECT_EQ(num_markers_seen, kMarkerSequenceLen);
       EXPECT_EQ(0, memcmp(markers_seen, kMarkerSequence, num_markers_seen));
@@ -300,7 +298,8 @@ TEST_P(InputSuspensionTestParam, InputOutputLockStepBuffered) {
     while (jpegli_read_header(&cinfo, TRUE) == JPEG_SUSPENDED) {
       JXL_CHECK(src.LoadNextChunk());
     }
-    SetDecompressParams(dparams, &cinfo, true);
+    SetDecompressParams(dparams, &cinfo);
+    jpegli_set_output_format(&cinfo, dparams.data_type, dparams.endianness);
 
     cinfo.buffered_image = TRUE;
     cinfo.raw_data_out = dparams.output_mode == RAW_DATA;

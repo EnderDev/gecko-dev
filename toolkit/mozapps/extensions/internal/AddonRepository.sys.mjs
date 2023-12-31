@@ -17,7 +17,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
 
 // The current platform as specified in the AMO API:
 // http://addons-server.readthedocs.io/en/latest/topics/api/addons.html#addon-detail-platform
-XPCOMUtils.defineLazyGetter(lazy, "PLATFORM", () => {
+ChromeUtils.defineLazyGetter(lazy, "PLATFORM", () => {
   let platform = Services.appinfo.OS;
   switch (platform) {
     case "Darwin":
@@ -245,6 +245,11 @@ AddonSearchResult.prototype = {
   weeklyDownloads: null,
 
   /**
+   * The URL to the AMO detail page of this (listed) add-on
+   */
+  amoListingURL: null,
+
+  /**
    * AddonInstall object generated from the add-on XPI url
    */
   install: null,
@@ -316,6 +321,10 @@ export var AddonRepository = {
   get homepageURL() {
     let url = this._formatURLPref(PREF_GETADDONS_BROWSEADDONS, {});
     return url != null ? url : "about:blank";
+  },
+
+  get appIsShuttingDown() {
+    return Services.startup.shuttingDown;
   },
 
   /**
@@ -407,6 +416,14 @@ export var AddonRepository = {
     );
   },
 
+  /*
+   * Create a ServiceRequest instance.
+   * @return ServiceRequest returns a ServiceRequest instance.
+   */
+  _createServiceRequest() {
+    return new lazy.ServiceRequest({ mozAnon: true });
+  },
+
   /**
    * Fetch data from an API where the results may span multiple "pages".
    * This function will take care of issuing multiple requests until all
@@ -433,7 +450,18 @@ export var AddonRepository = {
     let results = [];
     const fetchNextPage = url => {
       return new Promise((resolve, reject) => {
-        let request = new lazy.ServiceRequest({ mozAnon: true });
+        if (this.appIsShuttingDown) {
+          logger.debug(
+            "Rejecting AddonRepository._fetchPaged call, shutdown already in progress"
+          );
+          reject(
+            new Error(
+              `Reject ServiceRequest for "${url}", shutdown already in progress`
+            )
+          );
+          return;
+        }
+        let request = this._createServiceRequest();
         request.mozBackgroundRequest = true;
         request.open("GET", url, true);
         request.responseType = "json";
@@ -510,9 +538,21 @@ export var AddonRepository = {
    * @param extensionIDs
    *        The array of browser (non-Firefox) extension IDs to retrieve
    *        metadata for.
-   * @returns {array<AddonSearchResult>}
+   * @returns {object} result
+   *        The result of the mapping.
+   * @returns {array<AddonSearchResult>} result.addons
+   *        The AddonSearchResults for the addons that were successfully mapped.
+   * @returns {array<string>} result.matchedIDs
+   *        The IDs of the extensions that were successfully matched to
+   *        equivalents that can be installed in this browser. These are
+   *        the IDs before matching to equivalents.
+   * @returns {array<string>} result.unmatchedIDs
+   *        The IDs of the extensions that were not matched to equivalents.
    */
   async getMappedAddons(browserID, extensionIDs) {
+    let matchedExtensionIDs = new Set();
+    let unmatchedExtensionIDs = new Set(extensionIDs);
+
     const addonIds = await this._fetchPaged(
       PREF_GET_BROWSER_MAPPINGS,
       { BROWSER: browserID },
@@ -520,17 +560,31 @@ export var AddonRepository = {
         results
           // Filter out all the entries with an extension ID not in the list
           // passed to the method.
-          .filter(entry => extensionIDs.includes(entry.extension_id))
+          .filter(entry => {
+            if (unmatchedExtensionIDs.has(entry.extension_id)) {
+              unmatchedExtensionIDs.delete(entry.extension_id);
+              matchedExtensionIDs.add(entry.extension_id);
+              return true;
+            }
+            return false;
+          })
           // Return the add-on ID (stored as `guid` on AMO).
           .map(entry => entry.addon_guid)
     );
 
     if (!addonIds.length) {
-      logger.warn("getMappedAddons: no mapped add-ons found");
-      return [];
+      return {
+        addons: [],
+        matchedIDs: [],
+        unmatchedIDs: [...unmatchedExtensionIDs],
+      };
     }
 
-    return this.getAddonsByIDs(addonIds);
+    return {
+      addons: await this.getAddonsByIDs(addonIds),
+      matchedIDs: [...matchedExtensionIDs],
+      unmatchedIDs: [...unmatchedExtensionIDs],
+    };
   },
 
   /**
@@ -581,13 +635,38 @@ export var AddonRepository = {
   },
 
   /**
-   * Performs the daily background update check.
+   * Get all installed addons from the AddonManager singleton.
+   *
+   * @return Promise{array<AddonWrapper>} Resolves to an array of AddonWrapper instances.
+   */
+  _getAllInstalledAddons() {
+    return lazy.AddonManager.getAllAddons();
+  },
+
+  /**
+   * Performs the periodic background update check.
+   *
+   * In Firefox Desktop builds, the background update check is triggered on a
+   * daily basis as part of the AOM background update check and registered
+   * from: `toolkit/mozapps/extensions/extensions.manifest`
+   *
+   * In GeckoView builds, add-ons are checked for updates individually. The
+   * `AddonRepository.backgroundUpdateCheck()` method is called by the
+   * `updateWebExtension()` method defined in `GeckoViewWebExtensions.sys.mjs`
+   * but only when `AddonRepository.isMetadataStale()` returns true.
    *
    * @return Promise{null} Resolves when the metadata update is complete.
    */
   async backgroundUpdateCheck() {
     let shutter = (async () => {
-      let allAddons = await lazy.AddonManager.getAllAddons();
+      if (this.appIsShuttingDown) {
+        logger.debug(
+          "Returning earlier from backgroundUpdateCheck, shutdown already in progress"
+        );
+        return;
+      }
+
+      let allAddons = await this._getAllInstalledAddons();
 
       // Completely remove cache if caching is not enabled
       if (!this.cacheEnabled) {
@@ -649,6 +728,7 @@ export var AddonRepository = {
     }
     addon.homepageURL = aEntry.homepage;
     addon.supportURL = aEntry.support_url;
+    addon.amoListingURL = aEntry.url;
 
     addon.description = convertHTMLToPlainText(aEntry.summary);
     addon.fullDescription = convertHTMLToPlainText(aEntry.description);

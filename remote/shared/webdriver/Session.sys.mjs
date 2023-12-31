@@ -2,8 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -28,7 +26,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "chrome://remote/content/server/WebSocketHandshake.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "logger", () => lazy.Log.get());
+ChromeUtils.defineLazyGetter(lazy, "logger", () => lazy.Log.get());
 
 // Global singleton that holds active WebDriver sessions
 const webDriverSessions = new Map();
@@ -83,6 +81,30 @@ export class WebDriverSession {
    *
    *  <dt><code>moz:webdriverClick</code> (boolean)
    *  <dd>Use a WebDriver conforming <i>WebDriver::ElementClick</i>.
+   * </dl>
+   *
+   * <h4>WebAuthn</h4>
+   *
+   * <dl>
+   *  <dt><code>webauthn:virtualAuthenticators</code> (boolean)
+   *  <dd>Indicates whether the endpoint node supports all Virtual
+   *   Authenticators commands.
+   *
+   *  <dt><code>webauthn:extension:uvm</code> (boolean)
+   *  <dd>Indicates whether the endpoint node WebAuthn WebDriver
+   *   implementation supports the User Verification Method extension.
+   *
+   *  <dt><code>webauthn:extension:prf</code> (boolean)
+   *  <dd>Indicates whether the endpoint node WebAuthn WebDriver
+   *   implementation supports the prf extension.
+   *
+   *  <dt><code>webauthn:extension:largeBlob</code> (boolean)
+   *  <dd>Indicates whether the endpoint node WebAuthn WebDriver implementation
+   *   supports the largeBlob extension.
+   *
+   *  <dt><code>webauthn:extension:credBlob</code> (boolean)
+   *  <dd>Indicates whether the endpoint node WebAuthn WebDriver implementation
+   *   supports the credBlob extension.
    * </dl>
    *
    * <h4>Timeouts object</h4>
@@ -354,8 +376,8 @@ export class WebDriverSession {
 }
 
 /**
- * Get a WebDriver session corresponding to the session id.
- * Get the list of seen nodes for the given browsing context.
+ * Get the list of seen nodes for the given browsing context unique to a
+ * WebDriver session.
  *
  * @param {string} sessionId
  *     The id of the WebDriver session to use.
@@ -366,6 +388,11 @@ export class WebDriverSession {
  *     The list of seen nodes.
  */
 export function getSeenNodesForBrowsingContext(sessionId, browsingContext) {
+  if (!lazy.TabManager.isValidCanonicalBrowsingContext(browsingContext)) {
+    // If browsingContext is not a valid Browsing Context, return an empty set.
+    return new Set();
+  }
+
   const navigable =
     lazy.TabManager.getNavigableForBrowsingContext(browsingContext);
   const session = getWebDriverSessionById(sessionId);

@@ -79,8 +79,6 @@ class nsWindowSizes;
 
 class IdleRequestExecutor;
 
-class DialogValueHolder;
-
 class PromiseDocumentFlushedResolver;
 
 namespace mozilla {
@@ -112,7 +110,6 @@ class ContentMediaController;
 enum class ImageBitmapFormat : uint8_t;
 class IdleRequest;
 class IdleRequestCallback;
-class IncrementalRunnable;
 class InstallTriggerImpl;
 class IntlUtils;
 class MediaQueryList;
@@ -140,16 +137,6 @@ class CacheStorage;
 class IDBFactory;
 }  // namespace dom
 }  // namespace mozilla
-
-extern already_AddRefed<nsIScriptTimeoutHandler> NS_CreateJSTimeoutHandler(
-    JSContext* aCx, nsGlobalWindowInner* aWindow,
-    mozilla::dom::Function& aFunction,
-    const mozilla::dom::Sequence<JS::Value>& aArguments,
-    mozilla::ErrorResult& aError);
-
-extern already_AddRefed<nsIScriptTimeoutHandler> NS_CreateJSTimeoutHandler(
-    JSContext* aCx, nsGlobalWindowInner* aWindow, const nsAString& aExpression,
-    mozilla::ErrorResult& aError);
 
 extern const JSClass OuterWindowProxyClass;
 
@@ -230,7 +217,8 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
       mozilla::dom::WindowGlobalChild* aActor);
 
   // nsISupports
-  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
+  NS_DECL_ISUPPORTS_INHERITED
+  NS_IMETHOD_(void) DeleteCycleCollectable() override;
 
   // nsWrapperCache
   virtual JSObject* WrapObject(JSContext* cx,
@@ -375,6 +363,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
 
   // Inner windows only.
   void RefreshRealmPrincipal();
+  void RefreshReduceTimerPrecisionCallerType();
 
   // For accessing protected field mFullscreen
   friend class FullscreenTransitionTask;
@@ -403,13 +392,14 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
 
   static bool IsPrivilegedChromeWindow(JSContext*, JSObject* aObj);
 
-  static bool IsRequestIdleCallbackEnabled(JSContext* aCx, JSObject*);
-
   static bool DeviceSensorsEnabled(JSContext*, JSObject*);
 
-  static bool ContentPropertyEnabled(JSContext* aCx, JSObject*);
-
   static bool CachesEnabled(JSContext* aCx, JSObject*);
+
+  static bool IsSizeToContentEnabled(JSContext*, JSObject*);
+
+  // WebIDL permission Func for whether Glean APIs are permitted.
+  static bool IsGleanNeeded(JSContext*, JSObject*);
 
   bool DoResolve(
       JSContext* aCx, JS::Handle<JSObject*> aObj, JS::Handle<jsid> aId,
@@ -651,7 +641,6 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   // https://w3c.github.io/webappsec-secure-contexts/#dom-window-issecurecontext
   bool IsSecureContext() const;
 
-  void GetSidebar(mozilla::dom::OwningExternalOrWindowProxy& aResult);
   mozilla::dom::External* External();
 
   mozilla::dom::Worklet* GetPaintWorklet(mozilla::ErrorResult& aRv);
@@ -747,7 +736,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   already_AddRefed<mozilla::dom::MediaQueryList> MatchMedia(
       const nsACString& aQuery, mozilla::dom::CallerType aCallerType,
       mozilla::ErrorResult& aError);
-  nsScreen* GetScreen(mozilla::ErrorResult& aError);
+  nsScreen* Screen();
   void MoveTo(int32_t aXPos, int32_t aYPos,
               mozilla::dom::CallerType aCallerType,
               mozilla::ErrorResult& aError);
@@ -865,8 +854,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
       const nsAString& aOptions,
       const mozilla::dom::Sequence<JS::Value>& aExtraArgument,
       mozilla::ErrorResult& aError);
-  void UpdateCommands(const nsAString& anAction, mozilla::dom::Selection* aSel,
-                      int16_t aReason);
+  void UpdateCommands(const nsAString& anAction);
 
   void GetContent(JSContext* aCx, JS::MutableHandle<JSObject*> aRetval,
                   mozilla::dom::CallerType aCallerType,
@@ -913,20 +901,6 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   already_AddRefed<mozilla::dom::Promise> PromiseDocumentFlushed(
       mozilla::dom::PromiseDocumentFlushedCallback& aCallback,
       mozilla::ErrorResult& aError);
-
-  void GetReturnValueOuter(JSContext* aCx,
-                           JS::MutableHandle<JS::Value> aReturnValue,
-                           nsIPrincipal& aSubjectPrincipal,
-                           mozilla::ErrorResult& aError);
-  void GetReturnValue(JSContext* aCx, JS::MutableHandle<JS::Value> aReturnValue,
-                      nsIPrincipal& aSubjectPrincipal,
-                      mozilla::ErrorResult& aError);
-  void SetReturnValueOuter(JSContext* aCx, JS::Handle<JS::Value> aReturnValue,
-                           nsIPrincipal& aSubjectPrincipal,
-                           mozilla::ErrorResult& aError);
-  void SetReturnValue(JSContext* aCx, JS::Handle<JS::Value> aReturnValue,
-                      nsIPrincipal& aSubjectPrincipal,
-                      mozilla::ErrorResult& aError);
 
   void GetInterface(JSContext* aCx, JS::Handle<JS::Value> aIID,
                     JS::MutableHandle<JS::Value> aRetval,
@@ -1124,10 +1098,14 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   // available.
   nsIPrincipal* GetClientPrincipal();
 
+  // Whether the chrome window is currently in a full screen transition. This
+  // flag is updated from FullscreenTransitionTask.
+  bool IsInFullScreenTransition();
+
   // This method is called if this window loads a 3rd party tracking resource
-  // and the storage is just been granted. The window can reset the partitioned
+  // and the storage is just been changed. The window can reset the partitioned
   // storage objects and switch to the first party cookie jar.
-  void StorageAccessPermissionGranted();
+  void StorageAccessPermissionChanged();
 
  protected:
   static void NotifyDOMWindowDestroyed(nsGlobalWindowInner* aWindow);
@@ -1213,14 +1191,8 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   static uint32_t GetShortcutsPermission(nsIPrincipal* aPrincipal);
 
   // Dispatch a runnable related to the global.
-  virtual nsresult Dispatch(mozilla::TaskCategory aCategory,
-                            already_AddRefed<nsIRunnable>&& aRunnable) override;
-
-  virtual nsISerialEventTarget* EventTargetFor(
-      mozilla::TaskCategory aCategory) const override;
-
-  virtual mozilla::AbstractThread* AbstractMainThreadFor(
-      mozilla::TaskCategory aCategory) override;
+  nsresult Dispatch(already_AddRefed<nsIRunnable>&& aRunnable) const final;
+  nsISerialEventTarget* SerialEventTarget() const final;
 
   void DisableIdleCallbackRequests();
   uint32_t LastIdleRequestHandle() const {
@@ -1491,10 +1463,8 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   static bool sMouseDown;
   static bool sDragServiceDisabled;
 
-  friend class nsDOMScriptableHelper;
   friend class nsDOMWindowUtils;
   friend class mozilla::dom::PostMessageEvent;
-  friend class DesktopNotification;
   friend class mozilla::dom::TimeoutManager;
   friend class IdleRequestExecutor;
   friend class nsGlobalWindowOuter;

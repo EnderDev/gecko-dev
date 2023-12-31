@@ -21,10 +21,11 @@
 #include "mozilla/layers/LayersTypes.h"  // for LayersBackend, etc
 #include "mozilla/layers/CompositorTypes.h"
 #include "mozilla/mozalloc.h"  // for operator delete, etc
-#include "nsDebug.h"           // for NS_ASSERTION
-#include "nsISupportsImpl.h"   // for Image::Release, etc
-#include "nsTArray.h"          // for nsTArray
-#include "nsThreadUtils.h"     // for NS_IsMainThread
+#include "mozilla/TypedEnumBits.h"
+#include "nsDebug.h"          // for NS_ASSERTION
+#include "nsISupportsImpl.h"  // for Image::Release, etc
+#include "nsTArray.h"         // for nsTArray
+#include "nsThreadUtils.h"    // for NS_IsMainThread
 #include "mozilla/Atomics.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/EnumeratedArray.h"
@@ -44,6 +45,7 @@ namespace mozilla {
 
 namespace layers {
 
+class GPUVideoImage;
 class ImageClient;
 class ImageCompositeNotification;
 class ImageContainer;
@@ -124,9 +126,18 @@ class Image {
   int32_t GetSerial() const { return mSerial; }
 
   bool IsDRM() const { return mIsDRM; }
-  void SetIsDRM(bool aIsDRM) { mIsDRM = aIsDRM; }
+  virtual void SetIsDRM(bool aIsDRM) { mIsDRM = aIsDRM; }
 
   virtual already_AddRefed<gfx::SourceSurface> GetAsSourceSurface() = 0;
+
+  enum class BuildSdbFlags : uint8_t {
+    Default = 0,
+    RgbOnly = 1 << 0,
+  };
+
+  virtual nsresult BuildSurfaceDescriptorBuffer(
+      SurfaceDescriptorBuffer& aSdBuffer, BuildSdbFlags aFlags,
+      const std::function<MemoryOrShmem(uint32_t)>& aAllocate);
 
   virtual bool IsValid() const { return true; }
 
@@ -140,6 +151,7 @@ class Image {
 
   /* Access to derived classes. */
   virtual GLImage* AsGLImage() { return nullptr; }
+  virtual GPUVideoImage* AsGPUVideoImage() { return nullptr; }
 #ifdef MOZ_WIDGET_ANDROID
   virtual SurfaceTextureImage* AsSurfaceTextureImage() { return nullptr; }
 #endif
@@ -154,6 +166,12 @@ class Image {
   virtual NVImage* AsNVImage() { return nullptr; }
 
   virtual Maybe<SurfaceDescriptor> GetDesc();
+
+  static nsresult AllocateSurfaceDescriptorBufferRgb(
+      const gfx::IntSize& aSize, gfx::SurfaceFormat aFormat,
+      uint8_t*& aOutBuffer, SurfaceDescriptorBuffer& aSdBuffer,
+      int32_t& aStride,
+      const std::function<layers::MemoryOrShmem(uint32_t)>& aAllocate);
 
  protected:
   Maybe<SurfaceDescriptor> GetDescFromTexClient(
@@ -180,6 +198,8 @@ class Image {
 
   static mozilla::Atomic<int32_t> sSerialCounter;
 };
+
+MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(Image::BuildSdbFlags)
 
 /**
  * A RecycleBin is owned by an ImageContainer. We store buffers in it that we
@@ -827,9 +847,9 @@ class PlanarYCbCrImage : public Image {
    * Build a SurfaceDescriptorBuffer with this image.  A function to allocate
    * a MemoryOrShmem with the given capacity must be provided.
    */
-  virtual nsresult BuildSurfaceDescriptorBuffer(
-      SurfaceDescriptorBuffer& aSdBuffer,
-      const std::function<MemoryOrShmem(uint32_t)>& aAllocate);
+  nsresult BuildSurfaceDescriptorBuffer(
+      SurfaceDescriptorBuffer& aSdBuffer, BuildSdbFlags aFlags,
+      const std::function<MemoryOrShmem(uint32_t)>& aAllocate) override;
 
  protected:
   already_AddRefed<gfx::SourceSurface> GetAsSourceSurface() override;
@@ -843,7 +863,7 @@ class PlanarYCbCrImage : public Image {
   gfx::IntPoint mOrigin;
   gfx::IntSize mSize;
   gfxImageFormat mOffscreenFormat;
-  RefPtr<gfx::SourceSurface> mSourceSurface;
+  RefPtr<gfx::DataSourceSurface> mSourceSurface;
   uint32_t mBufferSize;
 };
 
@@ -885,6 +905,9 @@ class NVImage final : public Image {
   gfx::IntSize GetSize() const override;
   gfx::IntRect GetPictureRect() const override;
   already_AddRefed<gfx::SourceSurface> GetAsSourceSurface() override;
+  nsresult BuildSurfaceDescriptorBuffer(
+      SurfaceDescriptorBuffer& aSdBuffer, BuildSdbFlags aFlags,
+      const std::function<MemoryOrShmem(uint32_t)>& aAllocate) override;
   bool IsValid() const override;
   NVImage* AsNVImage() override;
 
@@ -903,7 +926,7 @@ class NVImage final : public Image {
   uint32_t mBufferSize;
   gfx::IntSize mSize;
   Data mData;
-  RefPtr<gfx::SourceSurface> mSourceSurface;
+  RefPtr<gfx::DataSourceSurface> mSourceSurface;
 };
 
 /**

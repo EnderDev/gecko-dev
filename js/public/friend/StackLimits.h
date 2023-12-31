@@ -44,6 +44,13 @@ extern MOZ_COLD JS_PUBLIC_API void DecWasiRecursionDepth(FrontendContext* fc);
 extern MOZ_COLD JS_PUBLIC_API bool CheckWasiRecursionLimit(FrontendContext* fc);
 #endif  // __wasi__
 
+// The minimum margin for stack limit to ensure that the periodic
+// AutoCheckRecursionLimit operation is sufficient.
+//
+// See FrontendContext::checkAndUpdateFrontendContextRecursionLimit and
+// JS::ThreadStackQuotaForSize.
+static constexpr size_t MinimumStackLimitMargin = 32 * 1024;
+
 // AutoCheckRecursionLimit can be used to check whether we're close to using up
 // the C++ stack.
 //
@@ -74,8 +81,6 @@ class MOZ_RAII AutoCheckRecursionLimit {
   JS::NativeStackLimit getStackLimit(FrontendContext* fc) const;
 
   JS_PUBLIC_API JS::StackKind stackKindForCurrentPrincipal(JSContext* cx) const;
-
-  JS_PUBLIC_API void assertMainThread(JSContext* cx) const;
 
 #ifdef __wasi__
   // The JSContext outlives AutoCheckRecursionLimit so it is safe to use raw
@@ -203,7 +208,6 @@ AutoCheckRecursionLimit::getStackLimitSlow(JSContext* cx) const {
 MOZ_ALWAYS_INLINE JS::NativeStackLimit
 AutoCheckRecursionLimit::getStackLimitHelper(JSContext* cx, JS::StackKind kind,
                                              int extraAllowance) const {
-  assertMainThread(cx);
   JS::NativeStackLimit limit =
       JS::RootingContext::get(cx)->nativeStackLimit[kind];
 #if JS_STACK_GROWTH_DIRECTION > 0
@@ -257,8 +261,16 @@ MOZ_ALWAYS_INLINE bool AutoCheckRecursionLimit::checkWithStackPointerDontReport(
   return checkLimitImpl(getStackLimitSlow(cx), sp);
 }
 
+#ifdef DEBUG
+extern void CheckAndUpdateFrontendContextRecursionLimit(FrontendContext* fc,
+                                                        void* sp);
+#endif
+
 MOZ_ALWAYS_INLINE bool AutoCheckRecursionLimit::checkWithStackPointerDontReport(
     FrontendContext* fc, void* sp) const {
+#ifdef DEBUG
+  CheckAndUpdateFrontendContextRecursionLimit(fc, sp);
+#endif
   return checkLimitImpl(getStackLimit(fc), sp);
 }
 

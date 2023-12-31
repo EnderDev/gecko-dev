@@ -166,7 +166,10 @@ class Repository(ABC):
     @abstractmethod
     def find_latest_common_revision(self, base_ref_or_rev, head_rev):
         """Find the latest revision that is common to both the given
-        ``head_rev`` and ``base_ref_or_rev``"""
+        ``head_rev`` and ``base_ref_or_rev``.
+
+        If no common revision exists, ``Repository.NULL_REVISION`` will
+        be returned."""
 
     @abstractmethod
     def does_revision_exist_locally(self, revision):
@@ -225,8 +228,8 @@ class HgRepository(Repository):
         return self.run("path", "-T", "{url}", remote).strip()
 
     def get_commit_message(self, revision=None):
-        revision = revision or self.head_rev
-        return self.run("log", "-r", ".", "-T", "{desc}")
+        revision = revision or "."
+        return self.run("log", "-r", revision, "-T", "{desc}")
 
     def _format_diff_filter(self, diff_filter, for_status=False):
         df = diff_filter.lower()
@@ -296,17 +299,18 @@ class HgRepository(Repository):
         return self.run("update", "--check", ref)
 
     def find_latest_common_revision(self, base_ref_or_rev, head_rev):
-        return self.run(
+        ancestor = self.run(
             "log",
             "-r",
             f"last(ancestors('{base_ref_or_rev}') and ancestors('{head_rev}'))",
             "--template",
             "{node}",
         ).strip()
+        return ancestor or self.NULL_REVISION
 
     def does_revision_exist_locally(self, revision):
         try:
-            return self.run("log", "-r", revision).strip() != ""
+            return bool(self.run("log", "-r", revision).strip())
         except subprocess.CalledProcessError as e:
             # Error code 255 comes with the message:
             # "abort: unknown revision $REVISION"
@@ -349,13 +353,19 @@ class GitRepository(Repository):
     def remote_name(self):
         try:
             remote_branch_name = self.run(
-                "rev-parse", "--verify", "--abbrev-ref", "--symbolic-full-name", "@{u}"
+                "rev-parse",
+                "--verify",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{u}",
+                stderr=subprocess.PIPE,
             ).strip()
             return remote_branch_name.split("/")[0]
         except subprocess.CalledProcessError as e:
             # Error code 128 comes with the message:
             # "fatal: no upstream configured for branch $BRANCH"
             if e.returncode != 128:
+                print(e.stderr)
                 raise
 
         return self._get_most_suitable_remote("`git remote add origin $URL`")
@@ -415,8 +425,8 @@ class GitRepository(Repository):
         return self.run("remote", "get-url", remote).strip()
 
     def get_commit_message(self, revision=None):
-        revision = revision or self.head_rev
-        return self.run("log", "-n1", "--format=%B")
+        revision = revision or "HEAD"
+        return self.run("log", "-n1", "--format=%B", revision)
 
     def get_changed_files(
         self, diff_filter="ADM", mode="unstaged", rev=None, base_rev=None
@@ -482,7 +492,10 @@ class GitRepository(Repository):
         self.run("checkout", ref)
 
     def find_latest_common_revision(self, base_ref_or_rev, head_rev):
-        return self.run("merge-base", base_ref_or_rev, head_rev).strip()
+        try:
+            return self.run("merge-base", base_ref_or_rev, head_rev).strip()
+        except subprocess.CalledProcessError:
+            return self.NULL_REVISION
 
     def does_revision_exist_locally(self, revision):
         try:

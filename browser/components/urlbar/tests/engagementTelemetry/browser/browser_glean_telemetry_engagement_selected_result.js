@@ -6,8 +6,14 @@
 // Test for the following data of engagement telemetry.
 // - selected_result
 // - selected_result_subtype
+// - selected_position
 // - provider
 // - results
+
+ChromeUtils.defineESModuleGetters(this, {
+  UrlbarProviderClipboard:
+    "resource:///modules/UrlbarProviderClipboard.sys.mjs",
+});
 
 // This test has many subtests and can time out in verify mode.
 requestLongerTimeout(5);
@@ -30,6 +36,7 @@ add_task(async function selected_result_autofill_about() {
       {
         selected_result: "autofill_about",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "Autofill",
         results: "autofill_about",
       },
@@ -52,6 +59,7 @@ add_task(async function selected_result_autofill_adaptive() {
       {
         selected_result: "autofill_adaptive",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "Autofill",
         results: "autofill_adaptive",
       },
@@ -64,6 +72,7 @@ add_task(async function selected_result_autofill_adaptive() {
 add_task(async function selected_result_autofill_origin() {
   await doTest(async browser => {
     await PlacesTestUtils.addVisits("https://example.com/test");
+    await PlacesFrecencyRecalculator.recalculateAnyOutdatedFrecencies();
     await openPopup("exa");
     await doEnter();
 
@@ -71,6 +80,7 @@ add_task(async function selected_result_autofill_origin() {
       {
         selected_result: "autofill_origin",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "Autofill",
         results: "autofill_origin,history",
       },
@@ -81,6 +91,7 @@ add_task(async function selected_result_autofill_origin() {
 add_task(async function selected_result_autofill_url() {
   await doTest(async browser => {
     await PlacesTestUtils.addVisits("https://example.com/test");
+    await PlacesFrecencyRecalculator.recalculateAnyOutdatedFrecencies();
     await openPopup("https://example.com/test");
     await doEnter();
 
@@ -88,6 +99,7 @@ add_task(async function selected_result_autofill_url() {
       {
         selected_result: "autofill_url",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "Autofill",
         results: "autofill_url",
       },
@@ -111,6 +123,7 @@ add_task(async function selected_result_bookmark() {
       {
         selected_result: "bookmark",
         selected_result_subtype: "",
+        selected_position: 3,
         provider: "Places",
         results: "search_engine,action,bookmark",
       },
@@ -134,6 +147,7 @@ add_task(async function selected_result_history() {
       {
         selected_result: "history",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "Places",
         results: "search_engine,history",
       },
@@ -157,6 +171,7 @@ add_task(async function selected_result_keyword() {
       {
         selected_result: "keyword",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "BookmarkKeywords",
         results: "keyword",
       },
@@ -175,6 +190,7 @@ add_task(async function selected_result_search_engine() {
       {
         selected_result: "search_engine",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "HeuristicFallback",
         results: "search_engine",
       },
@@ -199,6 +215,7 @@ add_task(async function selected_result_search_suggest() {
       {
         selected_result: "search_suggest",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "SearchSuggestions",
         results: "search_engine,search_suggest,search_suggest",
       },
@@ -227,6 +244,7 @@ add_task(async function selected_result_search_history() {
       {
         selected_result: "search_history",
         selected_result_subtype: "",
+        selected_position: 3,
         provider: "SearchSuggestions",
         results: "search_engine,search_history,search_history",
       },
@@ -245,6 +263,7 @@ add_task(async function selected_result_url() {
       {
         selected_result: "url",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "HeuristicFallback",
         results: "url",
       },
@@ -257,13 +276,14 @@ add_task(async function selected_result_action() {
     await showResultByArrowDown();
     await selectRowByProvider("quickactions");
     const onLoad = BrowserTestUtils.browserLoaded(gBrowser.selectedBrowser);
-    doClickSubButton(".urlbarView-quickaction-row[data-key=addons]");
+    doClickSubButton(".urlbarView-quickaction-button[data-key=addons]");
     await onLoad;
 
     assertEngagementTelemetry([
       {
         selected_result: "action",
         selected_result_subtype: "addons",
+        selected_position: 1,
         provider: "quickactions",
         results: "action",
       },
@@ -284,6 +304,7 @@ add_task(async function selected_result_tab() {
       {
         selected_result: "tab",
         selected_result_subtype: "",
+        selected_position: 4,
         provider: "Places",
         results: "search_engine,search_suggest,search_suggest,tab",
       },
@@ -305,6 +326,7 @@ add_task(async function selected_result_remote_tab() {
       {
         selected_result: "remote_tab",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "RemoteTabs",
         results: "search_engine,remote_tab",
       },
@@ -326,6 +348,7 @@ add_task(async function selected_result_addon() {
       {
         selected_result: "addon",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "Omnibox",
         results: "addon",
       },
@@ -360,6 +383,7 @@ add_task(async function selected_result_tab_to_search() {
       {
         selected_result: "tab_to_search",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "TabToSearch",
         results: "search_engine,tab_to_search,history",
       },
@@ -380,6 +404,7 @@ add_task(async function selected_result_top_site() {
       {
         selected_result: "top_site",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "UrlbarProviderTopSites",
         results: "top_site,action",
       },
@@ -403,12 +428,45 @@ add_task(async function selected_result_calc() {
       {
         selected_result: "calc",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "calculator",
         results: "search_engine,calc",
       },
     ]);
   });
 
+  await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function selected_result_clipboard() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ["browser.urlbar.clipboard.featureGate", true],
+      ["browser.urlbar.suggest.clipboard", true],
+    ],
+  });
+  SpecialPowers.clipboardCopyString(
+    "https://example.com/selected_result_clipboard"
+  );
+
+  await doTest(async browser => {
+    await openPopup("");
+    await selectRowByProvider("UrlbarProviderClipboard");
+    await doEnter();
+
+    assertEngagementTelemetry([
+      {
+        selected_result: "clipboard",
+        selected_result_subtype: "",
+        selected_position: 1,
+        provider: "UrlbarProviderClipboard",
+        results: "clipboard,action",
+      },
+    ]);
+  });
+
+  SpecialPowers.clipboardCopyString("");
+  UrlbarProviderClipboard.setPreviousClipboardValue("");
   await SpecialPowers.popPrefEnv();
 });
 
@@ -428,6 +486,7 @@ add_task(async function selected_result_unit() {
       {
         selected_result: "unit",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "UnitConversion",
         results: "search_engine,unit",
       },
@@ -455,7 +514,7 @@ add_task(async function selected_result_site_specific_contextual_search() {
       false,
       "https://example.com/"
     );
-    BrowserTestUtils.loadURIString(
+    BrowserTestUtils.startLoadingURIString(
       gBrowser.selectedBrowser,
       "https://example.com/"
     );
@@ -469,6 +528,7 @@ add_task(async function selected_result_site_specific_contextual_search() {
       {
         selected_result: "site_specific_contextual_search",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "UrlbarProviderContextualSearch",
         results: "search_engine,site_specific_contextual_search",
       },
@@ -537,6 +597,7 @@ add_task(async function selected_result_experimental_addon() {
       {
         selected_result: "experimental_addon",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "testProvider",
         results: "search_engine,experimental_addon",
       },
@@ -546,7 +607,7 @@ add_task(async function selected_result_experimental_addon() {
   await extension.unload();
 });
 
-add_task(async function selected_result_adm_sponsored() {
+add_task(async function selected_result_rs_adm_sponsored() {
   const cleanupQuickSuggest = await ensureQuickSuggestInit();
 
   await doTest(async browser => {
@@ -558,16 +619,17 @@ add_task(async function selected_result_adm_sponsored() {
       {
         selected_result: "rs_adm_sponsored",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "UrlbarProviderQuickSuggest",
         results: "search_engine,rs_adm_sponsored",
       },
     ]);
   });
 
-  cleanupQuickSuggest();
+  await cleanupQuickSuggest();
 });
 
-add_task(async function selected_result_adm_nonsponsored() {
+add_task(async function selected_result_rs_adm_nonsponsored() {
   const cleanupQuickSuggest = await ensureQuickSuggestInit();
 
   await doTest(async browser => {
@@ -579,13 +641,14 @@ add_task(async function selected_result_adm_nonsponsored() {
       {
         selected_result: "rs_adm_nonsponsored",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "UrlbarProviderQuickSuggest",
         results: "search_engine,rs_adm_nonsponsored",
       },
     ]);
   });
 
-  cleanupQuickSuggest();
+  await cleanupQuickSuggest();
 });
 
 add_task(async function selected_result_input_field() {
@@ -593,6 +656,7 @@ add_task(async function selected_result_input_field() {
     {
       selected_result: "input_field",
       selected_result_subtype: "",
+      selected_position: 0,
       provider: null,
       results: "",
     },
@@ -628,13 +692,14 @@ add_task(async function selected_result_weather() {
       {
         selected_result: "weather",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "Weather",
         results: "search_engine,weather",
       },
     ]);
   });
 
-  cleanupQuickSuggest();
+  await cleanupQuickSuggest();
   await SpecialPowers.popPrefEnv();
 });
 
@@ -662,13 +727,14 @@ add_task(async function selected_result_navigational() {
       {
         selected_result: "merino_top_picks",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "UrlbarProviderQuickSuggest",
         results: "search_engine,merino_top_picks",
       },
     ]);
   });
 
-  cleanupQuickSuggest();
+  await cleanupQuickSuggest();
 });
 
 add_task(async function selected_result_dynamic_wikipedia() {
@@ -696,13 +762,14 @@ add_task(async function selected_result_dynamic_wikipedia() {
       {
         selected_result: "merino_wikipedia",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "UrlbarProviderQuickSuggest",
         results: "search_engine,merino_wikipedia",
       },
     ]);
   });
 
-  cleanupQuickSuggest();
+  await cleanupQuickSuggest();
 });
 
 add_task(async function selected_result_search_shortcut_button() {
@@ -734,6 +801,7 @@ add_task(async function selected_result_search_shortcut_button() {
       {
         selected_result: "search_shortcut_button",
         selected_result_subtype: "",
+        selected_position: 0,
         provider: null,
         results: "search_engine",
       },
@@ -786,6 +854,7 @@ add_task(async function selected_result_trending() {
       {
         selected_result: "trending_search",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "SearchSuggestions",
         results: "trending_search",
       },
@@ -852,6 +921,7 @@ add_task(async function selected_result_trending_rich() {
       {
         selected_result: "trending_search_rich",
         selected_result_subtype: "",
+        selected_position: 1,
         provider: "SearchSuggestions",
         results: "trending_search_rich",
       },
@@ -909,12 +979,61 @@ add_task(async function selected_result_addons() {
       {
         selected_result: "merino_amo",
         selected_result_subtype: "",
+        selected_position: 2,
         provider: "UrlbarProviderQuickSuggest",
         results: "search_engine,merino_amo",
       },
     ]);
   });
 
-  cleanupQuickSuggest();
+  await cleanupQuickSuggest();
   await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function selected_result_rust_adm_sponsored() {
+  const cleanupQuickSuggest = await ensureQuickSuggestInit({
+    prefs: [["quicksuggest.rustEnabled", true]],
+  });
+
+  await doTest(async browser => {
+    await openPopup("sponsored");
+    await selectRowByURL("https://example.com/sponsored");
+    await doEnter();
+
+    assertEngagementTelemetry([
+      {
+        selected_result: "rust_adm_sponsored",
+        selected_result_subtype: "",
+        selected_position: 2,
+        provider: "UrlbarProviderQuickSuggest",
+        results: "search_engine,rust_adm_sponsored",
+      },
+    ]);
+  });
+
+  await cleanupQuickSuggest();
+});
+
+add_task(async function selected_result_rust_adm_nonsponsored() {
+  const cleanupQuickSuggest = await ensureQuickSuggestInit({
+    prefs: [["quicksuggest.rustEnabled", true]],
+  });
+
+  await doTest(async browser => {
+    await openPopup("nonsponsored");
+    await selectRowByURL("https://example.com/nonsponsored");
+    await doEnter();
+
+    assertEngagementTelemetry([
+      {
+        selected_result: "rust_adm_nonsponsored",
+        selected_result_subtype: "",
+        selected_position: 2,
+        provider: "UrlbarProviderQuickSuggest",
+        results: "search_engine,rust_adm_nonsponsored",
+      },
+    ]);
+  });
+
+  await cleanupQuickSuggest();
 });

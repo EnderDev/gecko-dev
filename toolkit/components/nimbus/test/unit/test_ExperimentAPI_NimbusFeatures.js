@@ -7,9 +7,7 @@ const { JsonSchema } = ChromeUtils.importESModule(
   "resource://gre/modules/JsonSchema.sys.mjs"
 );
 
-Cu.importGlobalProperties(["fetch"]);
-
-XPCOMUtils.defineLazyGetter(this, "fetchSchema", () => {
+ChromeUtils.defineLazyGetter(this, "fetchSchema", () => {
   return fetch("resource://nimbus/schemas/NimbusEnrollment.schema.json", {
     credentials: "omit",
   }).then(rsp => rsp.json());

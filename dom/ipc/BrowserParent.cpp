@@ -284,9 +284,6 @@ BrowserParent::BrowserParent(ContentParent* aManager, const TabId& aTabId,
       mBrowserBridgeParent(nullptr),
       mBrowserHost(nullptr),
       mContentCache(*this),
-      mRemoteLayerTreeOwner{},
-      mLayerTreeEpoch{1},
-      mChildToParentConversionMatrix{},
       mRect(0, 0, 0, 0),
       mDimensions(0, 0),
       mDPI(0),
@@ -294,10 +291,7 @@ BrowserParent::BrowserParent(ContentParent* aManager, const TabId& aTabId,
       mDefaultScale(0),
       mUpdatedDimensions(false),
       mSizeMode(nsSizeMode_Normal),
-      mClientOffset{},
-      mChromeOffset{},
       mCreatingWindow(false),
-      mDelayedFrameScripts{},
       mVsyncParent(nullptr),
       mMarkedDestroying(false),
       mIsDestroyed(false),
@@ -1359,10 +1353,8 @@ IPCResult BrowserParent::RecvNewWindowGlobal(
   // the wrong type of webIsolated process
   EnumSet<ContentParent::ValidatePrincipalOptions> validationOptions = {};
   nsCOMPtr<nsIURI> docURI = aInit.documentURI();
-  if (docURI->SchemeIs("about") || docURI->SchemeIs("blob") ||
-      docURI->SchemeIs("chrome")) {
+  if (docURI->SchemeIs("blob") || docURI->SchemeIs("chrome")) {
     // XXXckerschb TODO - Do not use SystemPrincipal for:
-    // Bug 1700639: about:plugins
     // Bug 1699385: Remove allowSystem for blobs
     // Bug 1698087: chrome://devtools/content/shared/webextension-fallback.html
     // chrome reftests, e.g.
@@ -1370,6 +1362,20 @@ IPCResult BrowserParent::RecvNewWindowGlobal(
     //   * chrome://reftest/content/xul-document-load/test003.xhtml
     //   * chrome://reftest/content/forms/input/text/centering-1.xhtml
     validationOptions = {ContentParent::ValidatePrincipalOptions::AllowSystem};
+  }
+
+  // Some reftests have frames inside their chrome URIs and those load
+  // about:blank:
+  if (xpc::IsInAutomation() && docURI->SchemeIs("about")) {
+    WindowGlobalParent* wgp = browsingContext->GetParentWindowContext();
+    nsAutoCString spec;
+    NS_ENSURE_SUCCESS(docURI->GetSpec(spec),
+                      IPC_FAIL(this, "Should have spec for about: URI"));
+    if (spec.Equals("about:blank") && wgp &&
+        wgp->DocumentPrincipal()->IsSystemPrincipal()) {
+      validationOptions = {
+          ContentParent::ValidatePrincipalOptions::AllowSystem};
+    }
   }
 
   if (!mManager->ValidatePrincipal(aInit.principal(), validationOptions)) {
@@ -1418,6 +1424,7 @@ void BrowserParent::MouseEnterIntoWidget() {
     // become the current cursor.  When we mouseexit, we stop.
     mRemoteTargetSetsCursor = true;
     widget->SetCursor(mCursor);
+    EventStateManager::ClearCursorSettingManager();
   }
 
   // Mark that we have missed a mouse enter event, so that
@@ -1450,13 +1457,13 @@ void BrowserParent::SendRealMouseEvent(WidgetMouseEvent& aEvent) {
 
   aEvent.mRefPoint = TransformParentToChild(aEvent.mRefPoint);
 
-  nsCOMPtr<nsIWidget> widget = GetWidget();
-  if (widget) {
+  if (nsCOMPtr<nsIWidget> widget = GetWidget()) {
     // When we mouseenter the remote target, the remote target's cursor should
     // become the current cursor.  When we mouseexit, we stop.
     if (eMouseEnterIntoWidget == aEvent.mMessage) {
       mRemoteTargetSetsCursor = true;
       widget->SetCursor(mCursor);
+      EventStateManager::ClearCursorSettingManager();
     } else if (eMouseExitFromWidget == aEvent.mMessage) {
       mRemoteTargetSetsCursor = false;
     }
@@ -3026,7 +3033,10 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyContentBlockingEvent(
     nsTArray<nsCString>&& aTrackingFullHashes,
     const Maybe<
         mozilla::ContentBlockingNotifier::StorageAccessPermissionGrantedReason>&
-        aReason) {
+        aReason,
+    const Maybe<mozilla::ContentBlockingNotifier::CanvasFingerprinter>&
+        aCanvasFingerprinter,
+    const Maybe<bool>& aCanvasFingerprinterKnownText) {
   RefPtr<BrowsingContext> bc = GetBrowsingContext();
 
   if (!bc || bc->IsDiscarded()) {
@@ -3049,8 +3059,9 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyContentBlockingEvent(
       aRequestData.requestURI(), aRequestData.originalRequestURI(),
       aRequestData.matchedList());
 
-  wgp->NotifyContentBlockingEvent(aEvent, request, aBlocked, aTrackingOrigin,
-                                  aTrackingFullHashes, aReason);
+  wgp->NotifyContentBlockingEvent(
+      aEvent, request, aBlocked, aTrackingOrigin, aTrackingFullHashes, aReason,
+      aCanvasFingerprinter, aCanvasFingerprinterKnownText);
 
   return IPC_OK();
 }
@@ -3536,20 +3547,6 @@ bool BrowserParent::GetRenderLayers() { return mRenderLayers; }
 
 void BrowserParent::SetRenderLayers(bool aEnabled) {
   if (aEnabled == mRenderLayers) {
-    if (aEnabled && mHasLayers && mIsPreservingLayers) {
-      // RenderLayers might be called when we've been preserving layers,
-      // and already had layers uploaded. In that case, the MozLayerTreeReady
-      // event will not naturally arrive, which can confuse the front-end
-      // layer. So we fire the event here.
-      RefPtr<BrowserParent> self = this;
-      LayersObserverEpoch epoch = mLayerTreeEpoch;
-      NS_DispatchToMainThread(NS_NewRunnableFunction(
-          "dom::BrowserParent::RenderLayers", [self, epoch]() {
-            MOZ_ASSERT(NS_IsMainThread());
-            self->LayerTreeUpdate(epoch, true);
-          }));
-    }
-
     return;
   }
 
@@ -3565,18 +3562,14 @@ void BrowserParent::SetRenderLayers(bool aEnabled) {
 }
 
 void BrowserParent::SetRenderLayersInternal(bool aEnabled) {
-  // Increment the epoch so that layer tree updates from previous
-  // RenderLayers requests are ignored.
-  mLayerTreeEpoch = mLayerTreeEpoch.Next();
-
-  Unused << SendRenderLayers(aEnabled, mLayerTreeEpoch);
+  Unused << SendRenderLayers(aEnabled);
 
   // Ask the child to repaint/unload layers using the PHangMonitor
   // channel/thread (which may be less congested).
   if (aEnabled) {
-    Manager()->PaintTabWhileInterruptingJS(this, mLayerTreeEpoch);
+    Manager()->PaintTabWhileInterruptingJS(this);
   } else {
-    Manager()->UnloadLayersWhileInterruptingJS(this, mLayerTreeEpoch);
+    Manager()->UnloadLayersWhileInterruptingJS(this);
   }
 }
 
@@ -3735,36 +3728,31 @@ void BrowserParent::NavigateByKey(bool aForward, bool aForDocumentNavigation) {
   Unused << SendNavigateByKey(aForward, aForDocumentNavigation);
 }
 
-void BrowserParent::LayerTreeUpdate(const LayersObserverEpoch& aEpoch,
-                                    bool aActive) {
-  // Ignore updates if we're an out-of-process iframe. For oop iframes, our
-  // |mFrameElement| is that of the top-level document, and so AsyncTabSwitcher
-  // will treat MozLayerTreeReady / MozLayerTreeCleared events as if they came
-  // from the top-level tab, which is wrong.
-  //
-  // XXX: Should we still be updating |mHasLayers|?
+void BrowserParent::LayerTreeUpdate(bool aActive) {
+  if (NS_WARN_IF(mHasLayers == aActive)) {
+    return;
+  }
+  mHasPresented |= aActive;
+  mHasLayers = aActive;
   if (GetBrowserBridgeParent()) {
+    // Ignore updates if we're an out-of-process iframe. For oop iframes, our
+    // |mFrameElement| is that of the top-level document, and so
+    // AsyncTabSwitcher will treat MozLayerTreeReady / MozLayerTreeCleared
+    // events as if they came from the top-level tab, which is wrong.
     return;
   }
 
-  // Ignore updates from old epochs. They might tell us that layers are
-  // available when we've already sent a message to clear them. We can't trust
-  // the update in that case since layers could disappear anytime after that.
-  if (aEpoch != mLayerTreeEpoch || mIsDestroyed) {
+  if (mIsDestroyed) {
     return;
   }
 
   RefPtr<Element> frameElement = mFrameElement;
-  if (!frameElement) {
-    NS_WARNING("Could not locate target for layer tree message.");
+  if (NS_WARN_IF(!frameElement)) {
     return;
   }
 
-  mHasLayers = aActive;
-
   RefPtr<Event> event = NS_NewDOMEvent(frameElement, nullptr, nullptr);
   if (aActive) {
-    mHasPresented = true;
     event->InitEvent(u"MozLayerTreeReady"_ns, true, false);
   } else {
     event->InitEvent(u"MozLayerTreeCleared"_ns, true, false);
@@ -3772,15 +3760,6 @@ void BrowserParent::LayerTreeUpdate(const LayersObserverEpoch& aEpoch,
   event->SetTrusted(true);
   event->WidgetEventPtr()->mFlags.mOnlyChromeDispatch = true;
   frameElement->DispatchEvent(*event);
-}
-
-mozilla::ipc::IPCResult BrowserParent::RecvPaintWhileInterruptingJSNoOp(
-    const LayersObserverEpoch& aEpoch) {
-  // We sent a PaintWhileInterruptingJS message when layers were already
-  // visible. In this case, we should act as if an update occurred even though
-  // we already have the layers.
-  LayerTreeUpdate(aEpoch, true);
-  return IPC_OK();
 }
 
 mozilla::ipc::IPCResult BrowserParent::RecvRemoteIsReadyToHandleInputEvents() {

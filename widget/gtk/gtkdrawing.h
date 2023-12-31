@@ -130,15 +130,11 @@ enum WidgetNodeType : int {
   MOZ_GTK_CHECKBUTTON_CONTAINER,
   /* Paints a GtkCheckButton. flags is a boolean, 1=checked, 0=not checked. */
   MOZ_GTK_CHECKBUTTON,
-  /* Paints the label of a GtkCheckButton (focus outline) */
-  MOZ_GTK_CHECKBUTTON_LABEL,
 
   /* Paints the container part of a GtkRadioButton. */
   MOZ_GTK_RADIOBUTTON_CONTAINER,
   /* Paints a GtkRadioButton. flags is a boolean, 1=checked, 0=not checked. */
   MOZ_GTK_RADIOBUTTON,
-  /* Paints the label of a GtkRadioButton (focus outline) */
-  MOZ_GTK_RADIOBUTTON_LABEL,
   /* Vertical GtkScrollbar counterparts */
   MOZ_GTK_SCROLLBAR_VERTICAL,
   MOZ_GTK_SCROLLBAR_CONTENTS_VERTICAL,
@@ -177,8 +173,6 @@ enum WidgetNodeType : int {
   MOZ_GTK_TEXT_VIEW_TEXT_SELECTION,
   /* Paints a GtkOptionMenu. */
   MOZ_GTK_DROPDOWN,
-  /* Paints a dropdown arrow (a GtkButton containing a down GtkArrow). */
-  MOZ_GTK_DROPDOWN_ARROW,
   /* Paints an entry in an editable option menu */
   MOZ_GTK_DROPDOWN_ENTRY,
 
@@ -233,12 +227,14 @@ enum WidgetNodeType : int {
   MOZ_GTK_TREEVIEW_EXPANDER,
   /* Paints the background of menus, context menus. */
   MOZ_GTK_MENUPOPUP,
-  /* Paints the arrow of menuitems that contain submenus */
-  MOZ_GTK_MENUARROW,
+  /* Menubar for -moz-headerbar colors */
+  MOZ_GTK_MENUBAR,
   /* Paints an arrow in a toolbar button. flags is a GtkArrowType. */
   MOZ_GTK_TOOLBARBUTTON_ARROW,
   /* Paints items of popup menus. */
   MOZ_GTK_MENUITEM,
+  /* Menubar menuitem for foreground colors. */
+  MOZ_GTK_MENUBARITEM,
   /* GtkVPaned base class */
   MOZ_GTK_SPLITTER_HORIZONTAL,
   /* GtkHPaned base class */
@@ -439,15 +435,6 @@ void moz_gtk_get_scale_metrics(GtkOrientation orient, gint* scale_width,
  */
 gint moz_gtk_get_scalethumb_metrics(GtkOrientation orient, gint* thumb_length,
                                     gint* thumb_height);
-
-/**
- * Get the desired size of a dropdown arrow button
- * width:   [OUT] the desired width
- * height:  [OUT] the desired height
- *
- * returns:    MOZ_GTK_SUCCESS if there was no error, an error code otherwise
- */
-gint moz_gtk_get_combo_box_entry_button_size(gint* width, gint* height);
 
 /**
  * Get the desired size of a scroll arrow widget

@@ -1,9 +1,8 @@
-const { HttpServer } = ChromeUtils.import("resource://testing-common/httpd.js");
+const { HttpServer } = ChromeUtils.importESModule(
+  "resource://testing-common/httpd.sys.mjs"
+);
 const { NetUtil } = ChromeUtils.importESModule(
   "resource://gre/modules/NetUtil.sys.mjs"
-);
-const { XPCOMUtils } = ChromeUtils.importESModule(
-  "resource://gre/modules/XPCOMUtils.sys.mjs"
 );
 
 // Since this test creates a TYPE_DOCUMENT channel via javascript, it will
@@ -11,7 +10,7 @@ const { XPCOMUtils } = ChromeUtils.importESModule(
 // the ContentPolicyType assertion in the constructor.
 Services.prefs.setBoolPref("network.loadinfo.skip_type_assertion", true);
 
-XPCOMUtils.defineLazyGetter(this, "URL", function () {
+ChromeUtils.defineLazyGetter(this, "URL", function () {
   return "http://localhost:" + httpserver.identity.primaryPort;
 });
 

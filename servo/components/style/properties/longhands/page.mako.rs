@@ -12,12 +12,12 @@ ${helpers.predefined_type(
     "PageSize",
     "computed::PageSize::auto()",
     engines="gecko",
-    gecko_pref="layout.css.page-size.enabled",
     initial_specified_value="specified::PageSize::auto()",
     spec="https://drafts.csswg.org/css-page-3/#page-size-prop",
     boxed=True,
     animation_value_type="none",
     rule_types_allowed=PAGE_RULE,
+    affects="layout",
 )}
 
 ${helpers.predefined_type(
@@ -27,6 +27,7 @@ ${helpers.predefined_type(
     engines="gecko",
     spec="https://drafts.csswg.org/css-page-3/#using-named-pages",
     animation_value_type="discrete",
+    affects="layout",
 )}
 
 ${helpers.predefined_type(
@@ -39,4 +40,5 @@ ${helpers.predefined_type(
     spec="https://drafts.csswg.org/css-page-3/#page-orientation-prop",
     animation_value_type="none",
     rule_types_allowed=PAGE_RULE,
+    affects="layout",
 )}

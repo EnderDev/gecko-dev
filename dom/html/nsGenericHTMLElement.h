@@ -20,6 +20,8 @@
 #include "mozilla/dom/PopoverData.h"
 #include "mozilla/dom/ToggleEvent.h"
 
+#include <cstdint>
+
 class nsDOMTokenList;
 class nsIFormControlFrame;
 class nsIFrame;
@@ -40,6 +42,7 @@ class PresState;
 namespace dom {
 class ElementInternals;
 class HTMLFormElement;
+enum class FetchPriority : uint8_t;
 }  // namespace dom
 }  // namespace mozilla
 
@@ -58,7 +61,6 @@ class nsGenericHTMLElement : public nsGenericHTMLElementBase {
     NS_ASSERTION(mNodeInfo->NamespaceID() == kNameSpaceID_XHTML,
                  "Unexpected namespace");
     AddStatesSilently(mozilla::dom::ElementState::LTR);
-    SetFlags(NODE_HAS_DIRECTION_LTR);
   }
 
   NS_INLINE_DECL_REFCOUNTING_INHERITED(nsGenericHTMLElement,
@@ -156,6 +158,9 @@ class nsGenericHTMLElement : public nsGenericHTMLElementBase {
   bool PopoverOpen() const;
   bool CheckPopoverValidity(mozilla::dom::PopoverVisibilityState aExpectedState,
                             Document* aExpectedDocument, ErrorResult& aRv);
+  already_AddRefed<mozilla::dom::ToggleEvent> CreateToggleEvent(
+      const nsAString& aEventType, const nsAString& aOldState,
+      const nsAString& aNewState, mozilla::Cancelable);
   /** Returns true if the event has been cancelled. */
   MOZ_CAN_RUN_SCRIPT bool FireToggleEvent(
       mozilla::dom::PopoverVisibilityState aOldState,
@@ -166,20 +171,20 @@ class nsGenericHTMLElement : public nsGenericHTMLElementBase {
       mozilla::dom::PopoverToggleEventTask* aTask,
       mozilla::dom::PopoverVisibilityState aOldState);
   MOZ_CAN_RUN_SCRIPT void ShowPopover(ErrorResult& aRv);
-  MOZ_CAN_RUN_SCRIPT void ShowPopoverInternal(
-      nsGenericHTMLFormControlElementWithState* aInvoker, ErrorResult& aRv);
+  MOZ_CAN_RUN_SCRIPT void ShowPopoverInternal(Element* aInvoker,
+                                              ErrorResult& aRv);
   MOZ_CAN_RUN_SCRIPT_BOUNDARY void HidePopoverWithoutRunningScript();
   MOZ_CAN_RUN_SCRIPT void HidePopoverInternal(bool aFocusPreviousElement,
                                               bool aFireEvents,
                                               ErrorResult& aRv);
   MOZ_CAN_RUN_SCRIPT void HidePopover(ErrorResult& aRv);
-  MOZ_CAN_RUN_SCRIPT void TogglePopover(
+  MOZ_CAN_RUN_SCRIPT bool TogglePopover(
       const mozilla::dom::Optional<bool>& aForce, ErrorResult& aRv);
   MOZ_CAN_RUN_SCRIPT void FocusPopover();
   void ForgetPreviouslyFocusedElementAfterHidingPopover();
   MOZ_CAN_RUN_SCRIPT void FocusPreviousElementAfterHidingPopover();
 
-  MOZ_CAN_RUN_SCRIPT void FocusCandidate(Element&, bool aClearUpFocus);
+  MOZ_CAN_RUN_SCRIPT void FocusCandidate(Element*, bool aClearUpFocus);
 
   void SetNonce(const nsAString& aNonce) {
     SetProperty(nsGkAtoms::nonce, new nsString(aNonce),
@@ -359,14 +364,6 @@ class nsGenericHTMLElement : public nsGenericHTMLElementBase {
   void Compact() { mAttrs.Compact(); }
 
   void UpdateEditableState(bool aNotify) override;
-
-  mozilla::dom::ElementState IntrinsicState() const override;
-
-  // Helper for setting our editable flag and notifying
-  void DoSetEditableFlag(bool aEditable, bool aNotify) {
-    SetEditableFlag(aEditable);
-    UpdateState(aNotify);
-  }
 
   bool ParseAttribute(int32_t aNamespaceID, nsAtom* aAttribute,
                       const nsAString& aValue,
@@ -687,7 +684,19 @@ class nsGenericHTMLElement : public nsGenericHTMLElementBase {
     GetAttr(nsGkAtoms::value, aResult);
   }
 
+  // <https://html.spec.whatwg.org/#fetch-priority-attribute>.
+  static mozilla::dom::FetchPriority ToFetchPriority(const nsAString& aValue);
+
+  void GetFetchPriority(nsAString& aFetchPriority) const;
+
+  void SetFetchPriority(const nsAString& aFetchPriority) {
+    SetHTMLAttr(nsGkAtoms::fetchpriority, aFetchPriority);
+  }
+
  protected:
+  static void ParseFetchPriority(const nsAString& aValue, nsAttrValue& aResult);
+
+ private:
   /**
    * Add/remove this element to the documents name cache
    */
@@ -1024,6 +1033,11 @@ class nsGenericHTMLFormElement : public nsGenericHTMLElement {
    */
   already_AddRefed<nsILayoutHistoryState> GetLayoutHistory(bool aRead);
 
+  // Form changes (in particular whether our current form has been submitted
+  // invalidly) affect the user-valid/user-invalid pseudo-classes. Sub-classes
+  // can override this to react to it.
+  virtual void UpdateValidityElementStates(bool aNotify) {}
+
  protected:
   virtual ~nsGenericHTMLFormElement() = default;
 
@@ -1035,7 +1049,8 @@ class nsGenericHTMLFormElement : public nsGenericHTMLElement {
                     nsIPrincipal* aMaybeScriptedPrincipal,
                     bool aNotify) override;
 
-  virtual void BeforeSetForm(bool aBindToTree) {}
+  virtual void BeforeSetForm(mozilla::dom::HTMLFormElement* aForm,
+                             bool aBindToTree) {}
 
   virtual void AfterClearForm(bool aUnbindOrDelete) {}
 
@@ -1044,6 +1059,7 @@ class nsGenericHTMLFormElement : public nsGenericHTMLElement {
    * state to decide whether our disabled flag should be toggled.
    */
   virtual void UpdateDisabledState(bool aNotify);
+  bool IsReadOnlyInternal() const final;
 
   virtual void SetFormInternal(mozilla::dom::HTMLFormElement* aForm,
                                bool aBindToTree) {}
@@ -1164,7 +1180,6 @@ class nsGenericHTMLFormControlElement : public nsGenericHTMLFormElement,
   virtual ~nsGenericHTMLFormControlElement();
 
   // Element
-  mozilla::dom::ElementState IntrinsicState() const override;
   bool IsLabelable() const override;
 
   // nsGenericHTMLFormElement
@@ -1227,10 +1242,21 @@ class nsGenericHTMLFormControlElementWithState
     SetHTMLAttr(nsGkAtoms::popovertargetaction, aValue);
   }
 
+  // InvokerElement
+  mozilla::dom::Element* GetInvokeTargetElement() const;
+  void SetInvokeTargetElement(mozilla::dom::Element*);
+  void GetInvokeAction(nsAString& aValue) const;
+  nsAtom* GetInvokeAction() const;
+  void SetInvokeAction(const nsAString& aValue) {
+    SetHTMLAttr(nsGkAtoms::invokeaction, aValue);
+  }
+
   /**
    * https://html.spec.whatwg.org/#popover-target-attribute-activation-behavior
    */
   MOZ_CAN_RUN_SCRIPT void HandlePopoverTargetAction();
+
+  MOZ_CAN_RUN_SCRIPT void HandleInvokeTargetAction();
 
   /**
    * Get the presentation state for a piece of content, or create it if it does

@@ -17,6 +17,7 @@
 #include "mozilla/layers/AnimationHelper.h"  // for CompositorAnimationStorage
 #include "mozilla/layers/APZCTreeManagerParent.h"  // for APZCTreeManagerParent
 #include "mozilla/layers/APZUpdater.h"             // for APZUpdater
+#include "mozilla/layers/CompositorManagerParent.h"
 #include "mozilla/layers/CompositorOptions.h"
 #include "mozilla/layers/CompositorThread.h"
 #include "mozilla/layers/LayerTreeOwnerTracker.h"
@@ -75,7 +76,7 @@ ContentCompositorBridgeParent::AllocPAPZCTreeManagerParent(
     // retain a reference to itself, through the checkerboard observer.
     LayersId dummyId{0};
     const bool connectedToWebRender = false;
-    RefPtr<APZCTreeManager> temp = new APZCTreeManager(dummyId);
+    RefPtr<APZCTreeManager> temp = APZCTreeManager::Create(dummyId);
     RefPtr<APZUpdater> tempUpdater = new APZUpdater(temp, connectedToWebRender);
     tempUpdater->ClearTree(dummyId);
     return new APZCTreeManagerParent(aLayersId, temp, tempUpdater);
@@ -403,9 +404,9 @@ PTextureParent* ContentCompositorBridgeParent::AllocPTextureParent(
         << "Texture backend is wrong";
   }
 
-  return TextureHost::CreateIPDLActor(this, aSharedData, std::move(aReadLock),
-                                      aLayersBackend, aFlags, aSerial,
-                                      aExternalImageId);
+  return TextureHost::CreateIPDLActor(
+      this, aSharedData, std::move(aReadLock), aLayersBackend, aFlags,
+      mCompositorManager->GetContentId(), aSerial, aExternalImageId);
 }
 
 bool ContentCompositorBridgeParent::DeallocPTextureParent(
@@ -413,39 +414,12 @@ bool ContentCompositorBridgeParent::DeallocPTextureParent(
   return TextureHost::DestroyIPDLActor(actor);
 }
 
-mozilla::ipc::IPCResult ContentCompositorBridgeParent::RecvInitPCanvasParent(
-    Endpoint<PCanvasParent>&& aEndpoint) {
-  MOZ_RELEASE_ASSERT(!mCanvasTranslator,
-                     "mCanvasTranslator must be released before recreating.");
-
-  mCanvasTranslator = CanvasTranslator::Create(std::move(aEndpoint));
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult
-ContentCompositorBridgeParent::RecvReleasePCanvasParent() {
-  MOZ_RELEASE_ASSERT(mCanvasTranslator,
-                     "mCanvasTranslator hasn't been created.");
-
-  mCanvasTranslator = nullptr;
-  return IPC_OK();
-}
-
-UniquePtr<SurfaceDescriptor>
-ContentCompositorBridgeParent::LookupSurfaceDescriptorForClientTexture(
-    const int64_t aTextureId) {
-  MOZ_RELEASE_ASSERT(mCanvasTranslator,
-                     "mCanvasTranslator hasn't been created.");
-
-  return mCanvasTranslator->WaitForSurfaceDescriptor(aTextureId);
-}
-
 bool ContentCompositorBridgeParent::IsSameProcess() const {
   return OtherPid() == base::GetCurrentProcId();
 }
 
-void ContentCompositorBridgeParent::ObserveLayersUpdate(
-    LayersId aLayersId, LayersObserverEpoch aEpoch, bool aActive) {
+void ContentCompositorBridgeParent::ObserveLayersUpdate(LayersId aLayersId,
+                                                        bool aActive) {
   MOZ_ASSERT(aLayersId.IsValid());
 
   CompositorBridgeParent::LayerTreeState* state =
@@ -454,7 +428,7 @@ void ContentCompositorBridgeParent::ObserveLayersUpdate(
     return;
   }
 
-  Unused << state->mParent->SendObserveLayersUpdate(aLayersId, aEpoch, aActive);
+  Unused << state->mParent->SendObserveLayersUpdate(aLayersId, aActive);
 }
 
 }  // namespace mozilla::layers

@@ -24,6 +24,7 @@
 #include "builtin/Array.h"
 #include "builtin/SelfHostingDefines.h"
 #include "ds/Sort.h"
+#include "gc/GC.h"
 #include "gc/GCContext.h"
 #include "js/ForOfIterator.h"         // JS::ForOfIterator
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
@@ -38,7 +39,6 @@
 #include "vm/Shape.h"
 #include "vm/StringType.h"
 #include "vm/TypedArrayObject.h"
-#include "vm/WellKnownAtom.h"  // js_*_str
 
 #ifdef ENABLE_RECORD_TUPLE
 #  include "builtin/RecordObject.h"
@@ -628,13 +628,6 @@ static void AssertNoEnumerableProperties(NativeObject* obj) {
 #endif  // DEBUG
 }
 
-// Typed arrays and classes with an enumerate hook can have extra properties not
-// included in the shape's property map or the object's dense elements.
-static bool ClassCanHaveExtraEnumeratedProperties(const JSClass* clasp) {
-  return IsTypedArrayClass(clasp) || clasp->getNewEnumerate() ||
-         clasp->getEnumerate();
-}
-
 static bool ProtoMayHaveEnumerableProperties(JSObject* obj) {
   if (!obj->is<NativeObject>()) {
     return true;
@@ -800,13 +793,11 @@ static PropertyIteratorObject* NewPropertyIteratorObject(JSContext* cx) {
     return nullptr;
   }
 
-  JSObject* obj = NativeObject::create(
+  auto* res = NativeObject::create<PropertyIteratorObject>(
       cx, ITERATOR_FINALIZE_KIND, GetInitialHeap(GenericObject, clasp), shape);
-  if (!obj) {
+  if (!res) {
     return nullptr;
   }
-
-  PropertyIteratorObject* res = &obj->as<PropertyIteratorObject>();
 
   // CodeGenerator::visitIteratorStartO assumes the iterator object is not
   // inside the nursery when deciding whether a barrier is necessary.
@@ -972,9 +963,14 @@ NativeIterator::NativeIterator(JSContext* cx,
   }
   MOZ_ASSERT(static_cast<void*>(shapesEnd_) == propertyCursor_);
 
+  // Allocate any strings in the nursery until the first minor GC. After this
+  // point they will end up getting tenured anyway because they are reachable
+  // from |propIter| which will be tenured.
+  AutoSelectGCHeap gcHeap(cx);
+
   size_t numProps = props.length();
   for (size_t i = 0; i < numProps; i++) {
-    JSLinearString* str = IdToString(cx, props[i]);
+    JSLinearString* str = IdToString(cx, props[i], gcHeap);
     if (!str) {
       *hadError = true;
       return;
@@ -1917,10 +1913,14 @@ void js::AssertDenseElementsNotIterated(NativeObject* obj) {
 #endif
 
 static const JSFunctionSpec iterator_methods[] = {
-    JS_SELF_HOSTED_SYM_FN(iterator, "IteratorIdentity", 0, 0), JS_FS_END};
+    JS_SELF_HOSTED_SYM_FN(iterator, "IteratorIdentity", 0, 0),
+    JS_FS_END,
+};
 
 static const JSFunctionSpec iterator_static_methods[] = {
-    JS_SELF_HOSTED_FN("from", "IteratorFrom", 1, 0), JS_FS_END};
+    JS_SELF_HOSTED_FN("from", "IteratorFrom", 1, 0),
+    JS_FS_END,
+};
 
 // These methods are only attached to Iterator.prototype when the
 // Iterator Helpers feature is enabled.
@@ -1929,7 +1929,6 @@ static const JSFunctionSpec iterator_methods_with_helpers[] = {
     JS_SELF_HOSTED_FN("filter", "IteratorFilter", 1, 0),
     JS_SELF_HOSTED_FN("take", "IteratorTake", 1, 0),
     JS_SELF_HOSTED_FN("drop", "IteratorDrop", 1, 0),
-    JS_SELF_HOSTED_FN("asIndexedPairs", "IteratorAsIndexedPairs", 0, 0),
     JS_SELF_HOSTED_FN("flatMap", "IteratorFlatMap", 1, 0),
     JS_SELF_HOSTED_FN("reduce", "IteratorReduce", 1, 0),
     JS_SELF_HOSTED_FN("toArray", "IteratorToArray", 0, 0),
@@ -1938,7 +1937,15 @@ static const JSFunctionSpec iterator_methods_with_helpers[] = {
     JS_SELF_HOSTED_FN("every", "IteratorEvery", 1, 0),
     JS_SELF_HOSTED_FN("find", "IteratorFind", 1, 0),
     JS_SELF_HOSTED_SYM_FN(iterator, "IteratorIdentity", 0, 0),
-    JS_FS_END};
+    JS_FS_END,
+};
+
+static const JSPropertySpec iterator_properties[] = {
+    // NOTE: Contrary to most other @@toStringTag properties, this property is
+    // writable.
+    JS_STRING_SYM_PS(toStringTag, "Iterator", 0),
+    JS_PS_END,
+};
 
 /* static */
 bool GlobalObject::initIteratorProto(JSContext* cx,
@@ -2000,7 +2007,7 @@ NativeObject* GlobalObject::getOrCreateArrayIteratorPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
   return MaybeNativeObject(getOrCreateBuiltinProto(
       cx, global, ProtoKind::ArrayIteratorProto,
-      cx->names().ArrayIterator.toHandle(),
+      cx->names().Array_Iterator_.toHandle(),
       initObjectIteratorProto<ProtoKind::ArrayIteratorProto,
                               &ArrayIteratorPrototypeClass,
                               array_iterator_methods>));
@@ -2011,7 +2018,7 @@ JSObject* GlobalObject::getOrCreateStringIteratorPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
   return getOrCreateBuiltinProto(
       cx, global, ProtoKind::StringIteratorProto,
-      cx->names().StringIterator.toHandle(),
+      cx->names().String_Iterator_.toHandle(),
       initObjectIteratorProto<ProtoKind::StringIteratorProto,
                               &StringIteratorPrototypeClass,
                               string_iterator_methods>);
@@ -2022,7 +2029,7 @@ JSObject* GlobalObject::getOrCreateRegExpStringIteratorPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
   return getOrCreateBuiltinProto(
       cx, global, ProtoKind::RegExpStringIteratorProto,
-      cx->names().RegExpStringIterator.toHandle(),
+      cx->names().RegExp_String_Iterator_.toHandle(),
       initObjectIteratorProto<ProtoKind::RegExpStringIteratorProto,
                               &RegExpStringIteratorPrototypeClass,
                               regexp_string_iterator_methods>);
@@ -2035,14 +2042,14 @@ static bool IteratorConstructor(JSContext* cx, unsigned argc, Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
 
   // Step 1.
-  if (!ThrowIfNotConstructing(cx, args, js_Iterator_str)) {
+  if (!ThrowIfNotConstructing(cx, args, "Iterator")) {
     return false;
   }
   // Throw TypeError if NewTarget is the active function object, preventing the
   // Iterator constructor from being used directly.
   if (args.callee() == args.newTarget().toObject()) {
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
-                              JSMSG_BOGUS_CONSTRUCTOR, js_Iterator_str);
+                              JSMSG_BOGUS_CONSTRUCTOR, "Iterator");
     return false;
   }
 
@@ -2067,12 +2074,12 @@ static const ClassSpec IteratorObjectClassSpec = {
     iterator_static_methods,
     nullptr,
     iterator_methods_with_helpers,
-    nullptr,
+    iterator_properties,
     nullptr,
 };
 
 const JSClass IteratorObject::class_ = {
-    js_Iterator_str,
+    "Iterator",
     JSCLASS_HAS_CACHED_PROTO(JSProto_Iterator),
     JS_NULL_CLASS_OPS,
     &IteratorObjectClassSpec,
@@ -2087,9 +2094,8 @@ const JSClass IteratorObject::protoClass_ = {
 
 // Set up WrapForValidIteratorObject class and its prototype.
 static const JSFunctionSpec wrap_for_valid_iterator_methods[] = {
-    JS_SELF_HOSTED_FN("next", "WrapForValidIteratorNext", 1, 0),
-    JS_SELF_HOSTED_FN("return", "WrapForValidIteratorReturn", 1, 0),
-    JS_SELF_HOSTED_FN("throw", "WrapForValidIteratorThrow", 1, 0),
+    JS_SELF_HOSTED_FN("next", "WrapForValidIteratorNext", 0, 0),
+    JS_SELF_HOSTED_FN("return", "WrapForValidIteratorReturn", 0, 0),
     JS_FS_END,
 };
 
@@ -2123,9 +2129,10 @@ WrapForValidIteratorObject* js::NewWrapForValidIterator(JSContext* cx) {
 
 // Common iterator object returned by Iterator Helper methods.
 static const JSFunctionSpec iterator_helper_methods[] = {
-    JS_SELF_HOSTED_FN("next", "IteratorHelperNext", 1, 0),
-    JS_SELF_HOSTED_FN("return", "IteratorHelperReturn", 1, 0),
-    JS_SELF_HOSTED_FN("throw", "IteratorHelperThrow", 1, 0), JS_FS_END};
+    JS_SELF_HOSTED_FN("next", "IteratorHelperNext", 0, 0),
+    JS_SELF_HOSTED_FN("return", "IteratorHelperReturn", 0, 0),
+    JS_FS_END,
+};
 
 static const JSClass IteratorHelperPrototypeClass = {"Iterator Helper", 0};
 
@@ -2138,7 +2145,8 @@ const JSClass IteratorHelperObject::class_ = {
 NativeObject* GlobalObject::getOrCreateIteratorHelperPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
   return MaybeNativeObject(getOrCreateBuiltinProto(
-      cx, global, ProtoKind::IteratorHelperProto, Handle<JSAtom*>(nullptr),
+      cx, global, ProtoKind::IteratorHelperProto,
+      cx->names().Iterator_Helper_.toHandle(),
       initObjectIteratorProto<ProtoKind::IteratorHelperProto,
                               &IteratorHelperPrototypeClass,
                               iterator_helper_methods>));

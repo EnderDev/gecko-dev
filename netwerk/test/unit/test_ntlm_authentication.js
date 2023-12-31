@@ -3,17 +3,19 @@
 
 "use strict";
 
-const { HttpServer } = ChromeUtils.import("resource://testing-common/httpd.js");
+const { HttpServer } = ChromeUtils.importESModule(
+  "resource://testing-common/httpd.sys.mjs"
+);
 
 // Turn off the authentication dialog blocking for this test.
 var prefs = Services.prefs;
 prefs.setIntPref("network.auth.subresource-http-auth-allow", 2);
 
-XPCOMUtils.defineLazyGetter(this, "URL", function () {
+ChromeUtils.defineLazyGetter(this, "URL", function () {
   return "http://localhost:" + httpserv.identity.primaryPort;
 });
 
-XPCOMUtils.defineLazyGetter(this, "PORT", function () {
+ChromeUtils.defineLazyGetter(this, "PORT", function () {
   return httpserv.identity.primaryPort;
 });
 
@@ -258,7 +260,7 @@ add_task(async function test_ntlm() {
   chan.notificationCallbacks = new Requestor(FLAG_RETURN_FALSE, 2);
   let [req, buf] = await new Promise(resolve => {
     chan.asyncOpen(
-      new ChannelListener((req, buf) => resolve([req, buf]), null)
+      new ChannelListener((req1, buf1) => resolve([req1, buf1]), null)
     );
   });
   Assert.ok(buf);

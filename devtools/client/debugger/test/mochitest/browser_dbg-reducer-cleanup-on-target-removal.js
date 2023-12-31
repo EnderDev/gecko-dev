@@ -20,7 +20,7 @@ add_task(async function () {
     ok(true, "This test is disabled without EFT");
     return;
   }
-
+  await pushPref("devtools.debugger.map-scopes-enabled", true);
   const dbg = await initDebuggerWithAbsoluteURL(TEST_URI);
 
   const frameBC = await SpecialPowers.spawn(
@@ -48,7 +48,7 @@ add_task(async function () {
   await waitForPaused(dbg, "original.js");
   assertPausedAtSourceAndLine(dbg, findSource(dbg, "original.js").id, 8);
   // Also open the genertated source to populate the reducer for original and generated sources
-  await dbg.actions.jumpToMappedSelectedLocation(getContext(dbg));
+  await dbg.actions.jumpToMappedSelectedLocation();
   await waitForSelectedSource(dbg, "bundle.js");
 
   // Assert that reducer do have some data before remove the target.

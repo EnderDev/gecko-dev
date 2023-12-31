@@ -7,9 +7,6 @@ const { RemoteSettings } = ChromeUtils.importESModule(
 const { CFRMessageProvider } = ChromeUtils.importESModule(
   "resource://activity-stream/lib/CFRMessageProvider.sys.mjs"
 );
-const { CFRPageActions } = ChromeUtils.import(
-  "resource://activity-stream/lib/CFRPageActions.jsm"
-);
 
 /**
  * Load and modify a message for the test.
@@ -79,6 +76,7 @@ add_setup(async function () {
  * on every new tab load.
  */
 add_task(async function test_heartbeat_tactic_2() {
+  // eslint-disable-next-line @microsoft/sdl/no-insecure-url
   const TEST_URL = "http://example.com";
   const msg = ASRouter.state.messages.find(m =>
     m.groups.includes("messaging-experiments")
@@ -121,7 +119,7 @@ add_task(async function test_heartbeat_tactic_2() {
   Assert.ok(groupState.enabled, "Group is enabled");
 
   let tab1 = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_URL);
-  BrowserTestUtils.loadURIString(tab1.linkedBrowser, TEST_URL);
+  BrowserTestUtils.startLoadingURIString(tab1.linkedBrowser, TEST_URL);
 
   let chiclet = document.getElementById("contextual-feature-recommendation");
   Assert.ok(chiclet, "CFR chiclet element found (tab1)");
@@ -140,7 +138,7 @@ add_task(async function test_heartbeat_tactic_2() {
   BrowserTestUtils.removeTab(tab1);
 
   let tab2 = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_URL);
-  BrowserTestUtils.loadURIString(tab2.linkedBrowser, TEST_URL);
+  BrowserTestUtils.startLoadingURIString(tab2.linkedBrowser, TEST_URL);
 
   Assert.ok(chiclet, "CFR chiclet element found (tab2)");
   await BrowserTestUtils.waitForCondition(
@@ -163,7 +161,7 @@ add_task(async function test_heartbeat_tactic_2() {
   BrowserTestUtils.removeTab(tab2);
 
   let tab3 = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_URL);
-  BrowserTestUtils.loadURIString(tab3.linkedBrowser, TEST_URL);
+  BrowserTestUtils.startLoadingURIString(tab3.linkedBrowser, TEST_URL);
 
   await BrowserTestUtils.waitForCondition(
     () => chiclet.hidden,

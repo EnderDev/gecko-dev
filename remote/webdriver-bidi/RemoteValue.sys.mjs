@@ -2,8 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -14,7 +12,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   Log: "chrome://remote/content/shared/Log.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "logger", () =>
+ChromeUtils.defineLazyGetter(lazy, "logger", () =>
   lazy.Log.get(lazy.Log.TYPES.WEBDRIVER_BIDI)
 );
 
@@ -862,7 +860,8 @@ export function serialize(
         serializationOptions,
         ownershipType,
         serializationInternalMap,
-        realm
+        realm,
+        extraOptions
       );
     }
     return serialized;
@@ -876,23 +875,23 @@ export function serialize(
         serializationOptions,
         ownershipType,
         serializationInternalMap,
-        realm
+        realm,
+        extraOptions
       );
     }
     return serialized;
   } else if (
-    [
-      "ArrayBuffer",
-      "Function",
-      "Promise",
-      "WeakMap",
-      "WeakSet",
-      "Window",
-    ].includes(className)
+    ["ArrayBuffer", "Function", "Promise", "WeakMap", "WeakSet"].includes(
+      className
+    )
   ) {
     return buildSerialized(className.toLowerCase(), handleId);
+  } else if (className.includes("Generator")) {
+    return buildSerialized("generator", handleId);
   } else if (lazy.error.isError(value)) {
     return buildSerialized("error", handleId);
+  } else if (Cu.isProxy(value)) {
+    return buildSerialized("proxy", handleId);
   } else if (TYPED_ARRAY_CLASSES.includes(className)) {
     return buildSerialized("typedarray", handleId);
   } else if (Node.isInstance(value)) {
@@ -917,6 +916,22 @@ export function serialize(
         realm,
         extraOptions
       );
+    }
+
+    return serialized;
+  } else if (className === "Window") {
+    const serialized = buildSerialized("window", handleId);
+    const window = Cu.unwaiveXrays(value);
+
+    if (window.browsingContext.parent == null) {
+      serialized.value = {
+        context: window.browsingContext.browserId.toString(),
+        isTopBrowsingContext: true,
+      };
+    } else {
+      serialized.value = {
+        context: window.browsingContext.id.toString(),
+      };
     }
 
     return serialized;
@@ -983,10 +998,10 @@ export function setDefaultAndAssertSerializationOptions(options = {}) {
     serializationOptions;
 
   if (maxDomDepth !== null) {
-    lazy.assert.positiveNumber(maxDomDepth);
+    lazy.assert.positiveInteger(maxDomDepth);
   }
   if (maxObjectDepth !== null) {
-    lazy.assert.positiveNumber(maxObjectDepth);
+    lazy.assert.positiveInteger(maxObjectDepth);
   }
   const includeShadowTreeModesValues = Object.values(IncludeShadowTreeMode);
   lazy.assert.that(

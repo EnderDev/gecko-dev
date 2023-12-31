@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -114,9 +118,11 @@ where
 ///     trim_data_to_registered_pings: false,
 ///     log_level: None,
 ///     rate_limit: None,
+///     enable_event_timestamps: false,
+///     experimentation_id: None,
 /// };
 /// let mut glean = Glean::new(cfg).unwrap();
-/// let ping = PingType::new("sample", true, false, vec![]);
+/// let ping = PingType::new("sample", true, false, true, vec![]);
 /// glean.register_ping_type(&ping);
 ///
 /// let call_counter: CounterMetric = CounterMetric::new(CommonMetricData {
@@ -156,6 +162,7 @@ pub struct Glean {
     pub(crate) schedule_metrics_pings: bool,
     pub(crate) remote_settings_epoch: AtomicU8,
     pub(crate) remote_settings_metrics_config: Arc<Mutex<MetricsEnabledConfig>>,
+    pub(crate) with_timestamps: bool,
 }
 
 impl Glean {
@@ -188,7 +195,7 @@ impl Glean {
         // We only scan the pending ping directories when calling this from a subprocess,
         // when calling this from ::new we need to scan the directories after dealing with the upload state.
         if scan_directories {
-            let _scanning_thread = upload_manager.scan_pending_pings_directories();
+            let _scanning_thread = upload_manager.scan_pending_pings_directories(false);
         }
 
         let start_time = local_now_with_offset();
@@ -215,6 +222,7 @@ impl Glean {
             schedule_metrics_pings: false,
             remote_settings_epoch: AtomicU8::new(0),
             remote_settings_metrics_config: Arc::new(Mutex::new(MetricsEnabledConfig::new())),
+            with_timestamps: cfg.enable_event_timestamps,
         };
 
         // Ensuring these pings are registered.
@@ -239,6 +247,14 @@ impl Glean {
         // If that fails we bail out and don't initialize further.
         let data_path = Path::new(&cfg.data_path);
         glean.data_store = Some(Database::new(data_path, cfg.delay_ping_lifetime_io)?);
+
+        // Set experimentation identifier (if any)
+        if let Some(experimentation_id) = &cfg.experimentation_id {
+            glean
+                .additional_metrics
+                .experimentation_id
+                .set_sync(&glean, experimentation_id.to_string());
+        }
 
         // The upload enabled flag may have changed since the last run, for
         // example by the changing of a config file.
@@ -278,7 +294,7 @@ impl Glean {
         // If upload is disabled, we delete all pending pings files
         // and we need to do that **before** scanning the pending pings folder
         // to ensure we don't enqueue pings before their files are deleted.
-        let _scanning_thread = glean.upload_manager.scan_pending_pings_directories();
+        let _scanning_thread = glean.upload_manager.scan_pending_pings_directories(true);
 
         Ok(glean)
     }
@@ -302,6 +318,8 @@ impl Glean {
             trim_data_to_registered_pings: false,
             log_level: None,
             rate_limit: None,
+            enable_event_timestamps: false,
+            experimentation_id: None,
         };
 
         let mut glean = Self::new(cfg).unwrap();
@@ -551,6 +569,10 @@ impl Glean {
         &self.event_data_store
     }
 
+    pub(crate) fn with_timestamps(&self) -> bool {
+        self.with_timestamps
+    }
+
     /// Gets the maximum number of events to store before sending a ping.
     pub fn get_max_events(&self) -> usize {
         self.max_events as usize
@@ -710,6 +732,15 @@ impl Glean {
     pub fn test_get_experiment_data(&self, experiment_id: String) -> Option<RecordedExperiment> {
         let metric = ExperimentMetric::new(self, experiment_id);
         metric.test_get_value(self)
+    }
+
+    /// **Test-only API (exported for FFI purposes).**
+    ///
+    /// Gets stored experimentation id annotation.
+    pub fn test_get_experimentation_id(&self) -> Option<String> {
+        self.additional_metrics
+            .experimentation_id
+            .get_value(self, None)
     }
 
     /// Set configuration to override the default metric enabled/disabled state, typically from a

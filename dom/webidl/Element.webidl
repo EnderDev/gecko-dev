@@ -15,7 +15,8 @@
 
 interface nsIScreen;
 
-[Exposed=Window]
+[Exposed=Window,
+ InstrumentedProps=(computedStyleMap,onmousewheel,scrollIntoViewIfNeeded)]
 interface Element : Node {
   [Constant]
   readonly attribute DOMString? namespaceURI;
@@ -273,9 +274,7 @@ partial interface Element {
 // https://dom.spec.whatwg.org/#dictdef-shadowrootinit
 dictionary ShadowRootInit {
   required ShadowRootMode mode;
-  [Pref="dom.shadowdom.delegatesFocus.enabled"]
   boolean delegatesFocus = false;
-  [Pref="dom.shadowdom.slot.assign.enabled"]
   SlotAssignmentMode slotAssignment = "named";
 };
 

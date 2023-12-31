@@ -1,100 +1,40 @@
-From: Andreas Pehrson <apehrson@mozilla.com>
-Date: Wed, 10 May 2023 07:06:00 +0000
-Subject: Bug 1810949 - cherry-pick upstream libwebrtc commit 32b64e895c.
- r=webrtc-reviewers,mjf
+From: Michael Froman <mfroman@mozilla.com>
+Date: Tue, 14 Feb 2023 03:27:00 +0000
+Subject: Bug 1816173 - pt12 - add shim config for
+ third_party/libwebrtc/testing/{gmock|gtest} r=ng
 
-Upstream commit: https://webrtc.googlesource.com/src/+/32b64e895c0231fe6891a8f6335d66f1dad4f1f5
-    Improve ergonomics of dealing with pixel formats in v4l2 camera backend
+We don't vendor third_party/libwebrtc/third_party/gmock
+                third_party/libwebrtc/third_party/gtest, so:
+- add BUILD.gn to avoid scattered BUILD.gn changes
 
-    Bug: webrtc:14830
-    Change-Id: Ib49bf65895fe008e75223abb03867d412c1b5a60
-    Reviewed-on: https://webrtc-review.googlesource.com/c/src/+/291531
-    Commit-Queue: Ilya Nikolaevskiy <ilnik@webrtc.org>
-    Reviewed-by: Stefan Holmer <stefan@webrtc.org>
-    Reviewed-by: Ilya Nikolaevskiy <ilnik@webrtc.org>
-    Cr-Commit-Position: refs/heads/main@{#39976}
-
-Differential Revision: https://phabricator.services.mozilla.com/D177231
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/f0afe1a1097f3e02d59fd06d5e83d00a0f4d69ae
+Differential Revision: https://phabricator.services.mozilla.com/D169674
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/4ea9d2db79c42a144235e45c47c71adf1dd01fdc
 ---
- .../video_capture/linux/device_info_v4l2.cc   |  4 ++-
- .../video_capture/linux/video_capture_v4l2.cc | 31 +++++++++----------
- 2 files changed, 17 insertions(+), 18 deletions(-)
+ testing/gmock/BUILD.gn | 5 +++++
+ testing/gtest/BUILD.gn | 5 +++++
+ 2 files changed, 10 insertions(+)
+ create mode 100644 testing/gmock/BUILD.gn
+ create mode 100644 testing/gtest/BUILD.gn
 
-diff --git a/modules/video_capture/linux/device_info_v4l2.cc b/modules/video_capture/linux/device_info_v4l2.cc
-index 7651dd6651..f854c2ccc7 100644
---- a/modules/video_capture/linux/device_info_v4l2.cc
-+++ b/modules/video_capture/linux/device_info_v4l2.cc
-@@ -391,10 +391,10 @@ int32_t DeviceInfoV4l2::FillCapabilities(int fd) {
-   video_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-   video_fmt.fmt.pix.sizeimage = 0;
- 
--  int totalFmts = 5;
-   unsigned int videoFormats[] = {V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_YUV420,
-                                  V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_UYVY,
-                                  V4L2_PIX_FMT_NV12};
-+  constexpr int totalFmts = sizeof(videoFormats) / sizeof(unsigned int);
- 
-   int sizes = 13;
-   unsigned int size[][2] = {{128, 96},   {160, 120},  {176, 144},  {320, 240},
-@@ -424,6 +424,8 @@ int32_t DeviceInfoV4l2::FillCapabilities(int fd) {
-             cap.videoType = VideoType::kUYVY;
-           } else if (videoFormats[fmts] == V4L2_PIX_FMT_NV12) {
-             cap.videoType = VideoType::kNV12;
-+          } else {
-+            RTC_DCHECK_NOTREACHED();
-           }
- 
-           // get fps of current camera mode
-diff --git a/modules/video_capture/linux/video_capture_v4l2.cc b/modules/video_capture/linux/video_capture_v4l2.cc
-index c7dcb722bc..baf1916331 100644
---- a/modules/video_capture/linux/video_capture_v4l2.cc
-+++ b/modules/video_capture/linux/video_capture_v4l2.cc
-@@ -130,23 +130,18 @@ int32_t VideoCaptureModuleV4L2::StartCapture(
-   // Supported video formats in preferred order.
-   // If the requested resolution is larger than VGA, we prefer MJPEG. Go for
-   // I420 otherwise.
--  const int nFormats = 6;
--  unsigned int fmts[nFormats];
--  if (capability.width > 640 || capability.height > 480) {
--    fmts[0] = V4L2_PIX_FMT_MJPEG;
--    fmts[1] = V4L2_PIX_FMT_YUV420;
--    fmts[2] = V4L2_PIX_FMT_YUYV;
--    fmts[3] = V4L2_PIX_FMT_UYVY;
--    fmts[4] = V4L2_PIX_FMT_NV12;
--    fmts[5] = V4L2_PIX_FMT_JPEG;
--  } else {
--    fmts[0] = V4L2_PIX_FMT_YUV420;
--    fmts[1] = V4L2_PIX_FMT_YUYV;
--    fmts[2] = V4L2_PIX_FMT_UYVY;
--    fmts[3] = V4L2_PIX_FMT_NV12;
--    fmts[4] = V4L2_PIX_FMT_MJPEG;
--    fmts[5] = V4L2_PIX_FMT_JPEG;
--  }
-+  unsigned int hdFmts[] = {
-+      V4L2_PIX_FMT_MJPEG,  V4L2_PIX_FMT_YUV420, V4L2_PIX_FMT_YUYV,
-+      V4L2_PIX_FMT_UYVY,   V4L2_PIX_FMT_NV12,   V4L2_PIX_FMT_JPEG,
-+  };
-+  unsigned int sdFmts[] = {
-+      V4L2_PIX_FMT_YUV420, V4L2_PIX_FMT_YUYV,   V4L2_PIX_FMT_UYVY,
-+      V4L2_PIX_FMT_NV12,   V4L2_PIX_FMT_MJPEG,  V4L2_PIX_FMT_JPEG,
-+  };
-+  const bool isHd = capability.width > 640 || capability.height > 480;
-+  unsigned int* fmts = isHd ? hdFmts : sdFmts;
-+  static_assert(sizeof(hdFmts) == sizeof(sdFmts));
-+  constexpr int nFormats = sizeof(hdFmts) / sizeof(unsigned int);
- 
-   // Enumerate image formats.
-   struct v4l2_fmtdesc fmt;
-@@ -195,6 +190,8 @@ int32_t VideoCaptureModuleV4L2::StartCapture(
-   else if (video_fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_MJPEG ||
-            video_fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_JPEG)
-     _captureVideoType = VideoType::kMJPEG;
-+  else
-+    RTC_DCHECK_NOTREACHED();
- 
-   // set format and frame size now
-   if (ioctl(_deviceFd, VIDIOC_S_FMT, &video_fmt) < 0) {
--- 
-2.34.1
-
+diff --git a/testing/gmock/BUILD.gn b/testing/gmock/BUILD.gn
+new file mode 100644
+index 0000000000..a2a1efdea9
+--- /dev/null
++++ b/testing/gmock/BUILD.gn
+@@ -0,0 +1,5 @@
++import("//third_party/libaom/options.gni")
++import("../../webrtc.gni")
++
++rtc_library("gmock") {
++}
+diff --git a/testing/gtest/BUILD.gn b/testing/gtest/BUILD.gn
+new file mode 100644
+index 0000000000..c9c2703c37
+--- /dev/null
++++ b/testing/gtest/BUILD.gn
+@@ -0,0 +1,5 @@
++import("//third_party/libaom/options.gni")
++import("../../webrtc.gni")
++
++rtc_library("gtest") {
++}

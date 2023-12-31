@@ -54,14 +54,6 @@ typedef enum {
   JXL_TYPE_FLOAT16 = 5,
 } JxlDataType;
 
-/* DEPRECATED: bit-packed 1-bit data type. Use JXL_TYPE_UINT8 instead.
- */
-JXL_DEPRECATED static const int JXL_TYPE_BOOLEAN = 1;
-
-/* DEPRECATED: uint32_t data type. Use JXL_TYPE_FLOAT instead.
- */
-JXL_DEPRECATED static const int JXL_TYPE_UINT32 = 4;
-
 /** Ordering of multi-byte data.
  */
 typedef enum {
@@ -109,7 +101,8 @@ typedef struct {
   size_t align;
 } JxlPixelFormat;
 
-/** Settings for the interpretation of the input and output buffers.
+/** Settings for the interpretation of UINT input and output buffers.
+ *  (buffers using a FLOAT data type are not affected by this)
  */
 typedef enum {
   /** This is the default setting, where the encoder expects the input pixels
@@ -149,33 +142,6 @@ typedef struct {
 /** Data type holding the 4-character type name of an ISOBMFF box.
  */
 typedef char JxlBoxType[4];
-
-/** Types of progressive detail.
- * Setting a progressive detail with value N implies all progressive details
- * with smaller or equal value. Currently only the following level of
- * progressive detail is implemented:
- *  - kDC (which implies kFrames)
- *  - kLastPasses (which implies kDC and kFrames)
- *  - kPasses (which implies kLastPasses, kDC and kFrames)
- */
-typedef enum {
-  // after completed kRegularFrames
-  kFrames = 0,
-  // after completed DC (1:8)
-  kDC = 1,
-  // after completed AC passes that are the last pass for their resolution
-  // target.
-  kLastPasses = 2,
-  // after completed AC passes that are not the last pass for their resolution
-  // target.
-  kPasses = 3,
-  // during DC frame when lower resolution are completed (1:32, 1:16)
-  kDCProgressive = 4,
-  // after completed groups
-  kDCGroups = 5,
-  // after completed groups
-  kGroups = 6,
-} JxlProgressiveDetail;
 
 #if defined(__cplusplus) || defined(c_plusplus)
 }

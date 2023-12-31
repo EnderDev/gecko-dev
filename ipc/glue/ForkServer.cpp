@@ -1,21 +1,25 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
-/* vim: set ts=8 sts=4 et sw=4 tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 #include "mozilla/ipc/ForkServer.h"
-#include "mozilla/Logging.h"
+
 #include "chrome/common/chrome_switches.h"
+#include "ipc/IPCMessageUtilsSpecializations.h"
 #include "mozilla/BlockingResourceBase.h"
-#include "mozilla/ipc/ProtocolMessageUtils.h"
+#include "mozilla/Logging.h"
+#include "mozilla/Omnijar.h"
 #include "mozilla/ipc/FileDescriptor.h"
 #include "mozilla/ipc/IPDLParamTraits.h"
-#include "ipc/IPCMessageUtilsSpecializations.h"
+#include "mozilla/ipc/ProtocolMessageUtils.h"
+#include "mozilla/ipc/SetProcessTitle.h"
 #include "nsTraceRefcnt.h"
 
+#include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
 
 #if defined(XP_LINUX) && defined(MOZ_SANDBOX)
 #  include "mozilla/SandboxLaunch.h"
@@ -38,6 +42,16 @@ void ForkServer::InitProcess(int* aArgc, char*** aArgv) {
 
   mTcver = MakeUnique<MiniTransceiver>(kClientPipeFd,
                                        DataBufferClear::AfterReceiving);
+}
+
+/**
+ * Preload any resources that the forked child processes might need,
+ * and which might change incompatibly or become unavailable by the
+ * time they're started.  For example: the omnijar files, or certain
+ * shared libraries.
+ */
+static void ForkServerPreload(int& aArgc, char** aArgv) {
+  Omnijar::ChildProcessInit(aArgc, aArgv);
 }
 
 /**
@@ -243,6 +257,8 @@ bool ForkServer::RunForkServer(int* aArgc, char*** aArgv) {
   bool sleep_newproc = !!getenv("MOZ_FORKSERVER_WAIT_GDB_NEWPROC");
 #endif
 
+  SetProcessTitleInit(*aArgv);
+
   // Do this before NS_LogInit() to avoid log files taking lower
   // FDs.
   ForkServer forkserver;
@@ -251,6 +267,7 @@ bool ForkServer::RunForkServer(int* aArgc, char*** aArgv) {
   XRE_SetProcessType("forkserver");
   NS_LogInit();
   mozilla::LogModule::Init(0, nullptr);
+  ForkServerPreload(*aArgc, *aArgv);
   MOZ_LOG(gForkServiceLog, LogLevel::Verbose, ("Start a fork server"));
   {
     DebugOnly<base::ProcessHandle> forkserver_pid = base::GetCurrentProcId();
@@ -259,6 +276,7 @@ bool ForkServer::RunForkServer(int* aArgc, char*** aArgv) {
       // The server has stopped.
       MOZ_LOG(gForkServiceLog, LogLevel::Verbose,
               ("Terminate the fork server"));
+      Omnijar::CleanUp();
       NS_LogTerm();
       return true;
     }
@@ -285,8 +303,6 @@ bool ForkServer::RunForkServer(int* aArgc, char*** aArgv) {
   // content process by closing wrong file descriptors.
   forkserver.mAppProcBuilder->InitAppProcess(aArgc, aArgv);
   forkserver.mAppProcBuilder.reset();
-
-  MOZ_ASSERT("tab"_ns == (*aArgv)[*aArgc - 1], "Only |tab| is allowed!");
 
   // Open log files again with right names and the new PID.
   nsTraceRefcnt::ResetLogFiles((*aArgv)[*aArgc - 1]);

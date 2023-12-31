@@ -18,7 +18,7 @@ if (!window.IS_STORYBOOK) {
   XPCOMUtils = ChromeUtils.importESModule(
     "resource://gre/modules/XPCOMUtils.sys.mjs"
   ).XPCOMUtils;
-  XPCOMUtils.defineLazyGetter(lazy, "relativeTimeFormat", () => {
+  ChromeUtils.defineLazyGetter(lazy, "relativeTimeFormat", () => {
     return new Services.intl.RelativeTimeFormat(undefined, {
       style: "narrow",
     });
@@ -26,7 +26,6 @@ if (!window.IS_STORYBOOK) {
 
   ChromeUtils.defineESModuleGetters(lazy, {
     BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
-    PlacesUIUtils: "resource:///modules/PlacesUIUtils.sys.mjs",
   });
 }
 
@@ -38,6 +37,7 @@ if (!window.IS_STORYBOOK) {
  * @property {string} hasPopup - The aria-haspopup attribute for the secondary action, if required
  * @property {number} maxTabsLength - The max number of tabs for the list
  * @property {Array} tabItems - Items to show in the tab list
+ * @property {string} searchQuery - The query string to highlight, if provided.
  */
 export default class FxviewTabList extends MozLitElement {
   constructor() {
@@ -51,6 +51,7 @@ export default class FxviewTabList extends MozLitElement {
     this.maxTabsLength = 25;
     this.tabItems = [];
     this.compactRows = false;
+    this.visible = false;
     this.#register();
   }
 
@@ -62,6 +63,8 @@ export default class FxviewTabList extends MozLitElement {
     hasPopup: { type: String },
     maxTabsLength: { type: Number },
     tabItems: { type: Array },
+    visible: { type: Boolean },
+    searchQuery: { type: String },
   };
 
   static queries = {
@@ -75,14 +78,30 @@ export default class FxviewTabList extends MozLitElement {
     );
 
     if (changes.has("dateTimeFormat")) {
-      if (this.dateTimeFormat == "relative" && !window.IS_STORYBOOK) {
-        this.intervalID = setInterval(
-          () => this.onIntervalUpdate(),
-          this.timeMsPref
-        );
-      } else {
-        clearInterval(this.intervalID);
+      this.clearIntervalTimer();
+      if (
+        this.visible &&
+        this.dateTimeFormat == "relative" &&
+        !window.IS_STORYBOOK
+      ) {
+        this.startIntervalTimer();
+        this.onIntervalUpdate();
       }
+    }
+  }
+
+  startIntervalTimer() {
+    this.clearIntervalTimer();
+    this.intervalID = setInterval(
+      () => this.onIntervalUpdate(),
+      this.timeMsPref
+    );
+  }
+
+  clearIntervalTimer() {
+    if (this.intervalID) {
+      clearInterval(this.intervalID);
+      delete this.intervalID;
     }
   }
 
@@ -94,13 +113,11 @@ export default class FxviewTabList extends MozLitElement {
         "browser.tabs.firefox-view.updateTimeMs",
         NOW_THRESHOLD_MS,
         (prefName, oldVal, newVal) => {
+          this.clearIntervalTimer();
           if (!this.isConnected) {
             return;
           }
-          clearInterval(this.intervalID);
-          this.intervalID = setInterval(() => {
-            this.onIntervalUpdate();
-          }, newVal);
+          this.startIntervalTimer();
           this.requestUpdate();
         }
       );
@@ -109,18 +126,32 @@ export default class FxviewTabList extends MozLitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    if (this.dateTimeFormat === "relative" && !window.IS_STORYBOOK) {
-      this.intervalID = setInterval(
-        () => this.onIntervalUpdate(),
-        this.timeMsPref
-      );
+    this.ownerDocument.addEventListener("visibilitychange", this);
+    this.visible = this.ownerDocument.visibilityState == "visible";
+    if (
+      this.visible &&
+      this.dateTimeFormat === "relative" &&
+      !window.IS_STORYBOOK
+    ) {
+      this.startIntervalTimer();
     }
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    if (this.intervalID) {
-      clearInterval(this.intervalID);
+    this.ownerDocument.removeEventListener("visibilitychange", this);
+    this.clearIntervalTimer();
+  }
+
+  handleEvent(event) {
+    if (event.type == "visibilitychange") {
+      this.visible = this.ownerDocument.visibilityState == "visible";
+      if (this.visible) {
+        this.startIntervalTimer();
+        this.onIntervalUpdate();
+      } else {
+        this.clearIntervalTimer();
+      }
     }
   }
 
@@ -189,15 +220,17 @@ export default class FxviewTabList extends MozLitElement {
     }
   }
 
-  // Use a relative URL in storybook to get faster reloads on style changes.
-  static stylesheetUrl = window.IS_STORYBOOK
-    ? "./fxview-tab-list.css"
-    : "chrome://browser/content/firefoxview/fxview-tab-list.css";
+  shouldUpdate() {
+    return this.visible;
+  }
 
   render() {
     if (this.maxTabsLength > 0) {
       // Can set maxTabsLength to -1 to have no max
       this.tabItems = this.tabItems.slice(0, this.maxTabsLength);
+    }
+    if (this.searchQuery && this.tabItems.length === 0) {
+      return this.#emptySearchResultsTemplate();
     }
     const {
       activeIndex,
@@ -207,45 +240,67 @@ export default class FxviewTabList extends MozLitElement {
       tabItems,
     } = this;
     return html`
-      <link rel="stylesheet" href=${this.constructor.stylesheetUrl} />
+      <link
+        rel="stylesheet"
+        href="chrome://browser/content/firefoxview/fxview-tab-list.css"
+      />
       <div
         id="fxview-tab-list"
         class="fxview-tab-list"
         role="list"
         @keydown=${this.handleFocusElementInRow}
       >
-        ${tabItems.map(
-          (tabItem, i) =>
-            html`
-              <fxview-tab-row
-                exportparts="secondary-button"
-                ?active=${i == activeIndex}
-                ?compact=${this.compactRows}
-                .hasPopup=${hasPopup}
-                .currentActiveElementId=${currentActiveElementId}
-                .dateTimeFormat=${dateTimeFormat}
-                .favicon=${tabItem.icon}
-                .primaryL10nId=${tabItem.primaryL10nId}
-                .primaryL10nArgs=${ifDefined(tabItem.primaryL10nArgs)}
-                role="listitem"
-                .secondaryL10nId=${tabItem.secondaryL10nId}
-                .secondaryL10nArgs=${ifDefined(tabItem.secondaryL10nArgs)}
-                .tabid=${ifDefined(tabItem.tabid || tabItem.closedId)}
-                .tabElement=${ifDefined(tabItem.tabElement)}
-                .time=${(tabItem.time || tabItem.closedAt).toString().length ===
-                16
-                  ? (tabItem.time || tabItem.closedAt) / 1000
-                  : tabItem.time || tabItem.closedAt}
-                .timeMsPref=${ifDefined(this.timeMsPref)}
-                .title=${tabItem.title}
-                .url=${tabItem.url}
-              >
-              </fxview-tab-row>
-            `
-        )}
+        ${tabItems.map((tabItem, i) => {
+          let time;
+          if (tabItem.time || tabItem.closedAt) {
+            let stringTime = (tabItem.time || tabItem.closedAt).toString();
+            // Different APIs return time in different units, so we use
+            // the length to decide if it's milliseconds or nanoseconds.
+            if (stringTime.length === 16) {
+              time = (tabItem.time || tabItem.closedAt) / 1000;
+            } else {
+              time = tabItem.time || tabItem.closedAt;
+            }
+          }
+          return html`
+            <fxview-tab-row
+              exportparts="secondary-button"
+              ?active=${i == activeIndex}
+              ?compact=${this.compactRows}
+              .hasPopup=${hasPopup}
+              .currentActiveElementId=${currentActiveElementId}
+              .dateTimeFormat=${dateTimeFormat}
+              .favicon=${tabItem.icon}
+              .primaryL10nId=${ifDefined(tabItem.primaryL10nId)}
+              .primaryL10nArgs=${ifDefined(tabItem.primaryL10nArgs)}
+              role="listitem"
+              .secondaryL10nId=${ifDefined(tabItem.secondaryL10nId)}
+              .secondaryL10nArgs=${ifDefined(tabItem.secondaryL10nArgs)}
+              .closedId=${ifDefined(tabItem.closedId || tabItem.closedId)}
+              .sourceClosedId=${ifDefined(tabItem.sourceClosedId)}
+              .sourceWindowId=${ifDefined(tabItem.sourceWindowId)}
+              .tabElement=${ifDefined(tabItem.tabElement)}
+              .time=${ifDefined(time)}
+              .timeMsPref=${ifDefined(this.timeMsPref)}
+              .title=${tabItem.title}
+              .url=${ifDefined(tabItem.url)}
+              .searchQuery=${ifDefined(this.searchQuery)}
+            >
+            </fxview-tab-row>
+          `;
+        })}
       </div>
       <slot name="menu"></slot>
     `;
+  }
+
+  #emptySearchResultsTemplate() {
+    return html` <fxview-empty-state
+      headerLabel="firefoxview-search-results-empty"
+      .headerArgs=${{ query: this.searchQuery }}
+      isInnerCard
+    >
+    </fxview-empty-state>`;
   }
 }
 customElements.define("fxview-tab-list", FxviewTabList);
@@ -258,7 +313,9 @@ customElements.define("fxview-tab-list", FxviewTabList);
  * @property {string} currentActiveElementId - ID of currently focused element within each tab item
  * @property {string} dateTimeFormat - Expected format for date and/or time
  * @property {string} hasPopup - The aria-haspopup attribute for the secondary action, if required
- * @property {number} tabid - The tab ID for when the tab item.
+ * @property {number} closedId - The tab ID for when the tab item was closed.
+ * @property {number} sourceClosedId - The closedId of the closed window its from if applicable
+ * @property {number} sourceWindowId - The sessionstore id of the window its from if applicable
  * @property {string} favicon - The favicon for the tab item.
  * @property {string} primaryL10nId - The l10n id used for the primary action element
  * @property {string} primaryL10nArgs - The l10n args used for the primary action element
@@ -269,6 +326,7 @@ customElements.define("fxview-tab-list", FxviewTabList);
  * @property {string} title - The title for the tab item.
  * @property {string} url - The url for the tab item.
  * @property {number} timeMsPref - The frequency in milliseconds of updates to relative time
+ * @property {string} searchQuery - The query string to highlight, if provided.
  */
 export class FxviewTabRow extends MozLitElement {
   constructor() {
@@ -288,12 +346,15 @@ export class FxviewTabRow extends MozLitElement {
     primaryL10nArgs: { type: String },
     secondaryL10nId: { type: String },
     secondaryL10nArgs: { type: String },
-    tabid: { type: Number },
+    closedId: { type: Number },
+    sourceClosedId: { type: Number },
+    sourceWindowId: { type: String },
     tabElement: { type: Object },
     time: { type: Number },
     title: { type: String },
     timeMsPref: { type: Number },
     url: { type: String },
+    searchQuery: { type: String },
   };
 
   static queries = {
@@ -323,11 +384,6 @@ export class FxviewTabRow extends MozLitElement {
     return this.mainEl.id;
   }
 
-  // Use a relative URL in storybook to get faster reloads on style changes.
-  static stylesheetUrl = window.IS_STORYBOOK
-    ? "./fxview-tab-row.css"
-    : "chrome://browser/content/firefoxview/fxview-tab-row.css";
-
   dateFluentArgs(timestamp, dateTimeFormat) {
     if (dateTimeFormat === "date" || dateTimeFormat === "dateTime") {
       return JSON.stringify({ date: timestamp });
@@ -337,7 +393,7 @@ export class FxviewTabRow extends MozLitElement {
 
   dateFluentId(timestamp, dateTimeFormat, _nowThresholdMs = NOW_THRESHOLD_MS) {
     if (!timestamp) {
-      return "";
+      return null;
     }
     if (dateTimeFormat === "relative") {
       const elapsed = Date.now() - timestamp;
@@ -376,12 +432,23 @@ export class FxviewTabRow extends MozLitElement {
   }
 
   getImageUrl(icon, targetURI) {
-    if (!window.IS_STORYBOOK) {
-      return icon
-        ? lazy.PlacesUIUtils.getImageURL(icon)
-        : `page-icon:${targetURI}`;
+    if (window.IS_STORYBOOK) {
+      return `chrome://global/skin/icons/defaultFavicon.svg`;
     }
-    return `chrome://global/skin/icons/defaultFavicon.svg`;
+    if (!icon) {
+      if (targetURI?.startsWith("moz-extension")) {
+        return "chrome://mozapps/skin/extensions/extension.svg";
+      }
+      return `chrome://global/skin/icons/defaultFavicon.svg`;
+    }
+    // If the icon is not for website (doesn't begin with http), we
+    // display it directly. Otherwise we go through the page-icon
+    // protocol to try to get a cached version. We don't load
+    // favicons directly.
+    if (icon.startsWith("http")) {
+      return `page-icon:${targetURI}`;
+    }
+    return icon;
   }
 
   primaryActionHandler(event) {
@@ -441,16 +508,19 @@ export class FxviewTabRow extends MozLitElement {
         rel="stylesheet"
         href="chrome://global/skin/in-content/common.css"
       />
-      <link rel="stylesheet" href=${this.constructor.stylesheetUrl} />
+      <link
+        rel="stylesheet"
+        href="chrome://browser/content/firefoxview/fxview-tab-row.css"
+      />
       <a
-        href=${this.url}
+        .href=${ifDefined(this.url)}
         class="fxview-tab-row-main"
         id="fxview-tab-row-main"
         tabindex=${this.active &&
         this.currentActiveElementId === "fxview-tab-row-main"
           ? "0"
           : "-1"}
-        data-l10n-id=${this.primaryL10nId}
+        data-l10n-id=${ifDefined(this.primaryL10nId)}
         data-l10n-args=${ifDefined(this.primaryL10nArgs)}
         @click=${this.primaryActionHandler}
         @keydown=${this.primaryActionHandler}
@@ -462,11 +532,19 @@ export class FxviewTabRow extends MozLitElement {
             backgroundImage: `url(${this.getImageUrl(this.favicon, this.url)})`,
           })}
         ></span>
-        <span class="fxview-tab-row-title" id="fxview-tab-row-title">
-          ${title}
+        <span
+          class="fxview-tab-row-title text-truncated-ellipsis"
+          id="fxview-tab-row-title"
+          dir="auto"
+        >
+          ${when(
+            this.searchQuery,
+            () => this.#highlightSearchMatches(this.searchQuery, title),
+            () => title
+          )}
         </span>
         <span
-          class="fxview-tab-row-url"
+          class="fxview-tab-row-url text-truncated-ellipsis"
           id="fxview-tab-row-url"
           ?hidden=${this.compact}
         >
@@ -488,9 +566,9 @@ export class FxviewTabRow extends MozLitElement {
           class="fxview-tab-row-time"
           id="fxview-tab-row-time"
           ?hidden=${this.compact || !timeString}
-          data-timestamp=${this.time}
+          data-timestamp=${ifDefined(this.time)}
           data-l10n-id=${ifDefined(timeString)}
-          data-l10n-args=${timeArgs}
+          data-l10n-args=${ifDefined(timeArgs)}
         >
         </span>
       </a>
@@ -511,6 +589,35 @@ export class FxviewTabRow extends MozLitElement {
         ></button>`
       )}
     `;
+  }
+
+  /**
+   * Find all matches of query within the given string, and compute the result
+   * to be rendered.
+   *
+   * @param {string} query
+   * @param {string} string
+   */
+  #highlightSearchMatches(query, string) {
+    const fragments = [];
+    const regex = RegExp(this.#escapeRegExp(query), "dgi");
+    let prevIndexEnd = 0;
+    let result;
+    while ((result = regex.exec(string)) !== null) {
+      const [indexStart, indexEnd] = result.indices[0];
+      fragments.push(string.substring(prevIndexEnd, indexStart));
+      fragments.push(
+        html`<strong>${string.substring(indexStart, indexEnd)}</strong>`
+      );
+      prevIndexEnd = regex.lastIndex;
+    }
+    fragments.push(string.substring(prevIndexEnd));
+    return fragments;
+  }
+
+  // from MDN...
+  #escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 }
 

@@ -6,6 +6,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+use env_logger::Builder;
+use lazy_static::lazy_static;
 use std::io::Write;
 use std::sync::Once;
 use std::time::Instant;
@@ -27,7 +29,7 @@ macro_rules! do_log {
             );
         }
     });
-    ($lvl:expr, $($arg:tt)+) => ($crate::do_log!(target: ::log::__log_module_path!(), $lvl, $($arg)+))
+    ($lvl:expr, $($arg:tt)+) => ($crate::do_log!(target: module_path!(), $lvl, $($arg)+))
 }
 
 #[macro_export]
@@ -40,8 +42,6 @@ macro_rules! log_subject {
         }
     }};
 }
-
-use env_logger::Builder;
 
 static INIT_ONCE: Once = Once::new();
 

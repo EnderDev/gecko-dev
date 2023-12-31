@@ -26,12 +26,10 @@ UNSUPPORTED_FEATURES = set(
         "legacy-regexp",  # Bug 1306461
         "json-modules",  # Bug 1670176
         "resizable-arraybuffer",  # Bug 1670026
-        "decorators",  # Bug 1435869
         "regexp-duplicate-named-groups",  # Bug 1773135
-        "symbols-as-weakmap-keys",  # Bug 1710433
-        "arraybuffer-transfer",  # Bug 1519163
         "json-parse-with-source",  # Bug 1658310
-        "iterator-helpers",  # Bug 1568906
+        "import-attributes",  # Bug 1835669
+        "set-methods",  # Bug 1805038
     ]
 )
 FEATURE_CHECK_NEEDED = {
@@ -40,21 +38,18 @@ FEATURE_CHECK_NEEDED = {
     "SharedArrayBuffer": "!this.hasOwnProperty('SharedArrayBuffer')",
     "Temporal": "!this.hasOwnProperty('Temporal')",
     "WeakRef": "!this.hasOwnProperty('WeakRef')",
-    "array-grouping": "!Object.groupBy",  # Bug 1792650
-    "change-array-by-copy": "!Array.prototype.with",  # Bug 1811054
-    "Array.fromAsync": "!Array.fromAsync",  # Bug 1746209
-    "String.prototype.isWellFormed": "!String.prototype.isWellFormed",
-    "String.prototype.toWellFormed": "!String.prototype.toWellFormed",
+    "decorators": "!(this.hasOwnProperty('getBuildConfiguration')&&getBuildConfiguration('decorators'))",  # Bug 1435869
+    "iterator-helpers": "!this.hasOwnProperty('Iterator')",  # Bug 1568906
+    "arraybuffer-transfer": "!ArrayBuffer.prototype.transfer",  # Bug 1519163
+    "symbols-as-weakmap-keys": "!(this.hasOwnProperty('getBuildConfiguration')&&!getBuildConfiguration('release_or_beta'))",
 }
 RELEASE_OR_BETA = set([])
 SHELL_OPTIONS = {
     "import-assertions": "--enable-import-assertions",
     "ShadowRealm": "--enable-shadow-realms",
-    "array-grouping": "--enable-array-grouping",
-    "change-array-by-copy": "--enable-change-array-by-copy",
-    "Array.fromAsync": "--enable-array-from-async",
-    "String.prototype.isWellFormed": "--enable-well-formed-unicode-strings",
-    "String.prototype.toWellFormed": "--enable-well-formed-unicode-strings",
+    "iterator-helpers": "--enable-iterator-helpers",
+    "arraybuffer-transfer": "--enable-arraybuffer-transfer",
+    "symbols-as-weakmap-keys": "--enable-symbols-as-weakmap-keys",
 }
 
 
@@ -372,7 +367,7 @@ def convertTestFile(test262parser, testSource, testName, includeSet, strictTests
                 refTestSkipIf.append(
                     (
                         "(this.hasOwnProperty('getBuildConfiguration')"
-                        "&&getBuildConfiguration()['arm64-simulator'])",
+                        "&&getBuildConfiguration('arm64-simulator'))",
                         "ARM64 Simulator cannot emulate atomics",
                     )
                 )
@@ -513,7 +508,7 @@ def process_test262(test262Dir, test262OutDir, strictTests, externManifests):
     explicitIncludes[os.path.join("built-ins", "Temporal")] = ["temporalHelpers.js"]
 
     # Process all test directories recursively.
-    for (dirPath, dirNames, fileNames) in os.walk(testDir):
+    for dirPath, dirNames, fileNames in os.walk(testDir):
         relPath = os.path.relpath(dirPath, testDir)
         if relPath == ".":
             continue
@@ -556,7 +551,7 @@ def process_test262(test262Dir, test262OutDir, strictTests, externManifests):
                     test262parser, testSource, testName, includeSet, strictTests
                 )
 
-            for (newFileName, newSource, externRefTest) in convert:
+            for newFileName, newSource, externRefTest in convert:
                 writeTestFile(test262OutDir, newFileName, newSource)
 
                 if externRefTest is not None:

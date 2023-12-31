@@ -10,8 +10,6 @@
 
 #include "gfxUtils.h"
 #include "nsStyleConsts.h"
-#include "nsStyleStruct.h"
-#include "mozilla/WritingModes.h"
 #include "mozilla/gfx/Types.h"
 
 namespace mozilla {
@@ -149,10 +147,12 @@ CSSSize FrameMetrics::CalculateCompositedSizeInCssPixels(
   return aCompositionBounds.Size() / aZoom;
 }
 
-bool FrameMetrics::ApplyScrollUpdateFrom(const ScrollPositionUpdate& aUpdate) {
+std::pair<bool, CSSPoint> FrameMetrics::ApplyAbsoluteScrollUpdateFrom(
+    const ScrollPositionUpdate& aUpdate) {
+  CSSPoint oldVisualOffset = GetVisualScrollOffset();
   // In applying a main-thread scroll update, try to preserve the relative
   // offset between the visual and layout viewports.
-  CSSPoint relativeOffset = GetVisualScrollOffset() - GetLayoutScrollOffset();
+  CSSPoint relativeOffset = oldVisualOffset - GetLayoutScrollOffset();
   MOZ_ASSERT(IsRootContent() || relativeOffset == CSSPoint());
   // We need to set the two offsets together, otherwise a subsequent
   // RecalculateLayoutViewportOffset() could see divergent layout and
@@ -160,7 +160,7 @@ bool FrameMetrics::ApplyScrollUpdateFrom(const ScrollPositionUpdate& aUpdate) {
   bool offsetChanged = SetLayoutScrollOffset(aUpdate.GetDestination());
   offsetChanged |=
       ClampAndSetVisualScrollOffset(aUpdate.GetDestination() + relativeOffset);
-  return offsetChanged;
+  return {offsetChanged, GetVisualScrollOffset() - oldVisualOffset};
 }
 
 CSSPoint FrameMetrics::ApplyRelativeScrollUpdateFrom(
@@ -196,68 +196,6 @@ void FrameMetrics::UpdatePendingScrollInfo(const ScrollPositionUpdate& aInfo) {
   SetLayoutScrollOffset(aInfo.GetDestination());
   ClampAndSetVisualScrollOffset(aInfo.GetDestination() + relativeOffset);
   mScrollGeneration = aInfo.GetGeneration();
-}
-
-ScrollSnapInfo::ScrollSnapInfo()
-    : mScrollSnapStrictnessX(StyleScrollSnapStrictness::None),
-      mScrollSnapStrictnessY(StyleScrollSnapStrictness::None) {}
-
-bool ScrollSnapInfo::HasScrollSnapping() const {
-  return mScrollSnapStrictnessY != StyleScrollSnapStrictness::None ||
-         mScrollSnapStrictnessX != StyleScrollSnapStrictness::None;
-}
-
-bool ScrollSnapInfo::HasSnapPositions() const {
-  if (!HasScrollSnapping()) {
-    return false;
-  }
-
-  for (const auto& target : mSnapTargets) {
-    if ((target.mSnapPositionX &&
-         mScrollSnapStrictnessX != StyleScrollSnapStrictness::None) ||
-        (target.mSnapPositionY &&
-         mScrollSnapStrictnessY != StyleScrollSnapStrictness::None)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-void ScrollSnapInfo::InitializeScrollSnapStrictness(
-    WritingMode aWritingMode, const nsStyleDisplay* aDisplay) {
-  if (aDisplay->mScrollSnapType.strictness == StyleScrollSnapStrictness::None) {
-    return;
-  }
-
-  mScrollSnapStrictnessX = StyleScrollSnapStrictness::None;
-  mScrollSnapStrictnessY = StyleScrollSnapStrictness::None;
-
-  switch (aDisplay->mScrollSnapType.axis) {
-    case StyleScrollSnapAxis::X:
-      mScrollSnapStrictnessX = aDisplay->mScrollSnapType.strictness;
-      break;
-    case StyleScrollSnapAxis::Y:
-      mScrollSnapStrictnessY = aDisplay->mScrollSnapType.strictness;
-      break;
-    case StyleScrollSnapAxis::Block:
-      if (aWritingMode.IsVertical()) {
-        mScrollSnapStrictnessX = aDisplay->mScrollSnapType.strictness;
-      } else {
-        mScrollSnapStrictnessY = aDisplay->mScrollSnapType.strictness;
-      }
-      break;
-    case StyleScrollSnapAxis::Inline:
-      if (aWritingMode.IsVertical()) {
-        mScrollSnapStrictnessY = aDisplay->mScrollSnapType.strictness;
-      } else {
-        mScrollSnapStrictnessX = aDisplay->mScrollSnapType.strictness;
-      }
-      break;
-    case StyleScrollSnapAxis::Both:
-      mScrollSnapStrictnessX = aDisplay->mScrollSnapType.strictness;
-      mScrollSnapStrictnessY = aDisplay->mScrollSnapType.strictness;
-      break;
-  }
 }
 
 std::ostream& operator<<(std::ostream& aStream,

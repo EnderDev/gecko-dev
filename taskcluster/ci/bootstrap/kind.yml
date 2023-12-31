@@ -32,11 +32,6 @@ jobs:
         pre-commands:
             - apt-get update
             - apt-get install -y --no-install-recommends curl mercurial python3-pip
-    ubuntu2210:
-        image: ubuntu:kinetic
-        pre-commands:
-            - apt-get update
-            - apt-get install -y --no-install-recommends curl mercurial python3-pip
     ubuntu2304:
         image: ubuntu:lunar
         pre-commands:
@@ -86,8 +81,6 @@ jobs:
     voidlinux:
         image: voidlinux/voidlinux
         pre-commands:
+            - sed -i s/alpha.de.repo.voidlinux.org/repo-default.voidlinux.org/g /usr/share/xbps.d/*
             - xbps-install -Suyv xbps
             - xbps-install -Suyv curl mercurial python3-pip
-            # Work around https://bz.mercurial-scm.org/show_bug.cgi?id=6761
-            - mkdir -p /etc/mercurial/hgrc.d
-            - (echo "[devel]"; echo discovery.randomize=false) > /etc/mercurial/hgrc.d/workaround.rc

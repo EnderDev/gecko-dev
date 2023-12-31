@@ -132,7 +132,7 @@ bool wasm::CreateStackMapForFunctionEntryTrap(
   for (WasmABIArgIter i(argTypes); !i.done(); i++) {
     ABIArg argLoc = *i;
     if (argLoc.kind() == ABIArg::Stack &&
-        argTypes[i.index()] == MIRType::RefOrNull) {
+        argTypes[i.index()] == MIRType::WasmAnyRef) {
       uint32_t offset = argLoc.offsetFromArgBase();
       MOZ_ASSERT(offset < nInboundStackArgBytes);
       MOZ_ASSERT(offset % sizeof(void*) == 0);
@@ -180,7 +180,7 @@ bool wasm::GenerateStackmapEntriesForTrapExit(
   }
 
   for (WasmABIArgIter i(args); !i.done(); i++) {
-    if (!i->argInRegister() || i.mirType() != MIRType::RefOrNull) {
+    if (!i->argInRegister() || i.mirType() != MIRType::WasmAnyRef) {
       continue;
     }
 
@@ -213,15 +213,16 @@ void wasm::EmitWasmPreBarrierGuard(MacroAssembler& masm, Register instance,
   masm.branchTest32(Assembler::Zero, Address(scratch, 0), Imm32(0x1),
                     skipBarrier);
 
+  // If the previous value is not a GC thing, we don't need the barrier.
+  FaultingCodeOffset fco =
+      masm.loadPtr(Address(valueAddr, valueOffset), scratch);
+  masm.branchWasmAnyRefIsGCThing(false, scratch, skipBarrier);
+
   // Emit metadata for a potential null access when reading the previous value.
   if (trapOffset) {
     masm.append(wasm::Trap::NullPointerDereference,
-                wasm::TrapSite(masm.currentOffset(), *trapOffset));
+                wasm::TrapSite(TrapMachineInsnForLoadWord(), fco, *trapOffset));
   }
-
-  // If the previous value is null, we don't need the barrier.
-  masm.loadPtr(Address(valueAddr, valueOffset), scratch);
-  masm.branchTestPtr(Assembler::Zero, scratch, scratch, skipBarrier);
 }
 
 void wasm::EmitWasmPreBarrierCall(MacroAssembler& masm, Register instance,
@@ -258,9 +259,6 @@ void wasm::EmitWasmPostBarrierGuard(MacroAssembler& masm,
                                     const Maybe<Register>& object,
                                     Register otherScratch, Register setValue,
                                     Label* skipBarrier) {
-  // If the pointer being stored is null, no barrier.
-  masm.branchTestPtr(Assembler::Zero, setValue, setValue, skipBarrier);
-
   // If there is a containing object and it is in the nursery, no barrier.
   if (object) {
     masm.branchPtrInNurseryChunk(Assembler::Equal, *object, otherScratch,
@@ -268,12 +266,12 @@ void wasm::EmitWasmPostBarrierGuard(MacroAssembler& masm,
   }
 
   // If the pointer being stored is to a tenured object, no barrier.
-  masm.branchPtrInNurseryChunk(Assembler::NotEqual, setValue, otherScratch,
-                               skipBarrier);
+  masm.branchWasmAnyRefIsNurseryCell(false, setValue, otherScratch,
+                                     skipBarrier);
 }
 
 #ifdef DEBUG
-bool wasm::IsValidStackMapKey(bool debugEnabled, const uint8_t* nextPC) {
+bool wasm::IsPlausibleStackMapKey(const uint8_t* nextPC) {
 #  if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_X86)
   const uint8_t* insn = nextPC;
   return (insn[-2] == 0x0F && insn[-1] == 0x0B) ||           // ud2
@@ -285,7 +283,7 @@ bool wasm::IsValidStackMapKey(bool debugEnabled, const uint8_t* nextPC) {
   return ((uintptr_t(insn) & 3) == 0) &&            // must be ARM, not Thumb
          (insn[-1] == 0xe7f000f0 ||                 // udf
           (insn[-1] & 0xfffffff0) == 0xe12fff30 ||  // blx reg (ARM, enc A1)
-          (insn[-1] & 0x0f000000) == 0x0b000000);   // bl.cc simm24 (ARM, enc A1)
+          (insn[-1] & 0x0f000000) == 0x0b000000);  // bl.cc simm24 (ARM, enc A1)
 
 #  elif defined(JS_CODEGEN_ARM64)
   const uint32_t hltInsn = 0xd4a00000;

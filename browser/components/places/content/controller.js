@@ -73,7 +73,7 @@ PlacesInsertionPoint.prototype = {
 
 function PlacesController(aView) {
   this._view = aView;
-  XPCOMUtils.defineLazyGetter(this, "profileName", function () {
+  ChromeUtils.defineLazyGetter(this, "profileName", function () {
     return Services.dirsvc.get("ProfD", Ci.nsIFile).leafName;
   });
 
@@ -1010,7 +1010,7 @@ PlacesController.prototype = {
       } else if (queryType == Ci.nsINavHistoryQueryOptions.QUERY_TYPE_HISTORY) {
         await this._removeRowsFromHistory();
       } else {
-        throw new Error("implement support for QUERY_TYPE_UNIFIED");
+        throw new Error("Unknown query type");
       }
     } else {
       throw new Error("unexpected root");

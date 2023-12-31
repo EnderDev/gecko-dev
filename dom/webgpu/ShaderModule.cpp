@@ -18,7 +18,9 @@ GPU_IMPL_JS_WRAP(ShaderModule)
 
 ShaderModule::ShaderModule(Device* const aParent, RawId aId,
                            const RefPtr<dom::Promise>& aCompilationInfo)
-    : ChildOf(aParent), mId(aId), mCompilationInfo(aCompilationInfo) {}
+    : ChildOf(aParent), mId(aId), mCompilationInfo(aCompilationInfo) {
+  MOZ_RELEASE_ASSERT(aId);
+}
 
 ShaderModule::~ShaderModule() { Cleanup(); }
 
@@ -27,12 +29,17 @@ void ShaderModule::Cleanup() {
     mValid = false;
     auto bridge = mParent->GetBridge();
     if (bridge && bridge->IsOpen()) {
-      bridge->SendShaderModuleDestroy(mId);
+      bridge->SendShaderModuleDrop(mId);
     }
   }
 }
 
 already_AddRefed<dom::Promise> ShaderModule::CompilationInfo(ErrorResult& aRv) {
+  return GetCompilationInfo(aRv);
+}
+
+already_AddRefed<dom::Promise> ShaderModule::GetCompilationInfo(
+    ErrorResult& aRv) {
   RefPtr<dom::Promise> tmp = mCompilationInfo;
   return tmp.forget();
 }

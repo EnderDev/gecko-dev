@@ -8,6 +8,7 @@
 
 #include "JSOracleParent.h"
 #include "js/CallAndConstruct.h"  // JS::Call
+#include "js/ColumnNumber.h"  // JS::TaggedColumnNumberOneOrigin, JS::ColumnNumberOneOrigin
 #include "js/CharacterEncoding.h"
 #include "js/Object.h"              // JS::GetClass
 #include "js/PropertyAndElement.h"  // JS_DefineProperty, JS_DefinePropertyById, JS_Enumerate, JS_GetProperty, JS_GetPropertyById, JS_SetProperty, JS_SetPropertyById, JS::IdVector
@@ -61,6 +62,18 @@
 #include "nsIException.h"
 #include "VsyncSource.h"
 
+#ifdef XP_UNIX
+#  include <errno.h>
+#  include <unistd.h>
+#  include <fcntl.h>
+#  include <poll.h>
+#  include <sys/wait.h>
+
+#  ifdef XP_LINUX
+#    include <sys/prctl.h>
+#  endif
+#endif
+
 namespace mozilla::dom {
 
 /* static */
@@ -104,29 +117,17 @@ void ChromeUtils::Base64URLEncode(GlobalObject& aGlobal,
                                   const ArrayBufferViewOrArrayBuffer& aSource,
                                   const Base64URLEncodeOptions& aOptions,
                                   nsACString& aResult, ErrorResult& aRv) {
-  size_t length = 0;
-  uint8_t* data = nullptr;
-  if (aSource.IsArrayBuffer()) {
-    const ArrayBuffer& buffer = aSource.GetAsArrayBuffer();
-    buffer.ComputeState();
-    length = buffer.Length();
-    data = buffer.Data();
-  } else if (aSource.IsArrayBufferView()) {
-    const ArrayBufferView& view = aSource.GetAsArrayBufferView();
-    view.ComputeState();
-    length = view.Length();
-    data = view.Data();
-  } else {
-    MOZ_CRASH("Uninitialized union: expected buffer or view");
-  }
-
   auto paddingPolicy = aOptions.mPad ? Base64URLEncodePaddingPolicy::Include
                                      : Base64URLEncodePaddingPolicy::Omit;
-  nsresult rv = mozilla::Base64URLEncode(length, data, paddingPolicy, aResult);
-  if (NS_WARN_IF(NS_FAILED(rv))) {
-    aResult.Truncate();
-    aRv.Throw(rv);
-  }
+  ProcessTypedArrays(
+      aSource, [&](const Span<uint8_t>& aData, JS::AutoCheckCannotGC&&) {
+        nsresult rv = mozilla::Base64URLEncode(aData.Length(), aData.Elements(),
+                                               paddingPolicy, aResult);
+        if (NS_WARN_IF(NS_FAILED(rv))) {
+          aResult.Truncate();
+          aRv.Throw(rv);
+        }
+      });
 }
 
 /* static */
@@ -161,10 +162,8 @@ void ChromeUtils::Base64URLDecode(GlobalObject& aGlobal,
   }
 
   JS::Rooted<JSObject*> buffer(
-      aGlobal.Context(),
-      ArrayBuffer::Create(aGlobal.Context(), data.Length(), data.Elements()));
-  if (NS_WARN_IF(!buffer)) {
-    aRv.Throw(NS_ERROR_OUT_OF_MEMORY);
+      aGlobal.Context(), ArrayBuffer::Create(aGlobal.Context(), data, aRv));
+  if (aRv.Failed()) {
     return;
   }
   aRetval.set(buffer);
@@ -973,6 +972,41 @@ void ChromeUtils::DefineESModuleGetters(const GlobalObject& global,
   }
 }
 
+#ifdef XP_UNIX
+/* static */
+void ChromeUtils::GetLibcConstants(const GlobalObject&,
+                                   LibcConstants& aConsts) {
+  aConsts.mEINTR.Construct(EINTR);
+  aConsts.mEACCES.Construct(EACCES);
+  aConsts.mEAGAIN.Construct(EAGAIN);
+  aConsts.mEINVAL.Construct(EINVAL);
+  aConsts.mENOSYS.Construct(ENOSYS);
+
+  aConsts.mF_SETFD.Construct(F_SETFD);
+  aConsts.mF_SETFL.Construct(F_SETFL);
+
+  aConsts.mFD_CLOEXEC.Construct(FD_CLOEXEC);
+
+  aConsts.mAT_EACCESS.Construct(AT_EACCESS);
+
+  aConsts.mO_CREAT.Construct(O_CREAT);
+  aConsts.mO_NONBLOCK.Construct(O_NONBLOCK);
+  aConsts.mO_WRONLY.Construct(O_WRONLY);
+
+  aConsts.mPOLLERR.Construct(POLLERR);
+  aConsts.mPOLLHUP.Construct(POLLHUP);
+  aConsts.mPOLLIN.Construct(POLLIN);
+  aConsts.mPOLLNVAL.Construct(POLLNVAL);
+  aConsts.mPOLLOUT.Construct(POLLOUT);
+
+  aConsts.mWNOHANG.Construct(WNOHANG);
+
+#  ifdef XP_LINUX
+  aConsts.mPR_CAPBSET_READ.Construct(PR_CAPBSET_READ);
+#  endif
+}
+#endif
+
 /* static */
 void ChromeUtils::OriginAttributesToSuffix(
     dom::GlobalObject& aGlobal, const dom::OriginAttributesDictionary& aAttrs,
@@ -1382,8 +1416,7 @@ already_AddRefed<Promise> ChromeUtils::RequestProcInfo(GlobalObject& aGlobal,
   }
 
   // Now place background request.
-  RefPtr<nsISerialEventTarget> target =
-      global->EventTargetFor(TaskCategory::Performance);
+  RefPtr<nsISerialEventTarget> target = global->SerialEventTarget();
   mozilla::GetProcInfo(std::move(requests))
       ->Then(
           target, __func__,
@@ -1549,7 +1582,7 @@ void ChromeUtils::CreateError(const GlobalObject& aGlobal,
   {
     JS::Rooted<JSString*> fileName(cx, JS_GetEmptyString(cx));
     uint32_t line = 0;
-    uint32_t column = 0;
+    JS::TaggedColumnNumberOneOrigin column;
 
     Maybe<JSAutoRealm> ar;
     JS::Rooted<JSObject*> stack(cx);
@@ -1579,8 +1612,9 @@ void ChromeUtils::CreateError(const GlobalObject& aGlobal,
     }
 
     JS::Rooted<JS::Value> err(cx);
-    if (!JS::CreateError(cx, JSEXN_ERR, stack, fileName, line, column, nullptr,
-                         message, JS::NothingHandleValue, &err)) {
+    if (!JS::CreateError(cx, JSEXN_ERR, stack, fileName, line,
+                         JS::ColumnNumberOneOrigin(column.oneOriginValue()),
+                         nullptr, message, JS::NothingHandleValue, &err)) {
       return;
     }
 
@@ -1840,8 +1874,9 @@ void ChromeUtils::GetAllPossibleUtilityActorNames(GlobalObject& aGlobal,
 }
 
 /* static */
-bool ChromeUtils::ShouldResistFingerprinting(GlobalObject& aGlobal,
-                                             JSRFPTarget aTarget) {
+bool ChromeUtils::ShouldResistFingerprinting(
+    GlobalObject& aGlobal, JSRFPTarget aTarget,
+    const Nullable<uint64_t>& aOverriddenFingerprintingSettings) {
   RFPTarget target;
   switch (aTarget) {
     case JSRFPTarget::RoundWindowSize:
@@ -1854,7 +1889,14 @@ bool ChromeUtils::ShouldResistFingerprinting(GlobalObject& aGlobal,
       MOZ_CRASH("Unhandled JSRFPTarget enum value");
   }
 
-  return nsRFPService::IsRFPEnabledFor(target);
+  Maybe<RFPTarget> overriddenFingerprintingSettings;
+  if (!aOverriddenFingerprintingSettings.IsNull()) {
+    overriddenFingerprintingSettings.emplace(
+        RFPTarget(aOverriddenFingerprintingSettings.Value()));
+  }
+
+  return nsRFPService::IsRFPEnabledFor(target,
+                                       overriddenFingerprintingSettings);
 }
 
 std::atomic<uint32_t> ChromeUtils::sDevToolsOpenedCount = 0;

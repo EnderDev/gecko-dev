@@ -12,28 +12,17 @@ const { PromiseTestUtils } = ChromeUtils.importESModule(
  */
 add_task(
   async function test_translations_telemetry_manual_translation_failure() {
-    PromiseTestUtils.expectUncaughtRejection(
-      /Intentionally rejecting downloads./
-    );
-
     const { cleanup, rejectDownloads, runInPage } = await loadTestPage({
       page: SPANISH_PAGE_URL,
       languagePairs: LANGUAGE_PAIRS,
     });
 
-    const { button } = await assertTranslationsButton(
+    await assertTranslationsButton(
       { button: true, circleArrows: false, locale: false, icon: true },
       "The button is available."
     );
 
-    await runInPage(async TranslationsTest => {
-      const { getH1 } = TranslationsTest.getSelectors();
-      await TranslationsTest.assertTranslationResult(
-        "The page's H1 is in Spanish.",
-        getH1,
-        "Don Quijote de La Mancha"
-      );
-    });
+    await assertPageIsUntranslated(runInPage);
 
     await TestTranslationsTelemetry.assertCounter(
       "RequestCount",
@@ -49,40 +38,53 @@ add_task(
       }
     );
     await TestTranslationsTelemetry.assertEvent(
-      "TranslationRequest",
       Glean.translations.translationRequest,
       {
-        expectedLength: 0,
+        expectedEventCount: 0,
       }
     );
 
-    await waitForTranslationsPopupEvent("popupshown", () => {
-      click(button, "Opening the popup");
+    await openTranslationsPanel({ onOpenPanel: assertPanelDefaultView });
+
+    await TestTranslationsTelemetry.assertEvent(Glean.translationsPanel.open, {
+      expectedEventCount: 1,
+      expectNewFlowId: true,
+      finalValuePredicates: [
+        value => value.extra.auto_show === "false",
+        value => value.extra.view_name === "defaultView",
+        value => value.extra.opened_from === "translationsButton",
+        value => value.extra.document_language === "es",
+      ],
     });
 
-    await waitForTranslationsPopupEvent("popuphidden", () => {
-      click(
-        getByL10nId("translations-panel-translate-button"),
-        "Start translating by clicking the translate button."
-      );
+    await clickTranslateButton({
+      downloadHandler: rejectDownloads,
+      onOpenPanel: assertPanelErrorView,
     });
 
-    await assertTranslationsButton(
-      { button: true, circleArrows: true, locale: false, icon: true },
-      "The icon presents the loading indicator."
+    await assertPageIsUntranslated(runInPage);
+
+    await TestTranslationsTelemetry.assertEvent(Glean.translationsPanel.open, {
+      expectedEventCount: 2,
+      expectNewFlowId: false,
+      finalValuePredicates: [
+        value => value.extra.auto_show === "true",
+        value => value.extra.view_name === "errorView",
+        value => value.extra.opened_from === "translationsButton",
+        value => value.extra.document_language === "es",
+      ],
+    });
+    await TestTranslationsTelemetry.assertEvent(
+      Glean.translationsPanel.translateButton,
+      {
+        expectedEventCount: 1,
+        expectNewFlowId: false,
+      }
     );
-
-    await rejectDownloads(1);
-
-    await runInPage(async TranslationsTest => {
-      const { getH1 } = TranslationsTest.getSelectors();
-      await TranslationsTest.assertTranslationResult(
-        "The page's H1 is in Spanish.",
-        getH1,
-        "Don Quijote de La Mancha"
-      );
+    await TestTranslationsTelemetry.assertEvent(Glean.translationsPanel.close, {
+      expectedEventCount: 1,
+      expectNewFlowId: false,
     });
-
     await TestTranslationsTelemetry.assertCounter(
       "RequestCount",
       Glean.translations.requestsCount,
@@ -96,26 +98,25 @@ add_task(
         expectedDenominator: 1,
       }
     );
+    await TestTranslationsTelemetry.assertEvent(Glean.translations.error, {
+      expectedEventCount: 1,
+      expectNewFlowId: false,
+      finalValuePredicates: [
+        value =>
+          value.extra.reason === "Error: Intentionally rejecting downloads.",
+      ],
+    });
     await TestTranslationsTelemetry.assertEvent(
-      "Error",
-      Glean.translations.error,
-      {
-        expectedLength: 1,
-        finalValuePredicates: [
-          value =>
-            value.extra.reason === "Error: Intentionally rejecting downloads.",
-        ],
-      }
-    );
-    await TestTranslationsTelemetry.assertEvent(
-      "TranslationRequest",
       Glean.translations.translationRequest,
       {
-        expectedLength: 1,
+        expectedEventCount: 1,
+        expectNewFlowId: false,
         finalValuePredicates: [
           value => value.extra.from_language === "es",
           value => value.extra.to_language === "en",
           value => value.extra.auto_translate === "false",
+          value => value.extra.document_language === "es",
+          value => value.extra.top_preferred_language === "en",
         ],
       }
     );
@@ -128,31 +129,19 @@ add_task(
  * Tests the telemetry event for an automatic translation request failure.
  */
 add_task(async function test_translations_telemetry_auto_translation_failure() {
-  PromiseTestUtils.expectUncaughtRejection(
-    /Intentionally rejecting downloads./
-  );
-
   const { cleanup, rejectDownloads, runInPage } = await loadTestPage({
-    page: SPANISH_PAGE_URL,
+    page: BLANK_PAGE,
     languagePairs: LANGUAGE_PAIRS,
     prefs: [["browser.translations.alwaysTranslateLanguages", "es"]],
   });
 
-  await assertTranslationsButton(
-    { button: true, circleArrows: true, locale: false, icon: true },
-    "The icon presents the loading indicator."
-  );
-
-  await rejectDownloads(1);
-
-  await runInPage(async TranslationsTest => {
-    const { getH1 } = TranslationsTest.getSelectors();
-    await TranslationsTest.assertTranslationResult(
-      "The page's H1 is in Spanish.",
-      getH1,
-      "Don Quijote de La Mancha"
-    );
+  await navigate("Navigate to a Spanish page", {
+    url: SPANISH_PAGE_URL,
+    downloadHandler: rejectDownloads,
+    onOpenPanel: assertPanelErrorView,
   });
+
+  await assertPageIsUntranslated(runInPage);
 
   await TestTranslationsTelemetry.assertCounter(
     "RequestCount",
@@ -167,29 +156,55 @@ add_task(async function test_translations_telemetry_auto_translation_failure() {
       expectedDenominator: 1,
     }
   );
+  await TestTranslationsTelemetry.assertEvent(Glean.translationsPanel.open, {
+    expectedEventCount: 1,
+    expectNewFlowId: true,
+    finalValuePredicates: [
+      value => value.extra.auto_show === "true",
+      value => value.extra.view_name === "errorView",
+      value => value.extra.opened_from === "translationsButton",
+      value => value.extra.document_language === "es",
+    ],
+  });
+  await TestTranslationsTelemetry.assertEvent(Glean.translationsPanel.close, {
+    expectedEventCount: 0,
+    expectNewFlowId: false,
+  });
+  await TestTranslationsTelemetry.assertEvent(Glean.translations.error, {
+    expectedEventCount: 1,
+    expectNewFlowId: false,
+    finalValuePredicates: [
+      value =>
+        value.extra.reason === "Error: Intentionally rejecting downloads.",
+    ],
+  });
   await TestTranslationsTelemetry.assertEvent(
-    "Error",
-    Glean.translations.error,
-    {
-      expectedLength: 1,
-      finalValuePredicates: [
-        value =>
-          value.extra.reason === "Error: Intentionally rejecting downloads.",
-      ],
-    }
-  );
-  await TestTranslationsTelemetry.assertEvent(
-    "TranslationRequest",
     Glean.translations.translationRequest,
     {
-      expectedLength: 1,
+      expectedEventCount: 1,
+      expectNewFlowId: false,
       finalValuePredicates: [
         value => value.extra.from_language === "es",
         value => value.extra.to_language === "en",
         value => value.extra.auto_translate === "true",
+        value => value.extra.document_language === "es",
+        value => value.extra.top_preferred_language === "en",
       ],
     }
   );
+
+  await clickCancelButton();
+  await TestTranslationsTelemetry.assertEvent(
+    Glean.translationsPanel.cancelButton,
+    {
+      expectedEventCount: 1,
+      expectNewFlowId: false,
+    }
+  );
+  await TestTranslationsTelemetry.assertEvent(Glean.translationsPanel.close, {
+    expectedEventCount: 1,
+    expectNewFlowId: false,
+  });
 
   await cleanup();
 });

@@ -92,6 +92,7 @@ CODE_COVERAGE_ARCHIVE_BASENAME = $(PKG_BASENAME).code-coverage-gcno
 MOZSEARCH_ARCHIVE_BASENAME = $(PKG_BASENAME).mozsearch-index
 MOZSEARCH_INCLUDEMAP_BASENAME = $(PKG_BASENAME).mozsearch-distinclude
 MOZSEARCH_SCIP_INDEX_BASENAME = $(PKG_BASENAME).mozsearch-scip-index
+MOZSEARCH_JAVA_INDEX_BASENAME = $(PKG_BASENAME).mozsearch-java-index
 
 # Mozharness naming
 MOZHARNESS_PACKAGE = mozharness.zip
@@ -106,9 +107,6 @@ WP_TEST_PACKAGE = $(PKG_BASENAME).web-platform.tests.tar.gz
 TALOS_PACKAGE = $(PKG_BASENAME).talos.tests.tar.gz
 AWSY_PACKAGE = $(PKG_BASENAME).awsy.tests.tar.gz
 GTEST_PACKAGE = $(PKG_BASENAME).gtest.tests.tar.gz
-
-# macOS codesigning package naming
-MACOS_CODESIGN_ARCHIVE_BASENAME = $(PKG_BASENAME).codesign-entitlements
 
 # `.xpt` artifacts: for use in artifact builds.
 XPT_ARTIFACTS_ARCHIVE_BASENAME = $(PKG_BASENAME).xpt_artifacts

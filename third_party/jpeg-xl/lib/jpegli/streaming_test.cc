@@ -35,7 +35,7 @@ struct SourceManager {
 // A destination manager that empties its output buffer into a SourceManager's
 // input buffer. The buffer size is kept short because empty_output_buffer() is
 // called only when the output buffer is full, and we want to update the decoder
-// input frequently to demostrate that streaming works.
+// input frequently to demonstrate that streaming works.
 static constexpr size_t kOutputBufferSize = 1024;
 struct DestinationManager {
   jpeg_destination_mgr pub;
@@ -107,7 +107,7 @@ TEST_P(StreamingTestParam, TestStreaming) {
     cinfo.image_width = input.xsize;
     cinfo.image_height = input.ysize;
     cinfo.input_components = input.components;
-    cinfo.in_color_space = input.color_space;
+    cinfo.in_color_space = (J_COLOR_SPACE)input.color_space;
     jpegli_set_defaults(&cinfo);
     cinfo.comp_info[0].v_samp_factor = config.jparams.v_sampling[0];
     jpegli_set_progressive_level(&cinfo, 0);

@@ -5,9 +5,9 @@ fuzzy(0-1,0-6) == rotatey-1a.html rotatey-1-ref.html
 == scalezrotatex-1.html scalezrotatex-1-ref.html
 # Check that the perspectve() transform function results in some visual changes
 != rotatex-perspective-1a.html rotatex-1-ref.html
-# Check that -moz-perspective results in visual changes to child transformed elements
+# Check that perspective results in visual changes to child transformed elements
 != rotatex-perspective-1b.html rotatex-1-ref.html
-# -moz-perspective should only apply to child elements
+# perspective should only apply to child elements
 == rotatex-perspective-1c.html rotatex-1-ref.html
 == rotatex-perspective-3a.html rotatex-perspective-3-ref.html
 == scalez-1a.html scalez-1-ref.html
@@ -64,7 +64,7 @@ fuzzy-if((gtkWidget&&layersOMTC)||(winWidget&&!layersGPUAccelerated),0-1,0-86) =
 fuzzy(0-3,0-304) == scroll-perspective-1.html scroll-perspective-1-ref.html
 # Bugs
 fails-if(!layersGPUAccelerated) fails-if(useDrawSnapshot) fuzzy-if(!useDrawSnapshot,0-60,0-826) == 1035611-1.html 1035611-1-ref.html # Bug 1072898 for !layersGPUAccelerated failures
-!= 1157984-1.html about:blank # Bug 1157984
+random-if(swgl&&Android) != 1157984-1.html about:blank # Bug 1157984
 fuzzy(0-220,0-660) == animate-cube-radians.html animate-cube-radians-ref.html # subpixel AA
 fuzzy(0-240,0-400) fuzzy-if(/^Windows\x20NT\x206\.1/.test(http.oscpu)&&!layersGPUAccelerated,0-16,0-6) == animate-cube-radians-zoom.html animate-cube-radians-zoom-ref.html
 != animate-cube-radians-ref.html animate-cube-radians-zoom-ref.html

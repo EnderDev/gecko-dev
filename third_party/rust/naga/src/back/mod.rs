@@ -37,13 +37,28 @@ impl std::fmt::Display for Level {
     }
 }
 
-/// Stores the current function type (either a regular function or an entry point)
+/// Whether we're generating an entry point or a regular function.
 ///
-/// Also stores data needed to identify it (handle for a regular function or index for an entry point)
+/// Backend languages often require different code for a [`Function`]
+/// depending on whether it represents an [`EntryPoint`] or not.
+/// Backends can pass common code one of these values to select the
+/// right behavior.
+///
+/// These values also carry enough information to find the `Function`
+/// in the [`Module`]: the `Handle` for a regular function, or the
+/// index into [`Module::entry_points`] for an entry point.
+///
+/// [`Function`]: crate::Function
+/// [`EntryPoint`]: crate::EntryPoint
+/// [`Module`]: crate::Module
+/// [`Module::entry_points`]: crate::Module::entry_points
 enum FunctionType {
-    /// A regular function and it's handle
+    /// A regular function.
     Function(crate::Handle<crate::Function>),
-    /// A entry point and it's index
+    /// An [`EntryPoint`], and its index in [`Module::entry_points`].
+    ///
+    /// [`EntryPoint`]: crate::EntryPoint
+    /// [`Module::entry_points`]: crate::Module::entry_points
     EntryPoint(crate::proc::EntryPointIndex),
 }
 
@@ -71,6 +86,14 @@ struct FunctionCtx<'a> {
 }
 
 impl FunctionCtx<'_> {
+    fn resolve_type<'a>(
+        &'a self,
+        handle: crate::Handle<crate::Expression>,
+        types: &'a crate::UniqueArena<crate::Type>,
+    ) -> &'a crate::TypeInner {
+        self.info[handle].ty.inner_with(types)
+    }
+
     /// Helper method that generates a [`NameKey`](crate::proc::NameKey) for a local in the current function
     const fn name_key(&self, local: crate::Handle<crate::LocalVariable>) -> crate::proc::NameKey {
         match self.ty {
@@ -112,7 +135,7 @@ impl FunctionCtx<'_> {
                     };
                 }
                 crate::Expression::AccessIndex { base, index } => {
-                    match *self.info[base].ty.inner_with(&module.types) {
+                    match *self.resolve_type(base, &module.types) {
                         crate::TypeInner::Struct { ref members, .. } => {
                             if let Some(crate::Binding::BuiltIn(bi)) =
                                 members[index as usize].binding
@@ -228,7 +251,7 @@ bitflags::bitflags! {
     /// we might as well make one back end's life easier.)
     ///
     /// [`RayDesc`]: crate::Module::generate_ray_desc_type
-    #[derive(Default)]
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct RayFlag: u32 {
         const OPAQUE = 0x01;
         const NO_OPAQUE = 0x02;

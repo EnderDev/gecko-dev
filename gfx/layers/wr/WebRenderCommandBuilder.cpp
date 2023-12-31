@@ -273,6 +273,8 @@ static bool DetectContainerLayerPropertiesBoundsChange(
   if (aItem->GetType() == DisplayItemType::TYPE_FILTER) {
     // Filters get clipped to the BuildingRect since they can
     // have huge bounds outside of the visible area.
+    // This function and similar code in ComputeGeometryChange should be kept in
+    // sync.
     aGeometry.mBounds = aGeometry.mBounds.Intersect(aItem->GetBuildingRect());
   }
 
@@ -556,6 +558,13 @@ struct DIGroup {
       }
     }
 
+    if (aData->mGeometry && aItem->GetType() == DisplayItemType::TYPE_FILTER) {
+      // This hunk DetectContainerLayerPropertiesBoundsChange should be kept in
+      // sync.
+      aData->mGeometry->mBounds =
+          aData->mGeometry->mBounds.Intersect(aItem->GetBuildingRect());
+    }
+
     mHitTestBounds.OrWith(aData->mRect);
     if (!aData->mInvisible) {
       mActualBounds.OrWith(aData->mRect);
@@ -793,35 +802,36 @@ struct DIGroup {
       nsDisplayItem* item = *it;
       MOZ_ASSERT(item);
 
+      if (item->GetType() == DisplayItemType::TYPE_COMPOSITOR_HITTEST_INFO) {
+        continue;
+      }
+
       BlobItemData* data = GetBlobItemData(item);
       if (data->mInvisible) {
         continue;
       }
 
       LayerIntRect bounds = data->mRect;
-      auto bottomRight = bounds.BottomRight();
+
+      // skip empty items
+      if (bounds.IsEmpty()) {
+        continue;
+      }
 
       GP("Trying %s %p-%d %d %d %d %d\n", item->Name(), item->Frame(),
          item->GetPerFrameKey(), bounds.x, bounds.y, bounds.XMost(),
          bounds.YMost());
 
-      if (item->GetType() == DisplayItemType::TYPE_COMPOSITOR_HITTEST_INFO) {
-        continue;
-      }
+      auto bottomRight = bounds.BottomRight();
 
       GP("paint check invalid %d %d - %d %d\n", bottomRight.x.value,
          bottomRight.y.value, size.width, size.height);
-      // skip empty items
-      if (bounds.IsEmpty()) {
-        continue;
-      }
 
       bool dirty = true;
       auto preservedBounds = bounds.Intersect(mPreservedRect);
       if (!mInvalidRect.Contains(preservedBounds)) {
         GP("Passing\n");
         dirty = false;
-        BlobItemData* data = GetBlobItemData(item);
         if (data->mInvalid) {
           gfxCriticalError()
               << "DisplayItem" << item->Name() << "-should be invalid";
@@ -1041,11 +1051,6 @@ void Grouper::PaintContainerItem(DIGroup* aGroup, nsDisplayItem* aItem,
       // outside the invalid rect.
       if (aDirty) {
         auto filterItem = static_cast<nsDisplayFilters*>(aItem);
-
-        nsRegion visible(aItem->GetClippedBounds(mDisplayListBuilder));
-        nsRect buildingRect = aItem->GetBuildingRect();
-        visible.And(visible, buildingRect);
-
         filterItem->Paint(mDisplayListBuilder, aContext);
         TakeExternalSurfaces(aRecorder, aData->mExternalSurfaces, aRootManager,
                              aResources);
@@ -2410,9 +2415,7 @@ WebRenderCommandBuilder::GenerateFallbackData(
     nsDisplayItem* aItem, wr::DisplayListBuilder& aBuilder,
     wr::IpcResourceUpdateQueue& aResources, const StackingContextHelper& aSc,
     nsDisplayListBuilder* aDisplayListBuilder, LayoutDeviceRect& aImageRect) {
-  const bool paintOnContentSide = aItem->MustPaintOnContentSide();
-  bool useBlobImage =
-      StaticPrefs::gfx_webrender_blob_images() && !paintOnContentSide;
+  bool useBlobImage = aItem->ShouldUseBlobRenderingForFallback();
   Maybe<gfx::DeviceColor> highlight = Nothing();
   if (StaticPrefs::gfx_webrender_debug_highlight_painted_layers()) {
     highlight = Some(useBlobImage ? gfx::DeviceColor(1.0, 0.0, 0.0, 0.5)
@@ -2422,19 +2425,14 @@ WebRenderCommandBuilder::GenerateFallbackData(
   RefPtr<WebRenderFallbackData> fallbackData =
       CreateOrRecycleWebRenderUserData<WebRenderFallbackData>(aItem);
 
-  bool snap;
-  nsRect itemBounds = aItem->GetBounds(aDisplayListBuilder, &snap);
-
   // Blob images will only draw the visible area of the blob so we don't need to
   // clip them here and can just rely on the webrender clipping.
   // TODO We also don't clip native themed widget to avoid over-invalidation
   // during scrolling. It would be better to support a sort of streaming/tiling
   // scheme for large ones but the hope is that we should not have large native
   // themed items.
-  nsRect paintBounds = (useBlobImage || paintOnContentSide)
-                           ? itemBounds
-                           : aItem->GetClippedBounds(aDisplayListBuilder);
-
+  bool snap;
+  nsRect paintBounds = aItem->GetBounds(aDisplayListBuilder, &snap);
   nsRect buildingRect = aItem->GetBuildingRect();
 
   const int32_t appUnitsPerDevPixel =
@@ -2527,7 +2525,7 @@ WebRenderCommandBuilder::GenerateFallbackData(
       aItem->GetType() != DisplayItemType::TYPE_SVG_WRAPPER && differentScale) {
     nsRect invalid;
     if (!aItem->IsInvalid(invalid)) {
-      nsPoint shift = itemBounds.TopLeft() - geometry->mBounds.TopLeft();
+      nsPoint shift = paintBounds.TopLeft() - geometry->mBounds.TopLeft();
       geometry->MoveBy(shift);
 
       nsRegion invalidRegion;

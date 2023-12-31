@@ -244,22 +244,23 @@ class TestFirefoxRefresh(MarionetteTestCase):
         )
 
     def checkPassword(self):
-        loginInfo = self.marionette.execute_script(
+        loginInfo = self.runAsyncCode(
             """
-          let ary = Services.logins.findLogins(
-            "test.marionette.mozilla.com",
-            "http://test.marionette.mozilla.com/some/form/",
-            null, {});
-          return ary.length ? ary : {username: "null", password: "null"};
+          let [resolve] = arguments;
+          Services.logins.searchLoginsAsync({
+            origin: "test.marionette.mozilla.com",
+            formActionOrigin: "http://test.marionette.mozilla.com/some/form/",
+          }).then(ary => resolve(ary.length ? ary : {username: "null", password: "null"}));
         """
         )
         self.assertEqual(len(loginInfo), 1)
         self.assertEqual(loginInfo[0]["username"], self._username)
         self.assertEqual(loginInfo[0]["password"], self._password)
 
-        loginCount = self.marionette.execute_script(
+        loginCount = self.runAsyncCode(
             """
-          return Services.logins.getAllLogins().length;
+          let resolve = arguments[arguments.length - 1];
+          Services.logins.getAllLogins().then(logins => resolve(logins.length));
         """
         )
         # Note that we expect 2 logins - one from us, one from sync.

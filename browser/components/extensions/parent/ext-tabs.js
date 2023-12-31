@@ -16,7 +16,7 @@ ChromeUtils.defineESModuleGetters(this, {
   SessionStore: "resource:///modules/sessionstore/SessionStore.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGetter(this, "strBundle", function () {
+ChromeUtils.defineLazyGetter(this, "strBundle", function () {
   return Services.strings.createBundle(
     "chrome://global/locale/extensions.properties"
   );
@@ -28,7 +28,7 @@ const TAB_HIDE_CONFIRMED_TYPE = "tabHideNotification";
 
 const TAB_ID_NONE = -1;
 
-XPCOMUtils.defineLazyGetter(this, "tabHidePopup", () => {
+ChromeUtils.defineLazyGetter(this, "tabHidePopup", () => {
   return new ExtensionControlledPopup({
     confirmedType: TAB_HIDE_CONFIRMED_TYPE,
     anchorId: "alltabs-button",
@@ -397,7 +397,10 @@ this.tabs = class extends ExtensionAPIPersistent {
       let listener = event => {
         // Ignore any events prior to TabOpen
         // and events that are triggered while tabs are swapped between windows.
-        if (event.originalTarget.initializingTab) {
+        if (
+          event.originalTarget.initializingTab ||
+          event.originalTarget.ownerGlobal.gBrowserInit?.isAdoptingTab()
+        ) {
           return;
         }
         if (!extension.canAccessWindow(event.originalTarget.ownerGlobal)) {

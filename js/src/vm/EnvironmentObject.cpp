@@ -72,7 +72,7 @@ PropertyName* js::EnvironmentCoordinateNameSlow(JSScript* script,
 
   /* Beware nameless destructuring formal. */
   if (!id.isAtom()) {
-    return script->runtimeFromAnyThread()->commonNames->empty;
+    return script->runtimeFromAnyThread()->commonNames->empty_;
   }
   return id.toAtom()->asPropertyName();
 }
@@ -90,12 +90,7 @@ static T* CreateEnvironmentObject(JSContext* cx, Handle<SharedShape*> shape,
   MOZ_ASSERT(CanChangeToBackgroundAllocKind(allocKind, &T::class_));
   allocKind = gc::ForegroundToBackgroundAllocKind(allocKind);
 
-  JSObject* obj = NativeObject::create(cx, allocKind, heap, shape);
-  if (!obj) {
-    return nullptr;
-  }
-
-  return &obj->as<T>();
+  return NativeObject::create<T>(cx, allocKind, heap, shape);
 }
 
 // Helper function for simple environment objects that don't need the overloads
@@ -661,20 +656,21 @@ WithEnvironmentObject* WithEnvironmentObject::createNonSyntactic(
 }
 
 static inline bool IsUnscopableDotName(JSContext* cx, HandleId id) {
-  return id.isAtom(cx->names().dotThis) || id.isAtom(cx->names().dotNewTarget);
+  return id.isAtom(cx->names().dot_this_) ||
+         id.isAtom(cx->names().dot_newTarget_);
 }
 
 #ifdef DEBUG
 static bool IsInternalDotName(JSContext* cx, HandleId id) {
-  return id.isAtom(cx->names().dotThis) ||
-         id.isAtom(cx->names().dotGenerator) ||
-         id.isAtom(cx->names().dotInitializers) ||
-         id.isAtom(cx->names().dotFieldKeys) ||
-         id.isAtom(cx->names().dotStaticInitializers) ||
-         id.isAtom(cx->names().dotStaticFieldKeys) ||
-         id.isAtom(cx->names().dotArgs) ||
-         id.isAtom(cx->names().dotNewTarget) ||
-         id.isAtom(cx->names().starNamespaceStar);
+  return id.isAtom(cx->names().dot_this_) ||
+         id.isAtom(cx->names().dot_generator_) ||
+         id.isAtom(cx->names().dot_initializers_) ||
+         id.isAtom(cx->names().dot_fieldKeys_) ||
+         id.isAtom(cx->names().dot_staticInitializers_) ||
+         id.isAtom(cx->names().dot_staticFieldKeys_) ||
+         id.isAtom(cx->names().dot_args_) ||
+         id.isAtom(cx->names().dot_newTarget_) ||
+         id.isAtom(cx->names().star_namespace_star_);
 }
 #endif
 
@@ -1654,12 +1650,12 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
      */
     if (env->is<LexicalEnvironmentObject>() ||
         env->is<VarEnvironmentObject>()) {
-      // Currently consider all global and non-syntactic top-level lexical
-      // bindings to be aliased.
+      // Currently consider all non-syntactic top-level lexical bindings to be
+      // aliased.
       if (env->is<LexicalEnvironmentObject>() &&
+          !env->is<GlobalLexicalEnvironmentObject>() &&
           env->as<LexicalEnvironmentObject>().isExtensible()) {
-        MOZ_ASSERT(IsGlobalLexicalEnvironment(env) ||
-                   !IsSyntacticEnvironment(env));
+        MOZ_ASSERT(!IsSyntacticEnvironment(env));
         return true;
       }
 
@@ -1704,10 +1700,18 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
         AbstractFramePtr frame = maybeLiveEnv->frame();
         uint32_t local = loc.slot();
         MOZ_ASSERT(local < frame.script()->nfixed());
+        Value& localVal = frame.unaliasedLocal(local);
         if (action == GET) {
-          vp.set(frame.unaliasedLocal(local));
+          vp.set(localVal);
         } else {
-          frame.unaliasedLocal(local) = vp;
+          // Note: localVal could also be JS_OPTIMIZED_OUT.
+          if (localVal.isMagic() &&
+              localVal.whyMagic() == JS_UNINITIALIZED_LEXICAL) {
+            ReportRuntimeLexicalError(cx, JSMSG_UNINITIALIZED_LEXICAL, id);
+            return false;
+          }
+
+          localVal = vp;
         }
       } else if (AbstractGeneratorObject* genObj =
                      GetGeneratorObjectForEnvironment(cx, debugEnv);
@@ -1806,9 +1810,8 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
       if (action == GET) {
         if (instanceScope->memoriesStart() <= index &&
             index < instanceScope->globalsStart()) {
-          MOZ_ASSERT(instanceScope->memoriesStart() + 1 ==
-                     instanceScope->globalsStart());
-          vp.set(ObjectValue(*instance.memory()));
+          vp.set(ObjectValue(
+              *instance.memory(index - instanceScope->memoriesStart())));
         }
         if (instanceScope->globalsStart() <= index) {
           MOZ_ASSERT(index < instanceScope->namesCount());
@@ -1835,7 +1838,7 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     return id == NameToId(cx->names().arguments);
   }
   static bool isThis(JSContext* cx, jsid id) {
-    return id == NameToId(cx->names().dotThis);
+    return id == NameToId(cx->names().dot_this_);
   }
 
   static bool isFunctionEnvironment(const JSObject& env) {
@@ -1866,6 +1869,11 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     }
     if (env.is<WasmFunctionCallObject>()) {
       return &env.as<WasmFunctionCallObject>().scope();
+    }
+    if (env.is<GlobalLexicalEnvironmentObject>()) {
+      return &env.as<GlobalLexicalEnvironmentObject>()
+                  .global()
+                  .emptyGlobalScope();
     }
     return nullptr;
   }
@@ -2253,6 +2261,18 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
         return result.succeed();
       case ACCESS_GENERIC: {
         RootedValue envVal(cx, ObjectValue(*env));
+        RootedValue initialVal(cx);
+        if (!GetProperty(cx, env, env, id, &initialVal)) {
+          return false;
+        }
+        // Note: initialVal could be JS_OPTIMIZED_OUT, which is why we don't use
+        // .whyMagic(JS_UNINITALIZED_LEXICAL).
+        if (initialVal.isMagic() &&
+            initialVal.whyMagic() == JS_UNINITIALIZED_LEXICAL) {
+          ReportRuntimeLexicalErrorId(cx, JSMSG_UNINITIALIZED_LEXICAL, id);
+          return false;
+        }
+
         return SetProperty(cx, env, id, v, envVal, result);
       }
       default:
@@ -2288,7 +2308,7 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
       }
     }
     if (isMissingThisBinding(*env)) {
-      if (!props.append(NameToId(cx->names().dotThis))) {
+      if (!props.append(NameToId(cx->names().dot_this_))) {
         return false;
       }
     }
@@ -3420,7 +3440,7 @@ static bool GetThisValueForDebuggerEnvironmentIterMaybeOptimizedOut(
     }
 
     for (Rooted<BindingIter> bi(cx, BindingIter(script)); bi; bi++) {
-      if (bi.name() != cx->names().dotThis) {
+      if (bi.name() != cx->names().dot_this_) {
         continue;
       }
 
@@ -3690,7 +3710,7 @@ static bool InitHoistedFunctionDeclarations(JSContext* cx, HandleScript script,
     }
 
     RootedFunction fun(cx, &thing.as<JSObject>().as<JSFunction>());
-    Rooted<PropertyName*> name(cx, fun->explicitName()->asPropertyName());
+    Rooted<PropertyName*> name(cx, fun->fullExplicitName()->asPropertyName());
 
     // Clone the function before exposing to script as a binding.
     JSObject* clone = Lambda(cx, fun, envChain);
@@ -4137,16 +4157,16 @@ static bool AnalyzeEntrainedVariablesInScript(JSContext* cx,
 
     buf.printf("Script ");
 
-    if (JSAtom* name = script->function()->displayAtom()) {
-      buf.putString(name);
+    if (JSAtom* name = script->function()->fullDisplayAtom()) {
+      buf.putString(cx, name);
       buf.printf(" ");
     }
 
     buf.printf("(%s:%u) has variables entrained by ", script->filename(),
                script->lineno());
 
-    if (JSAtom* name = innerScript->function()->displayAtom()) {
-      buf.putString(name);
+    if (JSAtom* name = innerScript->function()->fullDisplayAtom()) {
+      buf.putString(cx, name);
       buf.printf(" ");
     }
 
@@ -4155,10 +4175,14 @@ static bool AnalyzeEntrainedVariablesInScript(JSContext* cx,
     for (PropertyNameSet::Range r = remainingNames.all(); !r.empty();
          r.popFront()) {
       buf.printf(" ");
-      buf.putString(r.front());
+      buf.putString(cx, r.front());
     }
 
-    printf("%s\n", buf.string());
+    JS::UniqueChars str = buf.release();
+    if (!str) {
+      return false;
+    }
+    printf("%s\n", str.get());
   }
 
   RootedFunction fun(cx);

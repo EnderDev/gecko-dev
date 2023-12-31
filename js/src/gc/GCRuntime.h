@@ -476,10 +476,14 @@ class GCRuntime {
   void removeWeakPointerCompartmentCallback(
       JSWeakPointerCompartmentCallback callback);
   JS::GCSliceCallback setSliceCallback(JS::GCSliceCallback callback);
-  JS::GCNurseryCollectionCallback setNurseryCollectionCallback(
-      JS::GCNurseryCollectionCallback callback);
+  bool addNurseryCollectionCallback(JS::GCNurseryCollectionCallback callback,
+                                    void* data);
+  void removeNurseryCollectionCallback(JS::GCNurseryCollectionCallback callback,
+                                       void* data);
   JS::DoCycleCollectionCallback setDoCycleCollectionCallback(
       JS::DoCycleCollectionCallback callback);
+  void callNurseryCollectionCallbacks(JS::GCNurseryProgress progress,
+                                      JS::GCReason reason);
 
   bool addFinalizationRegistry(JSContext* cx,
                                Handle<FinalizationRegistryObject*> registry);
@@ -583,11 +587,12 @@ class GCRuntime {
   void checkHashTablesAfterMovingGC();
 #endif
 
-#ifdef DEBUG
   // Crawl the heap to check whether an arbitary pointer is within a cell of
-  // the given kind.
-  bool isPointerWithinTenuredCell(void* ptr, JS::TraceKind traceKind);
+  // the given kind. (TraceKind::Null means to ignore the kind.)
+  bool isPointerWithinTenuredCell(
+      void* ptr, JS::TraceKind traceKind = JS::TraceKind::Null);
 
+#ifdef DEBUG
   bool hasZone(Zone* target);
 #endif
 
@@ -772,6 +777,8 @@ class GCRuntime {
       ParallelMarking allowParallelMarking = SingleThreadedMarking,
       ShouldReportMarkTime reportTime = ReportMarkTime);
   bool canMarkInParallel() const;
+  bool initParallelMarkers();
+  void finishParallelMarkers();
 
   bool hasMarkingWork(MarkColor color) const;
 
@@ -840,6 +847,7 @@ class GCRuntime {
   void sweepCompressionTasks();
   void sweepWeakMaps();
   void sweepUniqueIds();
+  void sweepObjectsWithWeakPointers();
   void sweepDebuggerOnMainThread(JS::GCContext* gcx);
   void sweepJitDataOnMainThread(JS::GCContext* gcx);
   void sweepFinalizationObserversOnMainThread();
@@ -1094,6 +1102,9 @@ class GCRuntime {
   /* Whether the heap will be compacted at the end of GC. */
   MainThreadData<bool> isCompacting;
 
+  /* Whether to use parallel marking. */
+  MainThreadData<ParallelMarking> useParallelMarking;
+
   /* The invocation kind of the current GC, set at the start of collection. */
   MainThreadOrGCTaskData<mozilla::Maybe<JS::GCOptions>> maybeGcOptions;
 
@@ -1130,6 +1141,10 @@ class GCRuntime {
   // Whether any sweeping and decommitting will run on a separate GC helper
   // thread.
   MainThreadData<bool> useBackgroundThreads;
+
+  // Whether we have already discarded JIT code for all collected zones in this
+  // slice.
+  MainThreadData<bool> haveDiscardedJITCodeThisSlice;
 
 #ifdef DEBUG
   /* Shutdown has started. Further collections must be shutdown collections. */
@@ -1303,6 +1318,8 @@ class GCRuntime {
       updateWeakPointerZonesCallbacks;
   MainThreadData<CallbackVector<JSWeakPointerCompartmentCallback>>
       updateWeakPointerCompartmentCallbacks;
+  MainThreadData<CallbackVector<JS::GCNurseryCollectionCallback>>
+      nurseryCollectionCallbacks;
 
   /*
    * The trace operations to trace embedding-specific GC roots. One is for

@@ -14,7 +14,13 @@ add_setup(async function setup() {
   // Without resetting the view-count pref it gets surfaced after
   // the third click on the fx view toolbar button.
   await SpecialPowers.pushPrefEnv({
-    set: [["browser.firefox-view.view-count", 0]],
+    set: [
+      ["browser.firefox-view.view-count", 0],
+      ["browser.tabs.firefox-view-next", false],
+    ],
+  });
+  registerCleanupFunction(async () => {
+    await SpecialPowers.popPrefEnv();
   });
 });
 
@@ -28,19 +34,6 @@ add_task(async function test_keyboard_focus_after_tab_pickup_opened() {
   Services.prefs.clearUserPref(
     "browser.tabs.firefox-view.ui-state.tab-pickup.open"
   );
-
-  // make sure the feature tour doesn't get in the way
-  await SpecialPowers.pushPrefEnv({
-    set: [
-      [
-        "browser.firefox-view.feature-tour",
-        JSON.stringify({
-          screen: `FEATURE_CALLOUT_1`,
-          complete: true,
-        }),
-      ],
-    ],
-  });
 
   // Let's be deterministic about the basic UI state!
   const sandbox = setupMocks({
@@ -85,7 +78,6 @@ add_task(async function test_keyboard_focus_after_tab_pickup_opened() {
 
   // cleanup time
   await tearDown(sandbox);
-  await SpecialPowers.popPrefEnv();
 });
 
 add_task(async function test_keyboard_accessibility_tab_pickup() {

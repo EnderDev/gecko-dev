@@ -81,10 +81,11 @@ void UtilityAudioDecoderParent::WMFPreloadForSandbox() {
 #if defined(MOZ_SANDBOX) && defined(XP_WIN)
   // mfplat.dll and mf.dll will be preloaded by
   // wmf::MediaFoundationInitializer::HasInitialized()
-#  if defined(DEBUG)
-  // WMF Shutdown on debug build somehow requires this
+
+#  if defined(NS_FREE_PERMANENT_DATA)
+  // WMF Shutdown requires this or it will badly crash
   UtilityProcessImpl::LoadLibraryOrCrash(L"ole32.dll");
-#  endif  // defined(DEBUG)
+#  endif  // defined(NS_FREE_PERMANENT_DATA)
 
   auto rv = wmf::MediaFoundationInitializer::HasInitialized();
   if (!rv) {
@@ -103,8 +104,7 @@ void UtilityAudioDecoderParent::Start(
 
 #ifdef MOZ_WIDGET_ANDROID
   if (StaticPrefs::media_utility_android_media_codec_enabled()) {
-    AndroidDecoderModule::SetSupportedMimeTypes(
-        AndroidDecoderModule::GetSupportedMimeTypes());
+    AndroidDecoderModule::SetSupportedMimeTypes();
   }
 #endif
 
@@ -118,9 +118,11 @@ void UtilityAudioDecoderParent::Start(
 
 mozilla::ipc::IPCResult
 UtilityAudioDecoderParent::RecvNewContentRemoteDecoderManager(
-    Endpoint<PRemoteDecoderManagerParent>&& aEndpoint) {
+    Endpoint<PRemoteDecoderManagerParent>&& aEndpoint,
+    const ContentParentId& aParentId) {
   MOZ_ASSERT(NS_IsMainThread());
-  if (!RemoteDecoderManagerParent::CreateForContent(std::move(aEndpoint))) {
+  if (!RemoteDecoderManagerParent::CreateForContent(std::move(aEndpoint),
+                                                    aParentId)) {
     return IPC_FAIL_NO_REASON(this);
   }
   return IPC_OK();

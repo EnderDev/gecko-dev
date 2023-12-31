@@ -20,7 +20,7 @@
 #include "nsAccUtils.h"
 #include "DocAccessibleParent.h"
 #include "Relation.h"
-#include "Role.h"
+#include "mozilla/a11y/Role.h"
 #include "RootAccessible.h"
 #include "mozilla/a11y/PDocAccessible.h"
 #include "mozilla/dom/BrowserParent.h"
@@ -157,6 +157,12 @@ using namespace mozilla::a11y;
       selector == @selector(moxARIAAtomic) ||
       selector == @selector(moxARIARelevant)) {
     return ![self moxIsLiveRegion];
+  }
+
+  if (selector == @selector(moxARIAPosInSet) || selector == @selector
+                                                    (moxARIASetSize)) {
+    GroupPos groupPos = mGeckoAccessible->GroupPosition();
+    return groupPos.setSize == 0;
   }
 
   if (selector == @selector(moxExpanded)) {
@@ -620,6 +626,16 @@ struct RoleDescrComparator {
   return utils::GetAccAttr(self, nsGkAtoms::aria_live);
 }
 
+- (NSNumber*)moxARIAPosInSet {
+  GroupPos groupPos = mGeckoAccessible->GroupPosition();
+  return @(groupPos.posInSet);
+}
+
+- (NSNumber*)moxARIASetSize {
+  GroupPos groupPos = mGeckoAccessible->GroupPosition();
+  return @(groupPos.setSize);
+}
+
 - (NSString*)moxARIARelevant {
   if (NSString* relevant =
           utils::GetAccAttr(self, nsGkAtoms::containerRelevant)) {
@@ -732,6 +748,11 @@ struct RoleDescrComparator {
 #ifndef RELEASE_OR_BETA
 - (NSString*)moxMozDebugDescription {
   NS_OBJC_BEGIN_TRY_BLOCK_RETURN;
+
+  if (!mGeckoAccessible) {
+    return [NSString stringWithFormat:@"<%@: %p mGeckoAccessible=null>",
+                                      NSStringFromClass([self class]), self];
+  }
 
   NSMutableString* domInfo = [NSMutableString string];
   if (NSString* tagName = utils::GetAccAttr(self, nsGkAtoms::tag)) {

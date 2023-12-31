@@ -89,8 +89,6 @@ urlbar-indexed-db-notification-anchor =
     .tooltiptext = Open offline storage message panel
 urlbar-password-notification-anchor =
     .tooltiptext = Open save password message panel
-urlbar-plugins-notification-anchor =
-    .tooltiptext = Manage plug-in use
 urlbar-web-rtc-share-devices-notification-anchor =
     .tooltiptext = Manage sharing your camera and/or microphone with the site
 # "Speakers" is used in a general sense that might include headphones or
@@ -103,8 +101,6 @@ urlbar-persistent-storage-notification-anchor =
     .tooltiptext = Store data in Persistent Storage
 urlbar-addons-notification-anchor =
     .tooltiptext = Open add-on installation message panel
-urlbar-tip-help-icon =
-    .title = Get help
 urlbar-search-tips-confirm = Okay, Got It
 urlbar-search-tips-confirm-short = Got it
 # Read out before Urlbar Tip text content so screenreader users know the
@@ -386,15 +382,15 @@ identity-weak-encryption = This page uses weak encryption.
 identity-insecure-login-forms = Logins entered on this page could be compromised.
 
 identity-https-only-connection-upgraded = (upgraded to HTTPS)
-identity-https-only-label = HTTPS-Only Mode
+identity-https-only-label2 = Automatically upgrade this site to a secure connection
 identity-https-only-dropdown-on =
     .label = On
 identity-https-only-dropdown-off =
     .label = Off
 identity-https-only-dropdown-off-temporarily =
     .label = Off temporarily
-identity-https-only-info-turn-on2 = Turn on HTTPS-Only Mode for this site if you want { -brand-short-name } to upgrade the connection when possible.
-identity-https-only-info-turn-off2 = If the page seems broken, you may want to turn off HTTPS-Only Mode for this site to reload using insecure HTTP.
+identity-https-only-info-turn-on3 = Turn on HTTPS upgrades for this site if you want { -brand-short-name } to upgrade the connection when possible.
+identity-https-only-info-turn-off3 = If the page seems broken, you may want to turn off HTTPS upgrades for this site to reload using insecure HTTP.
 identity-https-only-info-no-upgrade = Unable to upgrade connection from HTTP.
 
 identity-permissions-storage-access-header = Cross-site cookies
@@ -598,6 +594,8 @@ urlbar-result-action-search-w-engine = Search with { $engine }
 urlbar-result-action-sponsored = Sponsored
 urlbar-result-action-switch-tab = Switch to Tab
 urlbar-result-action-visit = Visit
+# Allows the user to visit a URL that was previously copied to the clipboard.
+urlbar-result-action-visit-from-clipboard = Visit from clipboard
 # Directs a user to press the Tab key to perform a search with the specified
 # engine.
 # Variables
@@ -652,6 +650,12 @@ urlbar-group-search-suggestions =
 # A label shown above Quick Actions in the urlbar results.
 urlbar-group-quickactions =
   .label = Quick Actions
+
+# A label shown above the recent searches group in the urlbar results.
+# Variables
+#  $engine (String): the name of the search engine used to search.
+urlbar-group-recent-searches =
+  .label = Recent Searches
 
 ## Reader View toolbar buttons
 
@@ -971,6 +975,24 @@ unified-extensions-button-quarantined =
     .tooltiptext =
         Extensions
         Some extensions are not allowed
+
+## Private browsing reset button
+
+reset-pbm-toolbar-button =
+    .label = End Private Session
+    .tooltiptext = End Private Session
+reset-pbm-panel-heading = End your private session?
+reset-pbm-panel-description = Close all private tabs and delete history, cookies, and all other site data.
+reset-pbm-panel-always-ask-checkbox =
+     .label = Always ask me
+     .accesskey = A
+reset-pbm-panel-cancel-button =
+    .label = Cancel
+    .accesskey = C
+reset-pbm-panel-confirm-button =
+    .label = Delete session data
+    .accesskey = D
+reset-pbm-panel-complete = Private session data deleted
 
 ## Autorefresh blocker
 

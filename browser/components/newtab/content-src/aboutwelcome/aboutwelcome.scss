@@ -2,7 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 @use 'sass:math';
+@import 'chrome://global/skin/design-system/tokens-brand.css';
 @import '../styles/feature-callout';
+@import '../styles/shopping';
+
+/* stylelint-disable max-nesting-depth */
 
 $break-point-small: 570px;
 $break-point-medium: 610px;
@@ -15,7 +19,7 @@ $split-screen-height: 550px;
 $small-main-section-height: 450px;
 $small-secondary-section-height: 100px;
 $noodle-buffer: 106px;
-$video-section-width: 800px;
+$double-section-width: 800px;
 
 html {
   height: 100%;
@@ -213,6 +217,11 @@ html {
     &:hover {
       background-color: var(--in-content-button-background-hover);
       color: var(--in-content-button-text-color-hover);
+
+      &:active {
+        background-color: var(--in-content-button-background-active);
+        color: var(--in-content-button-text-color-active);
+      }
     }
   }
 
@@ -220,14 +229,18 @@ html {
     background: none;
     text-decoration: underline;
     cursor: pointer;
-    color: var(--in-content-link-color);
+    color: var(--link-color);
 
     &:hover {
-      color: var(--in-content-link-color-hover);
+      color: var(--link-color-hover);
     }
 
     &:active {
-      color: var(--in-content-link-color-active);
+      color: var(--link-color-active);
+
+      @media (prefers-contrast) {
+        text-decoration: none;
+      }
     }
   }
 
@@ -238,11 +251,6 @@ html {
     height: 100%;
     min-height: 500px;
     overflow: hidden;
-
-    --in-content-link-color: var(--in-content-primary-button-background);
-    --in-content-link-color-hover: var(--in-content-primary-button-background-hover);
-    --in-content-link-color-active: var(--in-content-primary-button-background-active);
-    --in-content-link-color-visited: var(--in-content-link-color);
 
     &.light-text {
       --in-content-page-color: rgb(251, 251, 254);
@@ -292,7 +300,7 @@ html {
         align-items: center;
 
         .section-main {
-          width: $video-section-width;
+          width: $double-section-width;
           height: $split-screen-height;
         }
 
@@ -335,6 +343,119 @@ html {
 
               color: var(--in-content-button-text-color);
             }
+          }
+        }
+      }
+
+      &.addons-picker {
+        justify-content: center;
+        align-items: center;
+        background: none;
+
+        .section-main {
+          width: $double-section-width;
+          height: $split-screen-height;
+        }
+
+        .main-content {
+          background-color: var(--in-content-page-background);
+          border-radius: 8px;
+          box-shadow: 0 2px 14px rgba(58, 57, 68, 20%);
+          overflow: hidden;
+
+          .welcome-text {
+            display: flex;
+            margin: 0;
+          }
+
+          .main-content-inner {
+            padding: 25px 56px 0;
+            justify-content: space-between;
+          }
+
+          h1,
+          h2 {
+            align-self: start;
+          }
+
+          h2 {
+            font-size: 15px;
+            text-align: start;
+          }
+
+          .brand-logo {
+            display: block;
+            margin: 40px 56px 0;
+            transition: var(--transition);
+            height: 30px;
+          }
+
+          .additional-cta {
+            display: block;
+            margin: 8px 0;
+
+            &.cta-link {
+              background: none;
+              padding: 0;
+              font-weight: normal;
+
+              @include text-link-styles;
+            }
+
+            &.secondary {
+              &:hover {
+                background-color: var(--in-content-button-background-hover);
+              }
+            }
+          }
+
+          .secondary-cta {
+            @include arrow-icon-styles;
+
+            justify-content: end;
+
+            .secondary {
+              @include secondary-cta-styles;
+
+              color: var(--in-content-button-text-color);
+            }
+          }
+        }
+
+        .addon-container {
+          display: flex;
+          border: 1px solid var(--in-content-border-color);
+          box-shadow: 0 1px 2px 0 var(--in-content-border-color);
+          border-radius: 4px;
+          margin: 5px auto;
+          text-align: start;
+
+          .rtamo-icon {
+            img {
+              margin: 10px;
+            }
+          }
+
+          .addon-details {
+            display: grid;
+            width: 70%;
+          }
+
+          .addon-title {
+            margin: 10px 0 3px;
+            font-size: 16px;
+            font-weight: 600;
+          }
+
+          .addon-description {
+            margin: 2px 0 10px;
+            font-size: 13px;
+            font-weight: 400;
+          }
+
+          button {
+            align-self: center;
+            margin-inline: auto 12px;
           }
         }
       }
@@ -418,6 +539,12 @@ html {
 
         &:dir(rtl) {
           margin: auto 0 auto auto;
+        }
+
+        &.embedded-migration {
+          .main-content {
+            padding-block: 100px 0;
+          }
         }
 
         .main-content {
@@ -523,6 +650,11 @@ html {
             margin-block: 0;
           }
 
+          .logo-alt {
+            width: inherit;
+            height: inherit;
+          }
+
           .welcome-text {
             margin-inline: 0 10px;
             margin-block: 10px 35px;
@@ -624,10 +756,25 @@ html {
             margin: 25px 0;
             padding-bottom: 30px;
 
-            @media only screen and (max-width: 800px) {
+            @media only screen and (width <= 800px) {
               padding-bottom: unset;
             }
           }
+        }
+      }
+
+      .multi-select-container {
+        margin-inline: 0 10px;
+
+        @media only screen and (width <= 800px) {
+          flex-direction: column;
+          align-self: center;
+          align-items: start;
+          justify-content: center;
+          width: 240px;
+          padding: 0 30px;
+          margin-inline: 0;
+          box-sizing: content-box;
         }
       }
 
@@ -661,23 +808,18 @@ html {
         }
       }
 
-      @media only screen and (min-width: 800px) {
+      @media only screen and (width >= 800px) {
         .tiles-theme-section {
           margin-inline-start: -10px;
         }
       }
 
-      @media only screen and (max-width: 800px) {
+      @media only screen and (width <= 800px) {
         flex-direction: column;
         min-height: $small-main-section-height + $small-secondary-section-height;
 
         &::before {
           width: $split-section-width;
-        }
-
-        migration-wizard::part(buttons) {
-          min-width: 240px;
-          flex-direction: column;
         }
 
         .section-secondary,
@@ -713,11 +855,37 @@ html {
             margin: auto auto 0;
             border-radius: 8px 8px 0 0;
           }
+
+          &.with-secondary-section-hidden {
+            display: none;
+          }
+        }
+
+        migration-wizard {
+          &::part(deck){
+            min-width: 330px;
+            margin-inline: 36px;
+          }
         }
 
         .section-main {
           margin: 0 auto auto;
           height: $small-main-section-height;
+
+          migration-wizard::part(buttons) {
+            flex-direction: column;
+            margin-inline: 46px;
+          }
+
+          &[hide-secondary-section='responsive'] {
+            height: $split-screen-height;
+            margin: auto;
+
+            .main-content {
+              padding: 50px 0 0;
+              border-radius: 8px;
+            }
+          }
 
           .main-content {
             border-radius: 0 0 8px 8px;
@@ -737,6 +905,11 @@ html {
                 &:dir(rtl) {
                   background-position: center;
                 }
+              }
+
+              .logo-alt {
+                width: inherit;
+                height: inherit;
               }
             }
 
@@ -769,6 +942,7 @@ html {
             .primary,
             .secondary {
               min-width: 240px;
+              margin-inline: 0;
             }
 
             .colorway-text {
@@ -807,12 +981,12 @@ html {
 
       }
 
-      @media only screen and (max-height: 650px) {
+      @media only screen and (height <= 650px) {
         // Hide the "Sign in" button on the welcome screen when it would
         // otherwise overlap the screen. We'd reposition it, but then it would
         // overlap the dismiss button. We may change the alignment so they don't
         // overlap in a future revision.
-        @media (min-width: 800px) and (max-width: 990px) {
+        @media (800px <= width <= 990px) {
           .section-main .secondary-cta.top {
             display: none;
           }
@@ -820,7 +994,7 @@ html {
 
         // Reposition the "Sign in" button on the welcome screen to move inside
         // the screen when it would otherwise overlap the screen.
-        @media (max-width: 620px) {
+        @media (width <= 620px) {
           .section-main .secondary-cta.top {
             position: absolute;
             padding: 0;
@@ -848,6 +1022,11 @@ html {
     }
   }
 
+  .logo-alt {
+    width: inherit;
+    height: inherit;
+  }
+
   .rtamo-theme-icon {
     max-height: 30px;
     border-radius: 2px;
@@ -858,7 +1037,7 @@ html {
   .rtamo-icon {
     text-align: start;
 
-    @media only screen and (max-width: 800px) {
+    @media only screen and (width <= 800px) {
       text-align: center;
     }
   }
@@ -1165,30 +1344,25 @@ html {
   .multi-select-container {
     display: flex;
     flex-direction: column;
+    flex-wrap: wrap;
+    flex-shrink: 0;
     align-items: flex-start;
-    margin-block: -1em 1em;
+    gap: 16px;
+    margin-block: -1em 2em;
     color: #5B5B66;
     font-weight: 400;
     font-size: 14px;
     text-align: initial;
     transition: var(--transition);
     z-index: 1;
+    overflow: hidden;
 
     .checkbox-container {
       display: flex;
-      margin-bottom: 16px;
     }
-  }
 
-  @media (prefers-color-scheme: dark) {
-    .multi-select-container {
+    @media (prefers-contrast: no-preference) and (prefers-color-scheme: dark) {
       color: #CFCFD8;
-    }
-  }
-
-  @media only screen and (max-width: 800px) {
-    .multi-select-container {
-      padding: 0 30px;
     }
   }
 
@@ -1300,8 +1474,7 @@ html {
     }
   }
 
-  .message-text,
-  .attrib-text {
+  .message-text {
     transition: var(--transition);
   }
 
@@ -1701,7 +1874,7 @@ html {
     transition: var(--transition);
 
     &::part(buttons) {
-      margin-top: 32px;
+      margin-top: 24px;
       justify-content: flex-start;
     }
 

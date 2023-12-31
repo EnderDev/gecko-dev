@@ -81,13 +81,13 @@ class FunctionBox;
   F(OptionalChain, UnaryNode)                                    \
   F(OptionalElemExpr, OptionalPropertyByValue)                   \
   F(OptionalPrivateMemberExpr, OptionalPrivateMemberAccess)      \
-  F(OptionalCallExpr, BinaryNode)                                \
+  F(OptionalCallExpr, CallNode)                                  \
   F(ArrayExpr, ListNode)                                         \
   F(Elision, NullaryNode)                                        \
   F(StatementList, ListNode)                                     \
   F(LabelStmt, LabeledStatement)                                 \
   F(ObjectExpr, ListNode)                                        \
-  F(CallExpr, BinaryNode)                                        \
+  F(CallExpr, CallNode)                                          \
   F(Arguments, ListNode)                                         \
   F(Name, NameNode)                                              \
   F(ObjectPropertyName, NameNode)                                \
@@ -98,7 +98,7 @@ class FunctionBox;
   F(StringExpr, NameNode)                                        \
   F(TemplateStringListExpr, ListNode)                            \
   F(TemplateStringExpr, NameNode)                                \
-  F(TaggedTemplateExpr, BinaryNode)                              \
+  F(TaggedTemplateExpr, CallNode)                                \
   F(CallSiteObj, CallSiteNode)                                   \
   F(RegExpExpr, RegExpLiteral)                                   \
   F(TrueExpr, BooleanLiteral)                                    \
@@ -122,7 +122,7 @@ class FunctionBox;
   F(ConstDecl, DeclarationListNode)                              \
   F(WithStmt, BinaryNode)                                        \
   F(ReturnStmt, UnaryNode)                                       \
-  F(NewExpr, BinaryNode)                                         \
+  F(NewExpr, CallNode)                                           \
   IF_DECORATORS(F(DecoratorList, ListNode))                      \
   /* Delete operations.  These must be sequential. */            \
   F(DeleteNameExpr, UnaryNode)                                   \
@@ -171,7 +171,7 @@ class FunctionBox;
   F(NewTargetExpr, NewTargetNode)                                \
   F(PosHolder, NullaryNode)                                      \
   F(SuperBase, UnaryNode)                                        \
-  F(SuperCallExpr, BinaryNode)                                   \
+  F(SuperCallExpr, CallNode)                                     \
   F(SetThis, BinaryNode)                                         \
   F(ImportMetaExpr, BinaryNode)                                  \
   F(CallImportExpr, BinaryNode)                                  \
@@ -507,17 +507,17 @@ inline bool IsTypeofKind(ParseNodeKind kind) {
  *   atom: property name being accessed
  *   privateNameKind: kind of the name if private
  * DotExpr (PropertyAccess)
- *   left: MEMBER expr to left of '.'
+ *   left: Member expr to left of '.'
  *   right: PropertyName to right of '.'
  * OptionalDotExpr (OptionalPropertyAccess)
- *   left: MEMBER expr to left of '.', short circuits back to OptionalChain
+ *   left: Member expr to left of '.', short circuits back to OptionalChain
  *        if nullish.
  *   right: PropertyName to right of '.'
  * ElemExpr (PropertyByValue)
- *   left: MEMBER expr to left of '['
+ *   left: Member expr to left of '['
  *   right: expr between '[' and ']'
  * OptionalElemExpr (OptionalPropertyByValue)
- *   left: MEMBER expr to left of '[', short circuits back to OptionalChain
+ *   left: Member expr to left of '[', short circuits back to OptionalChain
  *         if nullish.
  *   right: expr between '[' and ']'
  * CallExpr (BinaryNode)
@@ -605,71 +605,64 @@ inline bool IsTypeofKind(ParseNodeKind kind) {
  *   kid: expr or null
  */
 
-// FIXME: Remove `*Type` (bug 1489008)
-#define FOR_EACH_PARSENODE_SUBCLASS(MACRO)                                   \
-  MACRO(BinaryNode, BinaryNodeType, asBinary)                                \
-  MACRO(AssignmentNode, AssignmentNodeType, asAssignment)                    \
-  MACRO(CaseClause, CaseClauseType, asCaseClause)                            \
-  MACRO(ClassMethod, ClassMethodType, asClassMethod)                         \
-  MACRO(ClassField, ClassFieldType, asClassField)                            \
-  MACRO(StaticClassBlock, StaticClassBlockType, asStaticClassBlock)          \
-  MACRO(PropertyDefinition, PropertyDefinitionType, asPropertyDefinition)    \
-  MACRO(ClassNames, ClassNamesType, asClassNames)                            \
-  MACRO(ForNode, ForNodeType, asFor)                                         \
-  MACRO(PropertyAccess, PropertyAccessType, asPropertyAccess)                \
-  MACRO(OptionalPropertyAccess, OptionalPropertyAccessType,                  \
-        asOptionalPropertyAccess)                                            \
-  MACRO(PropertyByValue, PropertyByValueType, asPropertyByValue)             \
-  MACRO(OptionalPropertyByValue, OptionalPropertyByValueType,                \
-        asOptionalPropertyByValue)                                           \
-  MACRO(PrivateMemberAccess, PrivateMemberAccessType, asPrivateMemberAccess) \
-  MACRO(OptionalPrivateMemberAccess, OptionalPrivateMemberAccessType,        \
-        asOptionalPrivateMemberAccess)                                       \
-  MACRO(NewTargetNode, NewTargetNodeType, asNewTargetNode)                   \
-  MACRO(SwitchStatement, SwitchStatementType, asSwitchStatement)             \
-  MACRO(DeclarationListNode, DeclarationListNodeType, asDeclarationList)     \
-                                                                             \
-  MACRO(ParamsBodyNode, ParamsBodyNodeType, asParamsBody)                    \
-  MACRO(FunctionNode, FunctionNodeType, asFunction)                          \
-  MACRO(ModuleNode, ModuleNodeType, asModule)                                \
-                                                                             \
-  MACRO(LexicalScopeNode, LexicalScopeNodeType, asLexicalScope)              \
-  MACRO(ClassBodyScopeNode, ClassBodyScopeNodeType, asClassBodyScope)        \
-                                                                             \
-  MACRO(ListNode, ListNodeType, asList)                                      \
-  MACRO(CallSiteNode, CallSiteNodeType, asCallSite)                          \
-  MACRO(CallNode, CallNodeType, asCallNode)                                  \
-  MACRO(CallNode, OptionalCallNodeType, asOptionalCallNode)                  \
-                                                                             \
-  MACRO(LoopControlStatement, LoopControlStatementType,                      \
-        asLoopControlStatement)                                              \
-  MACRO(BreakStatement, BreakStatementType, asBreakStatement)                \
-  MACRO(ContinueStatement, ContinueStatementType, asContinueStatement)       \
-                                                                             \
-  MACRO(NameNode, NameNodeType, asName)                                      \
-  MACRO(LabeledStatement, LabeledStatementType, asLabeledStatement)          \
-                                                                             \
-  MACRO(NullaryNode, NullaryNodeType, asNullary)                             \
-  MACRO(BooleanLiteral, BooleanLiteralType, asBooleanLiteral)                \
-  MACRO(DebuggerStatement, DebuggerStatementType, asDebuggerStatement)       \
-  MACRO(NullLiteral, NullLiteralType, asNullLiteral)                         \
-  MACRO(RawUndefinedLiteral, RawUndefinedLiteralType, asRawUndefinedLiteral) \
-                                                                             \
-  MACRO(NumericLiteral, NumericLiteralType, asNumericLiteral)                \
-  MACRO(BigIntLiteral, BigIntLiteralType, asBigIntLiteral)                   \
-                                                                             \
-  MACRO(RegExpLiteral, RegExpLiteralType, asRegExpLiteral)                   \
-                                                                             \
-  MACRO(TernaryNode, TernaryNodeType, asTernary)                             \
-  MACRO(ClassNode, ClassNodeType, asClass)                                   \
-  MACRO(ConditionalExpression, ConditionalExpressionType,                    \
-        asConditionalExpression)                                             \
-  MACRO(TryNode, TryNodeType, asTry)                                         \
-                                                                             \
-  MACRO(UnaryNode, UnaryNodeType, asUnary)                                   \
-  MACRO(ThisLiteral, ThisLiteralType, asThisLiteral)
+#define FOR_EACH_PARSENODE_SUBCLASS(MACRO) \
+  MACRO(BinaryNode)                        \
+  MACRO(AssignmentNode)                    \
+  MACRO(CaseClause)                        \
+  MACRO(ClassMethod)                       \
+  MACRO(ClassField)                        \
+  MACRO(StaticClassBlock)                  \
+  MACRO(PropertyDefinition)                \
+  MACRO(ClassNames)                        \
+  MACRO(ForNode)                           \
+  MACRO(PropertyAccess)                    \
+  MACRO(OptionalPropertyAccess)            \
+  MACRO(PropertyByValue)                   \
+  MACRO(OptionalPropertyByValue)           \
+  MACRO(PrivateMemberAccess)               \
+  MACRO(OptionalPrivateMemberAccess)       \
+  MACRO(NewTargetNode)                     \
+  MACRO(SwitchStatement)                   \
+  MACRO(DeclarationListNode)               \
+                                           \
+  MACRO(ParamsBodyNode)                    \
+  MACRO(FunctionNode)                      \
+  MACRO(ModuleNode)                        \
+                                           \
+  MACRO(LexicalScopeNode)                  \
+  MACRO(ClassBodyScopeNode)                \
+                                           \
+  MACRO(ListNode)                          \
+  MACRO(CallSiteNode)                      \
+  MACRO(CallNode)                          \
+                                           \
+  MACRO(LoopControlStatement)              \
+  MACRO(BreakStatement)                    \
+  MACRO(ContinueStatement)                 \
+                                           \
+  MACRO(NameNode)                          \
+  MACRO(LabeledStatement)                  \
+                                           \
+  MACRO(NullaryNode)                       \
+  MACRO(BooleanLiteral)                    \
+  MACRO(DebuggerStatement)                 \
+  MACRO(NullLiteral)                       \
+  MACRO(RawUndefinedLiteral)               \
+                                           \
+  MACRO(NumericLiteral)                    \
+  MACRO(BigIntLiteral)                     \
+                                           \
+  MACRO(RegExpLiteral)                     \
+                                           \
+  MACRO(TernaryNode)                       \
+  MACRO(ClassNode)                         \
+  MACRO(ConditionalExpression)             \
+  MACRO(TryNode)                           \
+                                           \
+  MACRO(UnaryNode)                         \
+  MACRO(ThisLiteral)
 
-#define DECLARE_CLASS(typeName, longTypeName, asMethodName) class typeName;
+#define DECLARE_CLASS(typeName) class typeName;
 FOR_EACH_PARSENODE_SUBCLASS(DECLARE_CLASS)
 #undef DECLARE_CLASS
 
@@ -696,8 +689,12 @@ static inline bool IsMethodDefinitionKind(FunctionSyntaxKind kind) {
 #  define JS_PARSE_NODE_ASSERT MOZ_ASSERT
 #endif
 
+class ParseNode;
+struct ParseNodeError {};
+using ParseNodeResult = mozilla::Result<ParseNode*, ParseNodeError>;
+
 class ParseNode {
-  const ParseNodeKind pn_type; /* ParseNodeKind::PNK_* type */
+  const ParseNodeKind pn_type;
 
   bool pn_parens : 1;       /* this expr was enclosed in parens */
   bool pn_rhs_anon_fun : 1; /* this expr is anonymous function or class that
@@ -795,17 +792,17 @@ class ParseNode {
   void setDirectRHSAnonFunction(bool enabled) { pn_rhs_anon_fun = enabled; }
 
   TokenPos pn_pos;    /* two 16-bit pairs here, for 64 bits */
-  ParseNode* pn_next; /* intrinsic link in parent PN_LIST */
+  ParseNode* pn_next; /* intrinsic link in parent ListNode */
 
  public:
   /*
    * If |left| is a list of the given kind/left-associative op, append
    * |right| to it and return |left|.  Otherwise return a [left, right] list.
    */
-  static ParseNode* appendOrCreateList(ParseNodeKind kind, ParseNode* left,
-                                       ParseNode* right,
-                                       FullParseHandler* handler,
-                                       ParseContext* pc);
+  static ParseNodeResult appendOrCreateList(ParseNodeKind kind, ParseNode* left,
+                                            ParseNode* right,
+                                            FullParseHandler* handler,
+                                            ParseContext* pc);
 
   /* True if pn is a parsenode representing a literal constant. */
   bool isLiteral() const {
@@ -1228,8 +1225,8 @@ class ListNode : public ParseNode {
   bool accept(Visitor& visitor) {
     ParseNode** listp = &head_;
     for (; *listp; listp = &(*listp)->pn_next) {
-      // Don't use PN*& because we want to check if it changed, so we can use
-      // ReplaceNode
+      // Don't use reference because we want to check if it changed, so we can
+      // use ReplaceNode
       ParseNode* pn = *listp;
       if (!visitor.visit(pn)) {
         return false;
@@ -2214,12 +2211,12 @@ class CallNode : public BinaryNode {
   const JSOp callOp_;
 
  public:
-  CallNode(ParseNodeKind kind, JSOp callOp, ParseNode* left, ParseNode* right)
+  CallNode(ParseNodeKind kind, JSOp callOp, ParseNode* left, ListNode* right)
       : CallNode(kind, callOp, TokenPos(left->pn_pos.begin, right->pn_pos.end),
                  left, right) {}
 
   CallNode(ParseNodeKind kind, JSOp callOp, TokenPos pos, ParseNode* left,
-           ParseNode* right)
+           ListNode* right)
       : BinaryNode(kind, pos, left, right), callOp_(callOp) {
     MOZ_ASSERT(is<CallNode>());
   }
@@ -2229,16 +2226,19 @@ class CallNode : public BinaryNode {
                  node.isKind(ParseNodeKind::SuperCallExpr) ||
                  node.isKind(ParseNodeKind::OptionalCallExpr) ||
                  node.isKind(ParseNodeKind::TaggedTemplateExpr) ||
-                 node.isKind(ParseNodeKind::CallImportExpr) ||
                  node.isKind(ParseNodeKind::NewExpr);
     MOZ_ASSERT_IF(match, node.is<BinaryNode>());
     return match;
   }
 
-  JSOp callOp() { return callOp_; }
+  JSOp callOp() const { return callOp_; }
+  auto* callee() const { return left(); }
+  auto* args() const { return &right()->as<ListNode>(); }
 };
 
 class ClassMethod : public BinaryNode {
+  using Base = BinaryNode;
+
   bool isStatic_;
   AccessorType accessorType_;
   FunctionNode* initializerIfPrivate_;
@@ -2293,13 +2293,31 @@ class ClassMethod : public BinaryNode {
 
 #ifdef ENABLE_DECORATORS
   ListNode* decorators() const { return decorators_; }
+
+#  ifdef DEBUG
+  void dumpImpl(const ParserAtomsTable* parserAtoms, GenericPrinter& out,
+                int indent);
+#  endif
 #endif
 };
 
 class ClassField : public BinaryNode {
+  using Base = BinaryNode;
+
   bool isStatic_;
 #ifdef ENABLE_DECORATORS
-  bool hasAccessor_;
+  // The accessorGetterNode_ and accessorSetterNode_ are used to store the
+  // getter and setter synthesized by the `accessor` keyword when they are
+  // decorated. Otherwise, they are null.
+  //
+  // In most cases, the accessors are not added to the class members, and the
+  // code generation occurs immediately prior to the decorator running. For
+  // non-static private methods, the accessors are added to the class members
+  // which causes them to be stored in lexical variables. The references here
+  // are used to store the names of the accessors to look up the values of these
+  // variables during bytecode generation.
+  ClassMethod* accessorGetterNode_;
+  ClassMethod* accessorSetterNode_;
   ListNode* decorators_;
 #endif
 
@@ -2307,7 +2325,8 @@ class ClassField : public BinaryNode {
   ClassField(ParseNode* name, ParseNode* initializer, bool isStatic
 #ifdef ENABLE_DECORATORS
              ,
-             ListNode* decorators, bool hasAccessor
+             ListNode* decorators, ClassMethod* accessorGetterNode,
+             ClassMethod* accessorSetterNode
 #endif
              )
       : BinaryNode(ParseNodeKind::ClassField, initializer->pn_pos, name,
@@ -2315,10 +2334,15 @@ class ClassField : public BinaryNode {
         isStatic_(isStatic)
 #ifdef ENABLE_DECORATORS
         ,
-        hasAccessor_(hasAccessor),
+        accessorGetterNode_(accessorGetterNode),
+        accessorSetterNode_(accessorSetterNode),
         decorators_(decorators)
 #endif
   {
+#ifdef ENABLE_DECORATORS
+    MOZ_ASSERT((accessorGetterNode_ == nullptr) ==
+               (accessorSetterNode_ == nullptr));
+#endif
   }
 
   static bool test(const ParseNode& node) {
@@ -2335,7 +2359,16 @@ class ClassField : public BinaryNode {
 
 #ifdef ENABLE_DECORATORS
   ListNode* decorators() const { return decorators_; }
-  bool hasAccessor() const { return hasAccessor_; }
+  bool hasAccessor() const {
+    return accessorGetterNode_ != nullptr && accessorSetterNode_ != nullptr;
+  }
+  ClassMethod* accessorGetterNode() { return accessorGetterNode_; }
+  ClassMethod* accessorSetterNode() { return accessorSetterNode_; }
+
+#  ifdef DEBUG
+  void dumpImpl(const ParserAtomsTable* parserAtoms, GenericPrinter& out,
+                int indent);
+#  endif
 #endif
 };
 
@@ -2455,6 +2488,8 @@ class ClassNames : public BinaryNode {
 };
 
 class ClassNode : public TernaryNode {
+  using Base = TernaryNode;
+
  private:
   LexicalScopeNode* innerScope() const {
     return &kid3()->as<LexicalScopeNode>();
@@ -2510,6 +2545,11 @@ class ClassNode : public TernaryNode {
   }
 #ifdef ENABLE_DECORATORS
   ListNode* decorators() const { return decorators_; }
+
+#  ifdef DEBUG
+  void dumpImpl(const ParserAtomsTable* parserAtoms, GenericPrinter& out,
+                int indent);
+#  endif
 #endif
 };
 

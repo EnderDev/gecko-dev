@@ -16,9 +16,9 @@
 #include "WebCodecsUtils.h"
 #include "js/StructuredClone.h"
 #include "mozilla/Maybe.h"
-#include "mozilla/Result.h"
 #include "mozilla/ResultVariant.h"
 #include "mozilla/ScopeExit.h"
+#include "mozilla/Try.h"
 
 #include "mozilla/UniquePtr.h"
 #include "mozilla/dom/CanvasUtils.h"
@@ -160,14 +160,6 @@ class NV12BufferReader final : public YUVBufferReaderBase {
  * The followings are helpers defined in
  * https://w3c.github.io/webcodecs/#videoframe-algorithms
  */
-static bool IsSameOrigin(nsIGlobalObject* aGlobal, nsIURI* aURI) {
-  MOZ_ASSERT(aGlobal);
-
-  nsIPrincipal* principal = aGlobal->PrincipalOrNull();
-  // If VideoFrames is created in worker, then it's from the same origin. In
-  // this case, principal or aURI is null. Otherwise, check the origin.
-  return !principal || !aURI || principal->IsSameOrigin(aURI);
-}
 
 static bool IsSameOrigin(nsIGlobalObject* aGlobal, const VideoFrame& aFrame) {
   MOZ_ASSERT(aGlobal);
@@ -571,10 +563,7 @@ static Result<CombinedBufferLayout, nsCString> ParseVideoFrameCopyToOptions(
   MOZ_TRY_VAR(parsedRect, ParseVisibleRect(aVisibleRect, overrideRect,
                                            aCodedSize, aFormat));
 
-  const Sequence<PlaneLayout>* optLayout = nullptr;
-  if (aOptions.mLayout.WasPassed()) {
-    optLayout = &aOptions.mLayout.Value();
-  }
+  const Sequence<PlaneLayout>* optLayout = OptionalToPointer(aOptions.mLayout);
 
   return ComputeLayoutAndAllocationSize(parsedRect, aFormat, optLayout);
 }
@@ -911,49 +900,45 @@ static Result<RefPtr<VideoFrame>, nsCString> CreateVideoFrameFromBuffer(
   MOZ_TRY_VAR(parsedRect, ParseVisibleRect(gfx::IntRect({0, 0}, codedSize),
                                            visibleRect, codedSize, format));
 
-  const Sequence<PlaneLayout>* optLayout = nullptr;
-  if (aInit.mLayout.WasPassed()) {
-    optLayout = &aInit.mLayout.Value();
-  }
+  const Sequence<PlaneLayout>* optLayout = OptionalToPointer(aInit.mLayout);
 
   CombinedBufferLayout combinedLayout;
   MOZ_TRY_VAR(combinedLayout,
               ComputeLayoutAndAllocationSize(parsedRect, format, optLayout));
 
-  Span<uint8_t> buffer;
-  MOZ_TRY_VAR(buffer, GetArrayBufferData(aBuffer).mapErr([](nsresult aError) {
-    return nsPrintfCString("Failed to get buffer data: %x",
-                           static_cast<uint32_t>(aError));
-  }));
+  Maybe<uint64_t> duration = OptionalToMaybe(aInit.mDuration);
 
-  if (buffer.size_bytes() <
-      static_cast<size_t>(combinedLayout.mAllocationSize)) {
-    return Err(nsCString("data is too small"));
-  }
+  VideoColorSpaceInit colorSpace =
+      PickColorSpace(OptionalToPointer(aInit.mColorSpace), aInit.mFormat);
 
-  // TODO: If codedSize is (3, 3) and visibleRect is (0, 0, 1, 1) but the data
-  // is 2 x 2 RGBA buffer (2 x 2 x 4 bytes), it pass the above check. In this
-  // case, we can crop it to a 1 x 1-codedSize image (Bug 1782128).
-  if (buffer.size_bytes() < format.SampleCount(codedSize)) {  // 1 byte/sample
-    return Err(nsCString("data is too small"));
-  }
+  RefPtr<layers::Image> data;
+  MOZ_TRY_VAR(
+      data,
+      aBuffer.ProcessFixedData([&](const Span<uint8_t>& aData)
+                                   -> Result<RefPtr<layers::Image>, nsCString> {
+        if (aData.Length() <
+            static_cast<size_t>(combinedLayout.mAllocationSize)) {
+          return Err(nsCString("data is too small"));
+        }
+
+        // TODO: If codedSize is (3, 3) and visibleRect is (0, 0, 1, 1) but the
+        // data is 2 x 2 RGBA buffer (2 x 2 x 4 bytes), it pass the above check.
+        // In this case, we can crop it to a 1 x 1-codedSize image (Bug
+        // 1782128).
+        if (aData.Length() < format.SampleCount(codedSize)) {  // 1 byte/sample
+          return Err(nsCString("data is too small"));
+        }
+
+        return CreateImageFromBuffer(format, colorSpace, codedSize,
+                                     Span(aData.Elements(), aData.Length()));
+      }));
+
+  MOZ_ASSERT(data);
+  MOZ_ASSERT(data->GetSize() == codedSize);
 
   // By spec, we should set visible* here. But if we don't change the image,
   // visible* is same as parsedRect here. The display{Width, Height} is
   // visible{Width, Height} if it's not set.
-
-  Maybe<uint64_t> duration =
-      aInit.mDuration.WasPassed() ? Some(aInit.mDuration.Value()) : Nothing();
-
-  VideoColorSpaceInit colorSpace = PickColorSpace(
-      aInit.mColorSpace.WasPassed() ? &aInit.mColorSpace.Value() : nullptr,
-      aInit.mFormat);
-
-  RefPtr<layers::Image> data;
-  MOZ_TRY_VAR(data,
-              CreateImageFromBuffer(format, colorSpace, codedSize, buffer));
-  MOZ_ASSERT(data);
-  MOZ_ASSERT(data->GetSize() == codedSize);
 
   // TODO: Spec should assign aInit.mFormat to inner format value:
   // https://github.com/w3c/webcodecs/issues/509.
@@ -1035,8 +1020,7 @@ InitializeFrameWithResourceAndSize(
                                       gfx::IntRect({0, 0}, image->GetSize()),
                                       image->GetSize());
 
-  Maybe<uint64_t> duration =
-      aInit.mDuration.WasPassed() ? Some(aInit.mDuration.Value()) : Nothing();
+  Maybe<uint64_t> duration = OptionalToMaybe(aInit.mDuration);
 
   // TODO: WPT will fail if we guess a VideoColorSpace here.
   const VideoColorSpaceInit colorSpace{};
@@ -1072,9 +1056,8 @@ InitializeFrameFromOtherFrame(nsIGlobalObject* aGlobal, VideoFrameData&& aData,
   InitializeVisibleRectAndDisplaySize(visibleRect, displaySize,
                                       aData.mVisibleRect, aData.mDisplaySize);
 
-  Maybe<uint64_t> duration = aInit.mDuration.WasPassed()
-                                 ? Some(aInit.mDuration.Value())
-                                 : aData.mDuration;
+  Maybe<uint64_t> duration = OptionalToMaybe(aInit.mDuration);
+
   int64_t timestamp = aInit.mTimestamp.WasPassed() ? aInit.mTimestamp.Value()
                                                    : aData.mTimestamp;
 
@@ -1102,20 +1085,14 @@ VideoFrameData::VideoFrameData(layers::Image* aImage,
       mTimestamp(aTimestamp),
       mColorSpace(aColorSpace) {}
 
-VideoFrameSerializedData::VideoFrameSerializedData(
-    layers::Image* aImage, const Maybe<VideoPixelFormat>& aFormat,
-    gfx::IntSize aCodedSize, gfx::IntRect aVisibleRect,
-    gfx::IntSize aDisplaySize, Maybe<uint64_t> aDuration, int64_t aTimestamp,
-    const VideoColorSpaceInit& aColorSpace,
-    already_AddRefed<nsIURI> aPrincipalURI)
-    : VideoFrameData(aImage, aFormat, aVisibleRect, aDisplaySize, aDuration,
-                     aTimestamp, aColorSpace),
-      mCodedSize(aCodedSize),
-      mPrincipalURI(aPrincipalURI) {}
+VideoFrameSerializedData::VideoFrameSerializedData(const VideoFrameData& aData,
+                                                   gfx::IntSize aCodedSize)
+    : VideoFrameData(aData), mCodedSize(aCodedSize) {}
 
 /*
  * W3C Webcodecs VideoFrame implementation
  */
+
 VideoFrame::VideoFrame(nsIGlobalObject* aParent,
                        const RefPtr<layers::Image>& aImage,
                        const Maybe<VideoPixelFormat>& aFormat,
@@ -1133,6 +1110,25 @@ VideoFrame::VideoFrame(nsIGlobalObject* aParent,
   MOZ_ASSERT(mParent);
   mResource.emplace(
       Resource(aImage, aFormat.map([](const VideoPixelFormat& aPixelFormat) {
+        return VideoFrame::Format(aPixelFormat);
+      })));
+  if (!mResource->mFormat) {
+    LOGW("Create a VideoFrame with an unrecognized image format");
+  }
+}
+
+VideoFrame::VideoFrame(nsIGlobalObject* aParent,
+                       const VideoFrameSerializedData& aData)
+    : mParent(aParent),
+      mCodedSize(aData.mCodedSize),
+      mVisibleRect(aData.mVisibleRect),
+      mDisplaySize(aData.mDisplaySize),
+      mDuration(aData.mDuration),
+      mTimestamp(aData.mTimestamp),
+      mColorSpace(aData.mColorSpace) {
+  MOZ_ASSERT(mParent);
+  mResource.emplace(Resource(
+      aData.mImage, aData.mFormat.map([](const VideoPixelFormat& aPixelFormat) {
         return VideoFrame::Format(aPixelFormat);
       })));
   if (!mResource->mFormat) {
@@ -1179,7 +1175,7 @@ already_AddRefed<VideoFrame> VideoFrame::Constructor(
   }
 
   // Check the usability.
-  if (aImageElement.IntrinsicState().HasState(ElementState::BROKEN)) {
+  if (aImageElement.State().HasState(ElementState::BROKEN)) {
     aRv.ThrowInvalidStateError("The image's state is broken");
     return nullptr;
   }
@@ -1238,14 +1234,8 @@ already_AddRefed<VideoFrame> VideoFrame::Constructor(
   }
 
   // Check the usability.
-  if (aSVGImageElement.IntrinsicState().HasState(ElementState::BROKEN)) {
+  if (aSVGImageElement.State().HasState(ElementState::BROKEN)) {
     aRv.ThrowInvalidStateError("The SVG's state is broken");
-    return nullptr;
-  }
-
-  // Check the image width and height.
-  if (!aSVGImageElement.HasValidDimensions()) {
-    aRv.ThrowInvalidStateError("The SVG does not have valid dimensions");
     return nullptr;
   }
 
@@ -1509,13 +1499,7 @@ already_AddRefed<VideoFrame> VideoFrame::Constructor(
   }
 
   auto r = InitializeFrameFromOtherFrame(
-      global.get(),
-      VideoFrameData(aVideoFrame.mResource->mImage.get(),
-                     aVideoFrame.mResource->TryPixelFormat(),
-                     aVideoFrame.mVisibleRect, aVideoFrame.mDisplaySize,
-                     aVideoFrame.mDuration, aVideoFrame.mTimestamp,
-                     aVideoFrame.mColorSpace),
-      aInit);
+      global.get(), aVideoFrame.GetVideoFrameData(), aInit);
   if (r.isErr()) {
     aRv.ThrowTypeError(r.unwrapErr());
     return nullptr;
@@ -1544,9 +1528,8 @@ already_AddRefed<VideoFrame> VideoFrame::Constructor(
 Nullable<VideoPixelFormat> VideoFrame::GetFormat() const {
   AssertIsOnOwningThread();
 
-  return mResource && mResource->mFormat
-             ? Nullable<VideoPixelFormat>(mResource->mFormat->PixelFormat())
-             : Nullable<VideoPixelFormat>();
+  return mResource ? MaybeToNullable(mResource->TryPixelFormat())
+                   : Nullable<VideoPixelFormat>();
 }
 
 // https://w3c.github.io/webcodecs/#dom-videoframe-codedwidth
@@ -1603,8 +1586,7 @@ uint32_t VideoFrame::DisplayHeight() const {
 // https://w3c.github.io/webcodecs/#dom-videoframe-duration
 Nullable<uint64_t> VideoFrame::GetDuration() const {
   AssertIsOnOwningThread();
-
-  return mDuration ? Nullable<uint64_t>(*mDuration) : Nullable<uint64_t>();
+  return MaybeToNullable(mDuration);
 }
 
 // https://w3c.github.io/webcodecs/#dom-videoframe-timestamp
@@ -1679,61 +1661,56 @@ already_AddRefed<Promise> VideoFrame::CopyTo(
   }
   layout = r1.unwrap();
 
-  auto r2 = GetSharedArrayBufferData(aDestination);
-  if (r2.isErr()) {
-    p->MaybeRejectWithTypeError("Failed to get buffer");
-    return p.forget();
-  }
-  Span<uint8_t> buffer = r2.unwrap();
-
-  if (buffer.size_bytes() < layout.mAllocationSize) {
-    p->MaybeRejectWithTypeError("Destination buffer is too small");
-    return p.forget();
-  }
-
-  Sequence<PlaneLayout> planeLayouts;
-
-  nsTArray<Format::Plane> planes = mResource->mFormat->Planes();
-  MOZ_ASSERT(layout.mComputedLayouts.Length() == planes.Length());
-
-  // TODO: These jobs can be run in a thread pool (bug 1780656) to unblock the
-  // current thread.
-  for (size_t i = 0; i < layout.mComputedLayouts.Length(); ++i) {
-    ComputedPlaneLayout& l = layout.mComputedLayouts[i];
-    uint32_t destinationOffset = l.mDestinationOffset;
-
-    PlaneLayout* pl = planeLayouts.AppendElement(fallible);
-    if (!pl) {
-      p->MaybeRejectWithTypeError("Out of memory");
+  return ProcessTypedArraysFixed(aDestination, [&](const Span<uint8_t>& aData) {
+    if (aData.size_bytes() < layout.mAllocationSize) {
+      p->MaybeRejectWithTypeError("Destination buffer is too small");
       return p.forget();
     }
-    pl->mOffset = l.mDestinationOffset;
-    pl->mStride = l.mDestinationStride;
 
-    // Copy pixels of `size` starting from `origin` on planes[i] to
-    // `aDestination`.
-    gfx::IntPoint origin(
-        l.mSourceLeftBytes / mResource->mFormat->SampleBytes(planes[i]),
-        l.mSourceTop);
-    gfx::IntSize size(
-        l.mSourceWidthBytes / mResource->mFormat->SampleBytes(planes[i]),
-        l.mSourceHeight);
-    if (!mResource->CopyTo(planes[i], {origin, size},
-                           buffer.From(destinationOffset),
-                           static_cast<size_t>(l.mDestinationStride))) {
-      p->MaybeRejectWithTypeError(
-          nsPrintfCString("Failed to copy image data in %s plane",
-                          mResource->mFormat->PlaneName(planes[i])));
-      return p.forget();
+    Sequence<PlaneLayout> planeLayouts;
+
+    nsTArray<Format::Plane> planes = mResource->mFormat->Planes();
+    MOZ_ASSERT(layout.mComputedLayouts.Length() == planes.Length());
+
+    // TODO: These jobs can be run in a thread pool (bug 1780656) to unblock
+    // the current thread.
+    for (size_t i = 0; i < layout.mComputedLayouts.Length(); ++i) {
+      ComputedPlaneLayout& l = layout.mComputedLayouts[i];
+      uint32_t destinationOffset = l.mDestinationOffset;
+
+      PlaneLayout* pl = planeLayouts.AppendElement(fallible);
+      if (!pl) {
+        p->MaybeRejectWithTypeError("Out of memory");
+        return p.forget();
+      }
+      pl->mOffset = l.mDestinationOffset;
+      pl->mStride = l.mDestinationStride;
+
+      // Copy pixels of `size` starting from `origin` on planes[i] to
+      // `aDestination`.
+      gfx::IntPoint origin(
+          l.mSourceLeftBytes / mResource->mFormat->SampleBytes(planes[i]),
+          l.mSourceTop);
+      gfx::IntSize size(
+          l.mSourceWidthBytes / mResource->mFormat->SampleBytes(planes[i]),
+          l.mSourceHeight);
+      if (!mResource->CopyTo(planes[i], {origin, size},
+                             aData.From(destinationOffset),
+                             static_cast<size_t>(l.mDestinationStride))) {
+        p->MaybeRejectWithTypeError(
+            nsPrintfCString("Failed to copy image data in %s plane",
+                            mResource->mFormat->PlaneName(planes[i])));
+        return p.forget();
+      }
     }
-  }
 
-  MOZ_ASSERT(layout.mComputedLayouts.Length() == planes.Length());
-  // TODO: Spec doesn't resolve with a value. See
-  // https://github.com/w3c/webcodecs/issues/510 This comment should be removed
-  // once the issue is resolved.
-  p->MaybeResolve(planeLayouts);
-  return p.forget();
+    MOZ_ASSERT(layout.mComputedLayouts.Length() == planes.Length());
+    // TODO: Spec doesn't resolve with a value. See
+    // https://github.com/w3c/webcodecs/issues/510 This comment should be
+    // removed once the issue is resolved.
+    p->MaybeResolve(planeLayouts);
+    return p.forget();
+  });
 }
 
 // https://w3c.github.io/webcodecs/#dom-videoframe-clone
@@ -1757,7 +1734,13 @@ void VideoFrame::Close() {
   mCodedSize = gfx::IntSize();
   mVisibleRect = gfx::IntRect();
   mDisplaySize = gfx::IntSize();
-  mDuration.reset();
+}
+
+already_AddRefed<layers::Image> VideoFrame::GetImage() const {
+  if (!mResource) {
+    return nullptr;
+  }
+  return do_AddRef(mResource->mImage);
 }
 
 // https://w3c.github.io/webcodecs/#ref-for-deserialization-steps%E2%91%A0
@@ -1765,10 +1748,6 @@ void VideoFrame::Close() {
 JSObject* VideoFrame::ReadStructuredClone(
     JSContext* aCx, nsIGlobalObject* aGlobal, JSStructuredCloneReader* aReader,
     const VideoFrameSerializedData& aData) {
-  if (!IsSameOrigin(aGlobal, aData.mPrincipalURI.get())) {
-    return nullptr;
-  }
-
   JS::Rooted<JS::Value> value(aCx, JS::NullValue());
   // To avoid a rooting hazard error from returning a raw JSObject* before
   // running the RefPtr destructor, RefPtr needs to be destructed before
@@ -1776,10 +1755,7 @@ JSObject* VideoFrame::ReadStructuredClone(
   // in the scope below. Otherwise, the static analysis infers the RefPtr cannot
   // be safely destructed while the unrooted return JSObject* is on the stack.
   {
-    RefPtr<VideoFrame> frame = MakeAndAddRef<VideoFrame>(
-        aGlobal, aData.mImage, aData.mFormat, aData.mCodedSize,
-        aData.mVisibleRect, aData.mDisplaySize, aData.mDuration,
-        aData.mTimestamp, aData.mColorSpace);
+    RefPtr<VideoFrame> frame = MakeAndAddRef<VideoFrame>(aGlobal, aData);
     if (!GetOrCreateDOMReflector(aCx, frame, &value) || !value.isObject()) {
       return nullptr;
     }
@@ -1798,12 +1774,10 @@ bool VideoFrame::WriteStructuredClone(JSStructuredCloneWriter* aWriter,
 
   // Indexing the image and send the index to the receiver.
   const uint32_t index = aHolder->VideoFrames().Length();
-  RefPtr<layers::Image> image(mResource->mImage.get());
   // The serialization is limited to the same process scope so it's ok to
   // serialize a reference instead of a copy.
-  aHolder->VideoFrames().AppendElement(VideoFrameSerializedData(
-      image.get(), mResource->TryPixelFormat(), mCodedSize, mVisibleRect,
-      mDisplaySize, mDuration, mTimestamp, mColorSpace, GetPrincipalURI()));
+  aHolder->VideoFrames().AppendElement(
+      VideoFrameSerializedData(GetVideoFrameData(), mCodedSize));
 
   return !NS_WARN_IF(!JS_WriteUint32Pair(aWriter, SCTAG_DOM_VIDEOFRAME, index));
 }
@@ -1816,10 +1790,7 @@ UniquePtr<VideoFrame::TransferredData> VideoFrame::Transfer() {
     return nullptr;
   }
 
-  Resource r = mResource.extract();
-  auto frame = MakeUnique<TransferredData>(
-      r.mImage.get(), r.TryPixelFormat(), mCodedSize, mVisibleRect,
-      mDisplaySize, mDuration, mTimestamp, mColorSpace, GetPrincipalURI());
+  auto frame = MakeUnique<TransferredData>(GetVideoFrameData(), mCodedSize);
   Close();
   return frame;
 }
@@ -1830,21 +1801,13 @@ already_AddRefed<VideoFrame> VideoFrame::FromTransferred(
     nsIGlobalObject* aGlobal, TransferredData* aData) {
   MOZ_ASSERT(aData);
 
-  if (!IsSameOrigin(aGlobal, aData->mPrincipalURI.get())) {
-    return nullptr;
-  }
-
-  return MakeAndAddRef<VideoFrame>(aGlobal, aData->mImage, aData->mFormat,
-                                   aData->mCodedSize, aData->mVisibleRect,
-                                   aData->mDisplaySize, aData->mDuration,
-                                   aData->mTimestamp, aData->mColorSpace);
+  return MakeAndAddRef<VideoFrame>(aGlobal, *aData);
 }
 
-already_AddRefed<nsIURI> VideoFrame::GetPrincipalURI() const {
-  AssertIsOnOwningThread();
-
-  nsIPrincipal* principal = mParent->PrincipalOrNull();
-  return principal ? principal->GetURI() : nullptr;
+VideoFrameData VideoFrame::GetVideoFrameData() const {
+  return VideoFrameData(mResource->mImage.get(), mResource->TryPixelFormat(),
+                        mVisibleRect, mDisplaySize, mDuration, mTimestamp,
+                        mColorSpace);
 }
 
 /*

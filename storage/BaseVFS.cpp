@@ -4,6 +4,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "BaseVFS.h"
+
 #include <string.h>
 #include "sqlite3.h"
 #include "mozilla/net/IOActivityMonitor.h"
@@ -84,7 +86,7 @@ int BaseCheckReservedLock(sqlite3_file* pFile, int* pResOut) {
 }
 
 int BaseFileControl(sqlite3_file* pFile, int op, void* pArg) {
-#ifdef EARLY_BETA_OR_EARLIER
+#if defined(MOZ_SQLITE_PERSIST_AUXILIARY_FILES)
   // Persist auxiliary files (-shm and -wal) on disk, because creating and
   // deleting them may be expensive on slow storage.
   // Only do this when there is a journal size limit, so the journal is
@@ -194,13 +196,13 @@ int BaseOpen(sqlite3_vfs* vfs, const char* zName, sqlite3_file* pFile,
 
 }  // namespace
 
-namespace mozilla::storage {
+namespace mozilla::storage::basevfs {
 
-const char* GetBaseVFSName(bool exclusive) {
+const char* GetVFSName(bool exclusive) {
   return exclusive ? "base-vfs-excl" : "base-vfs";
 }
 
-UniquePtr<sqlite3_vfs> ConstructBaseVFS(bool exclusive) {
+UniquePtr<sqlite3_vfs> ConstructVFS(bool exclusive) {
 #if defined(XP_WIN)
 #  define EXPECTED_VFS "win32"
 #  define EXPECTED_VFS_EXCL "win32"
@@ -209,7 +211,7 @@ UniquePtr<sqlite3_vfs> ConstructBaseVFS(bool exclusive) {
 #  define EXPECTED_VFS_EXCL "unix-excl"
 #endif
 
-  if (sqlite3_vfs_find(GetBaseVFSName(exclusive))) {
+  if (sqlite3_vfs_find(GetVFSName(exclusive))) {
     return nullptr;
   }
 
@@ -237,7 +239,7 @@ UniquePtr<sqlite3_vfs> ConstructBaseVFS(bool exclusive) {
       origVfs->szOsFile + static_cast<int>(sizeof(BaseFile)), /* szOsFile */
       origVfs->mxPathname,                                    /* mxPathname */
       nullptr,                                                /* pNext */
-      GetBaseVFSName(exclusive),                              /* zName */
+      GetVFSName(exclusive),                                  /* zName */
       origVfs,                                                /* pAppData */
       BaseOpen,                                               /* xOpen */
       origVfs->xDelete,                                       /* xDelete */
@@ -260,4 +262,4 @@ UniquePtr<sqlite3_vfs> ConstructBaseVFS(bool exclusive) {
   return MakeUnique<sqlite3_vfs>(vfs);
 }
 
-}  // namespace mozilla::storage
+}  // namespace mozilla::storage::basevfs

@@ -145,9 +145,6 @@ class DebuggerObject : public NativeObject {
                                               Handle<DebuggerObject*> object,
                                               HandleValue value,
                                               MutableHandleValue result);
-  [[nodiscard]] static bool makeDebuggeeNativeFunction(
-      JSContext* cx, Handle<DebuggerObject*> object, HandleValue value,
-      MutableHandleValue result);
   [[nodiscard]] static bool isSameNative(JSContext* cx,
                                          Handle<DebuggerObject*> object,
                                          HandleValue value,
@@ -175,8 +172,10 @@ class DebuggerObject : public NativeObject {
   bool isScriptedProxy() const;
   bool isPromise() const;
   bool isError() const;
-  JSAtom* name(JSContext* cx) const;
-  JSAtom* displayName(JSContext* cx) const;
+
+  bool name(JSContext* cx, JS::MutableHandle<JSAtom*> result) const;
+  bool displayName(JSContext* cx, JS::MutableHandle<JSAtom*> result) const;
+
   JS::PromiseState promiseState() const;
   double promiseLifetime() const;
   double promiseTimeToResolution() const;

@@ -16,37 +16,74 @@
 
 import * as Bidi from 'chromium-bidi/lib/cjs/protocol/protocol.js';
 
-import {ElementHandle as BaseElementHandle} from '../../api/ElementHandle.js';
+import {AutofillData, ElementHandle} from '../../api/ElementHandle.js';
 
-import {Connection} from './Connection.js';
-import {Context} from './Context.js';
-import {JSHandle} from './JSHandle.js';
+import {BidiFrame} from './Frame.js';
+import {BidiJSHandle} from './JSHandle.js';
+import {Realm} from './Realm.js';
+import {Sandbox} from './Sandbox.js';
 
 /**
  * @internal
  */
-export class ElementHandle<
-  ElementType extends Node = Element
-> extends BaseElementHandle<ElementType> {
-  declare handle: JSHandle<ElementType>;
+export class BidiElementHandle<
+  ElementType extends Node = Element,
+> extends ElementHandle<ElementType> {
+  declare handle: BidiJSHandle<ElementType>;
 
-  constructor(context: Context, remoteValue: Bidi.CommonDataTypes.RemoteValue) {
-    super(new JSHandle(context, remoteValue));
+  constructor(sandbox: Sandbox, remoteValue: Bidi.Script.RemoteValue) {
+    super(new BidiJSHandle(sandbox, remoteValue));
   }
 
-  context(): Context {
+  override get realm(): Sandbox {
+    return this.handle.realm;
+  }
+
+  override get frame(): BidiFrame {
+    return this.realm.environment;
+  }
+
+  context(): Realm {
     return this.handle.context();
-  }
-
-  get connection(): Connection {
-    return this.handle.connection;
   }
 
   get isPrimitiveValue(): boolean {
     return this.handle.isPrimitiveValue;
   }
 
-  remoteValue(): Bidi.CommonDataTypes.RemoteValue {
+  remoteValue(): Bidi.Script.RemoteValue {
     return this.handle.remoteValue();
+  }
+
+  override async autofill(data: AutofillData): Promise<void> {
+    const client = this.frame.client;
+    const nodeInfo = await client.send('DOM.describeNode', {
+      objectId: this.handle.id,
+    });
+    const fieldId = nodeInfo.node.backendNodeId;
+    const frameId = this.frame._id;
+    await client.send('Autofill.trigger', {
+      fieldId,
+      frameId,
+      card: data.creditCard,
+    });
+  }
+
+  override async contentFrame(
+    this: BidiElementHandle<HTMLIFrameElement>
+  ): Promise<BidiFrame>;
+  @ElementHandle.bindIsolatedHandle
+  override async contentFrame(): Promise<BidiFrame | null> {
+    using handle = (await this.evaluateHandle(element => {
+      if (element instanceof HTMLIFrameElement) {
+        return element.contentWindow;
+      }
+      return;
+    })) as BidiJSHandle;
+    const value = handle.remoteValue();
+    if (value.type === 'window') {
+      return this.frame.page().frame(value.value.context);
+    }
+    return null;
   }
 }

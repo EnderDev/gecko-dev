@@ -1,81 +1,25 @@
 From: Andreas Pehrson <apehrson@mozilla.com>
-Date: Mon, 12 Dec 2022 15:47:00 +0000
-Subject: Bug 1451394 - Expose mac camera capture backend in .gn and switch it
- to gecko libyuv. r=webrtc-reviewers,mjf
+Date: Wed, 8 Feb 2023 08:01:00 +0000
+Subject: Bug 1814692 - Don't attempt realtime scheduling rtc::PlatformThreads.
+ r=webrtc-reviewers,bwc
 
-Differential Revision: https://phabricator.services.mozilla.com/D163682
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/b0658888969395dca938597783c8a377b9bea209
+Differential Revision: https://phabricator.services.mozilla.com/D169036
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/9e64a965e26c8379261466e5273c3b383164b2c7
 ---
- BUILD.gn     | 4 ++++
- sdk/BUILD.gn | 6 ++++++
- 2 files changed, 10 insertions(+)
+ rtc_base/platform_thread.cc | 3 +++
+ 1 file changed, 3 insertions(+)
 
-diff --git a/BUILD.gn b/BUILD.gn
-index 0272f6a8fe..6515866c2d 100644
---- a/BUILD.gn
-+++ b/BUILD.gn
-@@ -559,6 +559,10 @@ if (!build_with_chromium) {
-       ]
-     }
- 
-+    if (build_with_mozilla && is_mac) {
-+      deps += [ "sdk:videocapture_objc" ]
-+    }
-+
-     if (rtc_enable_protobuf) {
-       deps += [ "logging:rtc_event_log_proto" ]
-     }
-diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
-index 971a323ef5..d8fcb6a61e 100644
---- a/sdk/BUILD.gn
-+++ b/sdk/BUILD.gn
-@@ -449,6 +449,7 @@ if (is_ios || is_mac) {
-       ]
-     }
- 
-+    if (!build_with_mozilla) {
-     rtc_library("videosource_objc") {
-       sources = [
-         "objc/api/peerconnection/RTCVideoSource+Private.h",
-@@ -478,6 +479,7 @@ if (is_ios || is_mac) {
-         ":used_from_extension",
-       ]
-     }
-+    }
- 
-     rtc_library("videoframebuffer_objc") {
-       visibility = [ "*" ]
-@@ -510,6 +512,7 @@ if (is_ios || is_mac) {
-       ]
-     }
- 
-+    if (!build_with_mozilla) {
-     rtc_library("opengl_objc") {
-       sources = [
-         "objc/components/renderer/opengl/RTCDefaultShader.h",
-@@ -662,6 +665,7 @@ if (is_ios || is_mac) {
-         ":videoframebuffer_objc",
-       ]
-     }
-+    }
- 
-     rtc_library("videocapture_objc") {
-       visibility = [ "*" ]
-@@ -690,6 +694,7 @@ if (is_ios || is_mac) {
-       ]
-     }
- 
-+    if (!build_with_mozilla) {
-     rtc_library("videocodec_objc") {
-       visibility = [ "*" ]
-       configs += [ "..:no_global_constructors" ]
-@@ -1740,5 +1745,6 @@ if (is_ios || is_mac) {
-         "VideoToolbox.framework",
-       ]
-     }
-+    }
-   }
- }
--- 
-2.34.1
-
+diff --git a/rtc_base/platform_thread.cc b/rtc_base/platform_thread.cc
+index 71a9f1b224..bcbb784b97 100644
+--- a/rtc_base/platform_thread.cc
++++ b/rtc_base/platform_thread.cc
+@@ -50,6 +50,9 @@ bool SetPriority(ThreadPriority priority) {
+   // TODO(tommi): Switch to the same mechanism as Chromium uses for changing
+   // thread priorities.
+   return true;
++#elif defined(WEBRTC_MOZILLA_BUILD) && defined(WEBRTC_LINUX)
++  // Only realtime audio uses realtime scheduling in Firefox.
++  return true;
+ #else
+   const int policy = SCHED_FIFO;
+   const int min_prio = sched_get_priority_min(policy);

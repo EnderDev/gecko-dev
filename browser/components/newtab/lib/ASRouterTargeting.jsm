@@ -496,7 +496,7 @@ async function getAutofillRecords(data) {
     name: "FormAutofill:GetRecords",
     data,
   });
-  return records?.length ?? 0;
+  return records?.records?.length ?? 0;
 }
 
 // Attribution data can be encoded multiple times so we need this function to
@@ -991,6 +991,25 @@ const TargetingGetters = {
     const { attributionData } = this;
 
     return attributionData?.campaign === "migration";
+  },
+
+  /**
+   * The values of the height and width available to the browser to display
+   * web content. The available height and width are each calculated taking
+   * into account the presence of menu bars, docks, and other similar OS elements
+   * @returns {Object} resolution The resolution object containing width and height
+   * @returns {string} resolution.width The available width of the primary monitor
+   * @returns {string} resolution.height The available height of the primary monitor
+   */
+  get primaryResolution() {
+    // Using hidden dom window ensures that we have a window object
+    // to grab a screen from in certain edge cases such as targeting evaluation
+    // during first startup before the browser is available, and in MacOS
+    let window = Services.appShell.hiddenDOMWindow;
+    return {
+      width: window?.screen.availWidth,
+      height: window?.screen.availHeight,
+    };
   },
 };
 

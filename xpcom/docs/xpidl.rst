@@ -199,6 +199,18 @@ invoked on property calls instead of an object with the given property
 This interface is usable by JavaScript classes. Must inherit from a
 ``scriptable`` interface.
 
+``rust_sync``
+`````````````
+
+This interface is safe to use from multiple threads concurrently. All child
+interfaces must also be marked with this property. Interfaces marked this way
+must be either non-scriptable or ``builtinclass``, and must use threadsafe
+reference counting.
+
+Interfaces marked as ``rust_sync`` will implement the ``Sync`` trait in Rust.
+For more details on what that means, read the trait's documentation:
+https://doc.rust-lang.org/nightly/std/marker/trait.Sync.html.
+
 Methods and Attributes
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -328,7 +340,7 @@ properties they may have. The ``array`` property turns the parameter into an arr
 the parameter must also have a corresponding ``size_is`` property whose argument is
 the parameter that has the size of the array. In native code, the type gains
 another pointer indirection, and JavaScript arrays are used in script code.
-Script code callers can ignore the value of array parameter, but implementors
+Script code callers can ignore the value of array parameter, but implementers
 must still set the values appropriately.
 
 .. note::

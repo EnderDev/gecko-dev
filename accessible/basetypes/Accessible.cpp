@@ -4,7 +4,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "Accessible.h"
-#include "AccGroupInfo.h"
 #include "ARIAMap.h"
 #include "nsAccUtils.h"
 #include "nsIURI.h"
@@ -555,6 +554,10 @@ nsStaticAtom* Accessible::LandmarkRole() const {
     }
   }
 
+  if (tagName == nsGkAtoms::search) {
+    return nsGkAtoms::search;
+  }
+
   const nsRoleMapEntry* roleMapEntry = ARIARoleMap();
   return roleMapEntry && roleMapEntry->IsOfType(eLandmark)
              ? roleMapEntry->roleAtom
@@ -658,8 +661,6 @@ uint32_t KeyBinding::AccelModifier() {
       return kControl;
     case MODIFIER_META:
       return kMeta;
-    case MODIFIER_OS:
-      return kOS;
     default:
       MOZ_CRASH("Handle the new result of WidgetInputEvent::AccelModifier()");
       return 0;

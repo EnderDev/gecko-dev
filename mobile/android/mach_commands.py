@@ -5,6 +5,7 @@
 import argparse
 import logging
 import os
+import sys
 
 import mozpack.path as mozpath
 from mach.decorators import Command, CommandArgument, SubCommand
@@ -209,6 +210,18 @@ def android_build_geckoview_example(command_context, args):
     return 0
 
 
+@SubCommand("android", "compile-all", """Build all source files""")
+@CommandArgument("args", nargs=argparse.REMAINDER)
+def android_compile_all(command_context, args):
+    gradle(
+        command_context,
+        command_context.substs["GRADLE_ANDROID_COMPILE_ALL_TASKS"] + args,
+        verbose=True,
+    )
+
+    return 0
+
+
 def install_app_bundle(command_context, bundle):
     from mozdevice import ADBDeviceFactory
 
@@ -328,7 +341,6 @@ def android_geckoview_docs(
     javadoc_path,
     upload_message,
 ):
-
     tasks = (
         command_context.substs["GRADLE_ANDROID_GECKOVIEW_DOCS_ARCHIVE_TASKS"]
         if archive or upload
@@ -492,6 +504,8 @@ def gradle(command_context, args, verbose=False):
             "GRADLE_OPTS": "-Dfile.encoding=utf-8",
             "JAVA_HOME": java_home,
             "JAVA_TOOL_OPTIONS": "-Dfile.encoding=utf-8",
+            # Let Gradle get the right Python path on Windows
+            "GRADLE_MACH_PYTHON": sys.executable,
         }
     )
     # Set ANDROID_SDK_ROOT if --with-android-sdk was set.

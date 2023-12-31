@@ -35,7 +35,6 @@
 #include "mozilla/CallState.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/RefPtr.h"
-#include "mozilla/TaskCategory.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/dom/BindingDeclarations.h"
@@ -43,7 +42,6 @@
 #include "mozilla/fallible.h"
 #include "mozilla/gfx/Point.h"
 #include "nsCOMPtr.h"
-#include "nsHashtablesFwd.h"
 #include "nsIContentPolicy.h"
 #include "nsINode.h"
 #include "nsIScriptError.h"
@@ -118,16 +116,12 @@ class nsParser;
 class nsPIWindowRoot;
 class nsPresContext;
 class nsStringBuffer;
-class nsStringHashKey;
 class nsTextFragment;
 class nsView;
 class nsWrapperCache;
 
 struct JSContext;
 struct nsPoint;
-
-template <class T>
-class nsRefPtrHashKey;
 
 namespace IPC {
 class Message;
@@ -242,9 +236,6 @@ struct EventNameMapping {
   int32_t mType;
   mozilla::EventMessage mMessage;
   mozilla::EventClassID mEventClassID;
-  // True if mAtom is possibly used by special SVG/SMIL events, but
-  // mMessage is eUnidentifiedEvent. See EventNameList.h
-  bool mMaybeSpecialSVGorSMILEvent;
 };
 
 namespace mozilla {
@@ -525,15 +516,6 @@ class nsContentUtils {
    */
   static Element* GetCommonFlattenedTreeAncestorForStyle(Element* aElement1,
                                                          Element* aElement2);
-
-  /**
-   * Returns the common ancestor under interactive content, if any.
-   * If neither one has interactive content as ancestor, common ancestor will be
-   * returned. If only one has interactive content as ancestor, null will be
-   * returned. If the nodes are the same, that node is returned.
-   */
-  static nsINode* GetCommonAncestorUnderInteractiveContent(nsINode* aNode1,
-                                                           nsINode* aNode2);
 
   /**
    * Returns the common BrowserParent ancestor, if any, for two given
@@ -842,8 +824,6 @@ class nsContentUtils {
   // Check if a node is in the document prolog, i.e. before the document
   // element.
   static bool InProlog(nsINode* aNode);
-
-  static nsIIOService* GetIOService() { return sIOService; }
 
   static nsIBidiKeyboard* GetBidiKeyboard();
 
@@ -1489,8 +1469,7 @@ class nsContentUtils {
    * DispatchInputEvent() instead.
    *
    * @param aDoc           The document which will be used to create the event.
-   * @param aTarget        The target of the event, should be QIable to
-   *                       EventTarget.
+   * @param aTarget        The target of the event.
    * @param aEventName     The name of the event.
    * @param aCanBubble     Whether the event can bubble.
    * @param aCancelable    Is the event cancelable.
@@ -1500,7 +1479,8 @@ class nsContentUtils {
    */
   // TODO: annotate with `MOZ_CAN_RUN_SCRIPT`
   // (https://bugzilla.mozilla.org/show_bug.cgi?id=1625902).
-  static nsresult DispatchTrustedEvent(Document* aDoc, nsISupports* aTarget,
+  static nsresult DispatchTrustedEvent(Document* aDoc,
+                                       mozilla::dom::EventTarget* aTarget,
                                        const nsAString& aEventName, CanBubble,
                                        Cancelable,
                                        Composed aComposed = Composed::eDefault,
@@ -1508,7 +1488,8 @@ class nsContentUtils {
 
   // TODO: annotate with `MOZ_CAN_RUN_SCRIPT`
   // (https://bugzilla.mozilla.org/show_bug.cgi?id=1625902).
-  static nsresult DispatchTrustedEvent(Document* aDoc, nsISupports* aTarget,
+  static nsresult DispatchTrustedEvent(Document* aDoc,
+                                       mozilla::dom::EventTarget* aTarget,
                                        const nsAString& aEventName,
                                        CanBubble aCanBubble,
                                        Cancelable aCancelable,
@@ -1521,8 +1502,7 @@ class nsContentUtils {
   /**
    * This method creates and dispatches a trusted event using an event message.
    * @param aDoc           The document which will be used to create the event.
-   * @param aTarget        The target of the event, should be QIable to
-   *                       EventTarget.
+   * @param aTarget        The target of the event.
    * @param aEventMessage  The event message.
    * @param aCanBubble     Whether the event can bubble.
    * @param aCancelable    Is the event cancelable.
@@ -1531,8 +1511,8 @@ class nsContentUtils {
    */
   template <class WidgetEventType>
   static nsresult DispatchTrustedEvent(
-      Document* aDoc, nsISupports* aTarget, EventMessage aEventMessage,
-      CanBubble aCanBubble, Cancelable aCancelable,
+      Document* aDoc, mozilla::dom::EventTarget* aTarget,
+      EventMessage aEventMessage, CanBubble aCanBubble, Cancelable aCancelable,
       bool* aDefaultAction = nullptr,
       ChromeOnlyDispatch aOnlyChromeDispatch = ChromeOnlyDispatch::eNo) {
     WidgetEventType event(true, aEventMessage);
@@ -1584,15 +1564,15 @@ class nsContentUtils {
    * Works only with events which can be created by calling
    * Document::CreateEvent() with parameter "Events".
    * @param aDoc           The document which will be used to create the event.
-   * @param aTarget        The target of the event, should be QIable to
-   *                       EventTarget.
+   * @param aTarget        The target of the event.
    * @param aEventName     The name of the event.
    * @param aCanBubble     Whether the event can bubble.
    * @param aCancelable    Is the event cancelable.
    * @param aDefaultAction Set to true if default action should be taken,
    *                       see EventTarget::DispatchEvent.
    */
-  static nsresult DispatchUntrustedEvent(Document* aDoc, nsISupports* aTarget,
+  static nsresult DispatchUntrustedEvent(Document* aDoc,
+                                         mozilla::dom::EventTarget* aTarget,
                                          const nsAString& aEventName, CanBubble,
                                          Cancelable,
                                          bool* aDefaultAction = nullptr);
@@ -1601,8 +1581,7 @@ class nsContentUtils {
    * This method creates and dispatches a untrusted event using an event
    * message.
    * @param aDoc           The document which will be used to create the event.
-   * @param aTarget        The target of the event, should be QIable to
-   *                       EventTarget.
+   * @param aTarget        The target of the event.
    * @param aEventMessage  The event message.
    * @param aCanBubble     Whether the event can bubble.
    * @param aCancelable    Is the event cancelable.
@@ -1611,8 +1590,8 @@ class nsContentUtils {
    */
   template <class WidgetEventType>
   static nsresult DispatchUntrustedEvent(
-      Document* aDoc, nsISupports* aTarget, EventMessage aEventMessage,
-      CanBubble aCanBubble, Cancelable aCancelable,
+      Document* aDoc, mozilla::dom::EventTarget* aTarget,
+      EventMessage aEventMessage, CanBubble aCanBubble, Cancelable aCancelable,
       bool* aDefaultAction = nullptr,
       ChromeOnlyDispatch aOnlyChromeDispatch = ChromeOnlyDispatch::eNo) {
     WidgetEventType event(false, aEventMessage);
@@ -1640,7 +1619,8 @@ class nsContentUtils {
    * @param aDefaultAction Set to true if default action should be taken,
    *                       see EventTarget::DispatchEvent.
    */
-  static nsresult DispatchChromeEvent(Document* aDoc, nsISupports* aTarget,
+  static nsresult DispatchChromeEvent(Document* aDoc,
+                                      mozilla::dom::EventTarget* aTarget,
                                       const nsAString& aEventName, CanBubble,
                                       Cancelable,
                                       bool* aDefaultAction = nullptr);
@@ -1663,8 +1643,7 @@ class nsContentUtils {
    * Works only with events which can be created by calling
    * Document::CreateEvent() with parameter "Events".
    * @param aDoc           The document which will be used to create the event.
-   * @param aTarget        The target of the event, should be QIable to
-   *                       EventTarget.
+   * @param aTarget        The target of the event.
    * @param aEventName     The name of the event.
    * @param aCanBubble     Whether the event can bubble.
    * @param aCancelable    Is the event cancelable.
@@ -1673,13 +1652,16 @@ class nsContentUtils {
    *                       see EventTarget::DispatchEvent.
    */
   static nsresult DispatchEventOnlyToChrome(
-      Document* aDoc, nsISupports* aTarget, const nsAString& aEventName,
-      CanBubble, Cancelable, Composed aComposed = Composed::eDefault,
-      bool* aDefaultAction = nullptr);
+      Document* aDoc, mozilla::dom::EventTarget* aTarget,
+      const nsAString& aEventName, CanBubble, Cancelable,
+      Composed aComposed = Composed::eDefault, bool* aDefaultAction = nullptr);
 
-  static nsresult DispatchEventOnlyToChrome(
-      Document* aDoc, nsISupports* aTarget, const nsAString& aEventName,
-      CanBubble aCanBubble, Cancelable aCancelable, bool* aDefaultAction) {
+  static nsresult DispatchEventOnlyToChrome(Document* aDoc,
+                                            mozilla::dom::EventTarget* aTarget,
+                                            const nsAString& aEventName,
+                                            CanBubble aCanBubble,
+                                            Cancelable aCancelable,
+                                            bool* aDefaultAction) {
     return DispatchEventOnlyToChrome(aDoc, aTarget, aEventName, aCanBubble,
                                      aCancelable, Composed::eDefault,
                                      aDefaultAction);
@@ -1703,6 +1685,11 @@ class nsContentUtils {
    * @param aName the event name to look up
    */
   static EventMessage GetEventMessage(nsAtom* aName);
+
+  /**
+   * Return the event type atom for a given event message.
+   */
+  static nsAtom* GetEventTypeFromMessage(EventMessage aEventMessage);
 
   /**
    * Returns the EventMessage and nsAtom to be used for event listener
@@ -2475,14 +2462,6 @@ class nsContentUtils {
                                                  int32_t aOldChildCount);
 
   /**
-   * Returns true if the content is in a document and contains a plugin
-   * which we don't control event dispatch for, i.e. do any plugins in this
-   * doc tree receive key events outside of our control? This always returns
-   * false on MacOSX.
-   */
-  static bool HasPluginWithUncontrolledEventDispatch(nsIContent* aContent);
-
-  /**
    * Returns the in-process subtree root document in a document hierarchy.
    * This could be a chrome document.
    */
@@ -2494,8 +2473,7 @@ class nsContentUtils {
 
   static void GetShiftText(nsAString& text);
   static void GetControlText(nsAString& text);
-  static void GetMetaText(nsAString& text);
-  static void GetOSText(nsAString& text);
+  static void GetCommandOrWinText(nsAString& text);
   static void GetAltText(nsAString& text);
   static void GetModifierSeparatorText(nsAString& text);
 
@@ -2680,6 +2658,23 @@ class nsContentUtils {
                             nsString& aParams);
 
   /**
+   * Check whether aContent and aOffsetInContent points in a selection range of
+   * one of ranges in aSelection.  If aSelection is collapsed, this always
+   * return false even if aContent and aOffsetInContent is same as the collapsed
+   * position.
+   *
+   * @param aSelection  The selection you want to check whether point is in a
+   *                    range of it.
+   * @param aNode       The container node of the point which you want to check.
+   * @param aOffset     The offset in aNode of the point which you want to
+   *                    check.  aNode and aOffset can be computed with
+   *                    UIEvent::GetRangeParentContentAndOffset() if you want to
+   *                    check the click point.
+   */
+  static bool IsPointInSelection(const mozilla::dom::Selection& aSelection,
+                                 const nsINode& aNode, const uint32_t aOffset);
+
+  /**
    * Takes a selection, and a text control element (<input> or <textarea>), and
    * returns the offsets in the text content corresponding to the selection.
    * The selection's anchor and focus must both be in the root node passed or a
@@ -2778,6 +2773,34 @@ class nsContentUtils {
    * Checks whether the  header value contains any forbidden method
    */
   static bool ContainsForbiddenMethod(const nsACString& headerValue);
+
+  class ParsedRange {
+   public:
+    explicit ParsedRange(mozilla::Maybe<uint64_t> aStart,
+                         mozilla::Maybe<uint64_t> aEnd)
+        : mStart(aStart), mEnd(aEnd) {}
+
+    mozilla::Maybe<uint64_t> Start() const { return mStart; }
+    mozilla::Maybe<uint64_t> End() const { return mEnd; }
+
+    bool operator==(const ParsedRange& aOther) const {
+      return Start() == aOther.Start() && End() == aOther.End();
+    }
+
+   private:
+    mozilla::Maybe<uint64_t> mStart;
+    mozilla::Maybe<uint64_t> mEnd;
+  };
+
+  /**
+   * Parse a single range request and return a pair containing the resulting
+   * start and end of the range.
+   *
+   * See https://fetch.spec.whatwg.org/#simple-range-header-value
+   */
+  static mozilla::Maybe<ParsedRange> ParseSingleRangeRequest(
+      const nsACString& aHeaderValue, bool aAllowWhitespace);
+
   /**
    * Returns whether a given header has characters that aren't permitted
    */
@@ -2800,6 +2823,12 @@ class nsContentUtils {
    * allowed for a non-CORS XHR or fetch request.
    */
   static bool IsAllowedNonCorsLanguage(const nsACString& aHeaderValue);
+
+  /**
+   * Returns whether a given Range header value is allowed for a non-CORS XHR or
+   * fetch request.
+   */
+  static bool IsAllowedNonCorsRange(const nsACString& aHeaderValue);
 
   /**
    * Returns whether a given header and value is a CORS-safelisted request
@@ -3166,9 +3195,6 @@ class nsContentUtils {
   static uint32_t HtmlObjectContentTypeForMIMEType(const nsCString& aMIMEType,
                                                    bool aNoFakePlugin);
 
-  static already_AddRefed<nsISerialEventTarget> GetEventTargetByLoadInfo(
-      nsILoadInfo* aLoadInfo, mozilla::TaskCategory aCategory);
-
   /**
    * Detect whether a string is a local-url.
    * https://drafts.csswg.org/css-values/#local-urls
@@ -3421,6 +3447,33 @@ class nsContentUtils {
 
   static bool IsExternalProtocol(nsIURI* aURI);
 
+  /**
+   * Add an element to a list, keeping the list sorted by tree order.
+   * Can take a potential ancestor of the elements in order to speed up
+   * tree-order comparisons, if such an ancestor exists.
+   * Returns true if the element is appended to the end of the list.
+   */
+  template <typename ElementType, typename ElementPtr>
+  static bool AddElementToListByTreeOrder(nsTArray<ElementType>& aList,
+                                          ElementPtr aChild,
+                                          nsIContent* aCommonAncestor);
+
+  /**
+   * Compares the position of aContent1 and aContent2 in the document
+   * @param aContent1 First content to compare.
+   * @param aContent2 Second content to compare.
+   * @param aCommonAncestor Potential ancestor of the contents, if one exists.
+   *                        This is only a hint; if it's not an ancestor of
+   *                        aContent1 or aContent2, this function will still
+   *                        work, but it will be slower than normal.
+   * @return < 0 if aContent1 is before aContent2,
+   *         > 0 if aContent1 is after aContent2,
+   *         0 otherwise
+   */
+  static int32_t CompareTreePosition(nsIContent* aContent1,
+                                     nsIContent* aContent2,
+                                     const nsIContent* aCommonAncestor);
+
  private:
   static bool InitializeEventTable();
 
@@ -3436,15 +3489,16 @@ class nsContentUtils {
 
   // TODO: Convert this to MOZ_CAN_RUN_SCRIPT (bug 1415230)
   MOZ_CAN_RUN_SCRIPT_BOUNDARY static nsresult DispatchEvent(
-      Document* aDoc, nsISupports* aTarget, const nsAString& aEventName,
-      CanBubble, Cancelable, Composed, Trusted, bool* aDefaultAction = nullptr,
+      Document* aDoc, mozilla::dom::EventTarget* aTarget,
+      const nsAString& aEventName, CanBubble, Cancelable, Composed, Trusted,
+      bool* aDefaultAction = nullptr,
       ChromeOnlyDispatch = ChromeOnlyDispatch::eNo);
 
   // TODO: Convert this to MOZ_CAN_RUN_SCRIPT (bug 1415230)
   MOZ_CAN_RUN_SCRIPT_BOUNDARY static nsresult DispatchEvent(
-      Document* aDoc, nsISupports* aTarget, mozilla::WidgetEvent& aWidgetEvent,
-      EventMessage aEventMessage, CanBubble, Cancelable, Trusted,
-      bool* aDefaultAction = nullptr,
+      Document* aDoc, mozilla::dom::EventTarget* aTarget,
+      mozilla::WidgetEvent& aWidgetEvent, EventMessage aEventMessage, CanBubble,
+      Cancelable, Trusted, bool* aDefaultAction = nullptr,
       ChromeOnlyDispatch = ChromeOnlyDispatch::eNo);
 
   static void InitializeModifierStrings();
@@ -3480,13 +3534,7 @@ class nsContentUtils {
   static nsIPrincipal* sSystemPrincipal;
   static nsIPrincipal* sNullSubjectPrincipal;
 
-  static nsIIOService* sIOService;
-
   static nsIConsoleService* sConsoleService;
-
-  static nsTHashMap<nsRefPtrHashKey<nsAtom>, EventNameMapping>* sAtomEventTable;
-  static nsTHashMap<nsStringHashKey, EventNameMapping>* sStringEventTable;
-  static nsTArray<RefPtr<nsAtom>>* sUserDefinedEvents;
 
   static nsIStringBundleService* sStringBundleService;
   class nsContentUtilsReporter;
@@ -3526,8 +3574,7 @@ class nsContentUtils {
 
   static nsString* sShiftText;
   static nsString* sControlText;
-  static nsString* sMetaText;
-  static nsString* sOSText;
+  static nsString* sCommandOrWinText;
   static nsString* sAltText;
   static nsString* sModifierSeparator;
 
@@ -3645,12 +3692,16 @@ class TreeOrderComparator {
 }  // namespace mozilla::dom
 
 #define NS_INTERFACE_MAP_ENTRY_TEAROFF(_interface, _allocator) \
-  if (aIID.Equals(NS_GET_IID(_interface))) {                   \
-    foundInterface = static_cast<_interface*>(_allocator);     \
-    if (!foundInterface) {                                     \
-      *aInstancePtr = nullptr;                                 \
-      return NS_ERROR_OUT_OF_MEMORY;                           \
-    }                                                          \
+  NS_INTERFACE_MAP_ENTRY_TEAROFF_AMBIGUOUS(_interface, _interface, _allocator)
+
+#define NS_INTERFACE_MAP_ENTRY_TEAROFF_AMBIGUOUS(_interface, _implClass, \
+                                                 _allocator)             \
+  if (aIID.Equals(NS_GET_IID(_interface))) {                             \
+    foundInterface = static_cast<_implClass*>(_allocator);               \
+    if (!foundInterface) {                                               \
+      *aInstancePtr = nullptr;                                           \
+      return NS_ERROR_OUT_OF_MEMORY;                                     \
+    }                                                                    \
   } else
 
 /*

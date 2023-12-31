@@ -7,18 +7,14 @@ import jsone
 from taskgraph.transforms.base import TransformSequence
 from taskgraph.util.schema import Schema, validate_schema
 from taskgraph.util.treeherder import join_symbol, split_symbol
-from taskgraph.util.yaml import load_yaml
 from voluptuous import Any, Optional, Required
 
-import gecko_taskgraph
+from gecko_taskgraph.util.chunking import TEST_VARIANTS
 from gecko_taskgraph.util.copy_task import copy_task
 from gecko_taskgraph.util.templates import merge
 
 transforms = TransformSequence()
 
-TEST_VARIANTS = load_yaml(
-    gecko_taskgraph.GECKO, "taskcluster", "ci", "test", "variants.yml"
-)
 """List of available test variants defined."""
 
 
@@ -27,6 +23,7 @@ variant_description_schema = Schema(
         str: {
             Required("description"): str,
             Required("suffix"): str,
+            Optional("mozinfo"): str,
             Required("component"): str,
             Required("expiration"): str,
             Optional("when"): {Any("$eval", "$if"): str},
@@ -51,9 +48,18 @@ def split_variants(config, tasks):
     def find_expired_variants(variants):
         expired = []
 
+        # do not expire on esr/beta/release
+        if config.params.get("release_type", "") in [
+            "release",
+            "beta",
+        ]:
+            return []
+
+        if "esr" in config.params.get("release_type", ""):
+            return []
+
         today = datetime.datetime.today()
         for variant in variants:
-
             expiration = variants[variant]["expiration"]
             if len(expiration.split("-")) == 1:
                 continue
@@ -65,8 +71,8 @@ def split_variants(config, tasks):
     def remove_expired(variants, expired):
         remaining_variants = []
         for name in variants:
-            parts = [p for p in name.split("+") if p not in expired]
-            if len(parts) == 0:
+            parts = [p for p in name.split("+") if p in expired]
+            if len(parts) > 0:
                 continue
 
             remaining_variants.append(name)

@@ -17,7 +17,6 @@ const { AppConstants } = ChromeUtils.importESModule(
 ChromeUtils.defineESModuleGetters(this, {
   DownloadUtils: "resource://gre/modules/DownloadUtils.sys.mjs",
   PlacesDBUtils: "resource://gre/modules/PlacesDBUtils.sys.mjs",
-  PluralForm: "resource://gre/modules/PluralForm.sys.mjs",
   ProcessType: "resource://gre/modules/ProcessType.sys.mjs",
 });
 
@@ -93,6 +92,17 @@ var snapshotFormatters = {
     }
     if (AppConstants.platform == "macosx") {
       $("rosetta-box").textContent = data.rosetta;
+    }
+    if (AppConstants.platform == "win") {
+      const translatedList = await Promise.all(
+        data.pointingDevices.map(deviceName => {
+          return document.l10n.formatValue(deviceName);
+        })
+      );
+
+      const formatter = new Intl.ListFormat();
+
+      $("pointing-devices-box").textContent = formatter.format(translatedList);
     }
     $("binary-box").textContent = Services.dirsvc.get(
       "XREExeF",
@@ -236,6 +246,19 @@ var snapshotFormatters = {
     formatHumanReadableBytes($("disk-available-box"), data.diskAvailableBytes);
   },
 
+  async legacyUserStylesheets(legacyUserStylesheets) {
+    $("legacyUserStylesheets-enabled").textContent =
+      legacyUserStylesheets.active;
+    $("legacyUserStylesheets-types").textContent =
+      new Intl.ListFormat(undefined, { style: "short", type: "unit" }).format(
+        legacyUserStylesheets.types
+      ) ||
+      document.l10n.setAttributes(
+        $("legacyUserStylesheets-types"),
+        "legacy-user-stylesheets-no-stylesheets-found"
+      );
+  },
+
   crashes(data) {
     if (!AppConstants.MOZ_CRASHREPORTER) {
       return;
@@ -318,7 +341,7 @@ var snapshotFormatters = {
   },
 
   securitySoftware(data) {
-    if (!AppConstants.isPlatformAndVersionAtLeast("win", "6.2")) {
+    if (AppConstants.platform !== "win") {
       $("security-software").hidden = true;
       $("security-software-table").hidden = true;
       return;
@@ -1110,6 +1133,7 @@ var snapshotFormatters = {
     insertEnumerateDatabase();
 
     // Create codec support matrix if possible
+    let supportInfo = null;
     if (data.codecSupportInfo.length) {
       const [
         supportText,
@@ -1117,12 +1141,14 @@ var snapshotFormatters = {
         codecNameHeaderText,
         codecSWDecodeText,
         codecHWDecodeText,
+        lackOfExtensionText,
       ] = await document.l10n.formatValues([
         "media-codec-support-supported",
         "media-codec-support-unsupported",
         "media-codec-support-codec-name",
         "media-codec-support-sw-decoding",
         "media-codec-support-hw-decoding",
+        "media-codec-support-lack-of-extension",
       ]);
 
       function formatCodecRowHeader(a, b, c) {
@@ -1151,26 +1177,48 @@ var snapshotFormatters = {
         return $.new("tr", [$.new("td", codec), swCell, hwCell]);
       }
 
+      function formatCodecRowForLackOfExtension(codec, sw) {
+        let swCell = $.new("td", sw ? supportText : unsupportedText);
+        // Link to AV1 extension on MS store.
+        let hwCell = $.new("td", [
+          $.new("a", lackOfExtensionText, null, {
+            href: "ms-windows-store://pdp/?ProductId=9MVZQVXJBQ9V",
+          }),
+        ]);
+        if (sw) {
+          swCell.classList.add("supported");
+        } else {
+          swCell.classList.add("unsupported");
+        }
+        hwCell.classList.add("lack-of-extension");
+        return $.new("tr", [$.new("td", codec), swCell, hwCell]);
+      }
+
       // Parse codec support string and create dictionary containing
       // SW/HW support information for each codec found
       let codecs = {};
       for (const codec_string of data.codecSupportInfo.split("\n")) {
         const s = codec_string.split(" ");
         const codec_name = s[0];
-        const codec_support = s[1];
+        const codec_support = s.slice(1);
 
         if (!(codec_name in codecs)) {
           codecs[codec_name] = {
             name: codec_name,
             sw: false,
             hw: false,
+            lackOfExtension: false,
           };
         }
 
-        if (codec_support === "SW") {
+        if (codec_support.includes("SW")) {
           codecs[codec_name].sw = true;
-        } else if (codec_support === "HW") {
+        }
+        if (codec_support.includes("HW")) {
           codecs[codec_name].hw = true;
+        }
+        if (codec_support.includes("LACK_OF_EXTENSION")) {
+          codecs[codec_name].lackOfExtension = true;
         }
       }
 
@@ -1180,9 +1228,15 @@ var snapshotFormatters = {
         if (!codecs.hasOwnProperty(c)) {
           continue;
         }
-        codecSupportRows.push(
-          formatCodecRow(codecs[c].name, codecs[c].sw, codecs[c].hw)
-        );
+        if (codecs[c].lackOfExtension) {
+          codecSupportRows.push(
+            formatCodecRowForLackOfExtension(codecs[c].name, codecs[c].sw)
+          );
+        } else {
+          codecSupportRows.push(
+            formatCodecRow(codecs[c].name, codecs[c].sw, codecs[c].hw)
+          );
+        }
       }
 
       let codecSupportTable = $.new("table", [
@@ -1194,10 +1248,15 @@ var snapshotFormatters = {
         $.new("tbody", codecSupportRows),
       ]);
       codecSupportTable.id = "codec-table";
-
-      if (["win", "macosx", "linux"].includes(AppConstants.platform)) {
-        insertBasicInfo("media-codec-support-info", [codecSupportTable]);
-      }
+      supportInfo = [codecSupportTable];
+    } else {
+      // Don't have access to codec support information
+      supportInfo = await document.l10n.formatValue(
+        "media-codec-support-error"
+      );
+    }
+    if (["win", "macosx", "linux", "android"].includes(AppConstants.platform)) {
+      insertBasicInfo("media-codec-support-info", supportInfo);
     }
   },
 

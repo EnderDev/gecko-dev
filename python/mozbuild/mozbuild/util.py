@@ -143,6 +143,13 @@ class ReadOnlyDict(dict):
 
         return ReadOnlyDict(**result)
 
+    def __reduce__(self, *args, **kwargs):
+        """
+        Support for `pickle`.
+        """
+
+        return (self.__class__, (dict(self),))
+
 
 class undefined_default(object):
     """Represents an undefined argument value that isn't None."""
@@ -1326,12 +1333,8 @@ class EnumString(six.text_type):
     def __hash__(self):
         return super(EnumString, self).__hash__()
 
-    @staticmethod
-    def subclass(*possible_values):
-        class EnumStringSubclass(EnumString):
-            POSSIBLE_VALUES = possible_values
-
-        return EnumStringSubclass
+    def __repr__(self):
+        return f"{self.__class__.__name__}({str(self)!r})"
 
 
 def _escape_char(c):

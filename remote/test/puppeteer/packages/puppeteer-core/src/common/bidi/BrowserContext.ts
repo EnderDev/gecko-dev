@@ -14,37 +14,75 @@
  * limitations under the License.
  */
 
-import {BrowserContext as BrowserContextBase} from '../../api/BrowserContext.js';
-import {Page as PageBase} from '../../api/Page.js';
+import * as Bidi from 'chromium-bidi/lib/cjs/protocol/protocol.js';
+
+import {BrowserContext} from '../../api/BrowserContext.js';
+import {Page} from '../../api/Page.js';
+import {Target} from '../../api/Target.js';
 import {Viewport} from '../PuppeteerViewport.js';
 
+import {BidiBrowser} from './Browser.js';
 import {Connection} from './Connection.js';
-import {Context} from './Context.js';
-import {Page} from './Page.js';
+import {BidiPage} from './Page.js';
 
 interface BrowserContextOptions {
   defaultViewport: Viewport | null;
+  isDefault: boolean;
 }
 
 /**
  * @internal
  */
-export class BrowserContext extends BrowserContextBase {
+export class BidiBrowserContext extends BrowserContext {
+  #browser: BidiBrowser;
   #connection: Connection;
   #defaultViewport: Viewport | null;
+  #isDefault = false;
 
-  constructor(connection: Connection, options: BrowserContextOptions) {
+  constructor(browser: BidiBrowser, options: BrowserContextOptions) {
     super();
-    this.#connection = connection;
+    this.#browser = browser;
+    this.#connection = this.#browser.connection;
     this.#defaultViewport = options.defaultViewport;
+    this.#isDefault = options.isDefault;
   }
 
-  override async newPage(): Promise<PageBase> {
-    const {result} = await this.#connection.send('browsingContext.create', {
-      type: 'tab',
+  override targets(): Target[] {
+    return this.#browser.targets().filter(target => {
+      return target.browserContext() === this;
     });
-    const context = this.#connection.context(result.context) as Context;
-    const page = new Page(context);
+  }
+
+  override waitForTarget(
+    predicate: (x: Target) => boolean | Promise<boolean>,
+    options: {timeout?: number} = {}
+  ): Promise<Target> {
+    return this.#browser.waitForTarget(target => {
+      return target.browserContext() === this && predicate(target);
+    }, options);
+  }
+
+  get connection(): Connection {
+    return this.#connection;
+  }
+
+  override async newPage(): Promise<Page> {
+    const {result} = await this.#connection.send('browsingContext.create', {
+      type: Bidi.BrowsingContext.CreateType.Tab,
+    });
+    const target = this.#browser._getTargetById(result.context);
+
+    // TODO: once BiDi has some concept matching BrowserContext, the newly
+    // created contexts should get automatically assigned to the right
+    // BrowserContext. For now, we assume that only explicitly created pages go
+    // to the current BrowserContext. Otherwise, the contexts get assigned to
+    // the default BrowserContext by the Browser.
+    target._setBrowserContext(this);
+
+    const page = await target.page();
+    if (!page) {
+      throw new Error('Page is not found');
+    }
     if (this.#defaultViewport) {
       try {
         await page.setViewport(this.#defaultViewport);
@@ -52,8 +90,34 @@ export class BrowserContext extends BrowserContextBase {
         // No support for setViewport in Firefox.
       }
     }
+
     return page;
   }
 
-  override async close(): Promise<void> {}
+  override async close(): Promise<void> {
+    if (this.#isDefault) {
+      throw new Error('Default context cannot be closed!');
+    }
+
+    await this.#browser._closeContext(this);
+  }
+
+  override browser(): BidiBrowser {
+    return this.#browser;
+  }
+
+  override async pages(): Promise<BidiPage[]> {
+    const results = await Promise.all(
+      [...this.targets()].map(t => {
+        return t.page();
+      })
+    );
+    return results.filter((p): p is BidiPage => {
+      return p !== null;
+    });
+  }
+
+  override isIncognito(): boolean {
+    return !this.#isDefault;
+  }
 }

@@ -15,23 +15,17 @@
  */
 
 import expect from 'expect';
-import {PUPPETEER_WORLD} from 'puppeteer-core/internal/common/IsolatedWorlds.js';
 import {LazyArg} from 'puppeteer-core/internal/common/LazyArg.js';
 
-import {
-  getTestState,
-  setupTestBrowserHooks,
-  setupTestPageAndContextHooks,
-} from './mocha-utils.js';
+import {getTestState, setupTestBrowserHooks} from './mocha-utils.js';
 
 describe('PuppeteerUtil tests', function () {
   setupTestBrowserHooks();
-  setupTestPageAndContextHooks();
 
   it('should work', async () => {
-    const {page} = getTestState();
+    const {page} = await getTestState();
 
-    const world = page.mainFrame().worlds[PUPPETEER_WORLD];
+    const world = page.mainFrame().isolatedRealm();
     const value = await world.evaluate(
       PuppeteerUtil => {
         return typeof PuppeteerUtil === 'object';
@@ -45,9 +39,9 @@ describe('PuppeteerUtil tests', function () {
 
   describe('createFunction tests', function () {
     it('should work', async () => {
-      const {page} = getTestState();
+      const {page} = await getTestState();
 
-      const world = page.mainFrame().worlds[PUPPETEER_WORLD];
+      const world = page.mainFrame().isolatedRealm();
       const value = await world.evaluate(
         ({createFunction}, fnString) => {
           return createFunction(fnString)(4);

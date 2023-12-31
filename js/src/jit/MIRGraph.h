@@ -370,6 +370,7 @@ class MBasicBlock : public TempObject, public InlineListNode<MBasicBlock> {
   MIRGraph& graph() { return graph_; }
   const CompileInfo& info() const { return info_; }
   jsbytecode* pc() const { return trackedSite_->pc(); }
+  jsbytecode* entryPC() const { return entryResumePoint()->pc(); }
   uint32_t nslots() const { return slots_.length(); }
   uint32_t id() const { return id_; }
   uint32_t numPredecessors() const { return predecessors_.length(); }
@@ -584,6 +585,10 @@ class MBasicBlock : public TempObject, public InlineListNode<MBasicBlock> {
   void dump(GenericPrinter& out);
   void dump();
 
+  void updateTrackedSite(BytecodeSite* site) {
+    MOZ_ASSERT(site->tree() == trackedSite_->tree());
+    trackedSite_ = site;
+  }
   BytecodeSite* trackedSite() const { return trackedSite_; }
   InlineScriptTree* trackedTree() const { return trackedSite_->tree(); }
 
@@ -638,15 +643,6 @@ class MBasicBlock : public TempObject, public InlineListNode<MBasicBlock> {
   // this cycle. This is also used for tracking calls and optimizations when
   // profiling.
   BytecodeSite* trackedSite_;
-
-  unsigned lineno_;
-  unsigned columnIndex_;
-
- public:
-  void setLineno(unsigned l) { lineno_ = l; }
-  unsigned lineno() const { return lineno_; }
-  void setColumnIndex(unsigned c) { columnIndex_ = c; }
-  unsigned columnIndex() const { return columnIndex_; }
 };
 
 using MBasicBlockIterator = InlineListIterator<MBasicBlock>;

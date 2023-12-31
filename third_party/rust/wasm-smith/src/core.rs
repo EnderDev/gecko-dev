@@ -119,6 +119,9 @@ pub struct Module {
     /// The predicted size of the effective type of this module, based on this
     /// module's size of the types of imports/exports.
     type_size: u32,
+
+    /// Names currently exported from this module.
+    export_names: HashSet<String>,
 }
 
 impl<'a> Arbitrary<'a> for Module {
@@ -196,6 +199,7 @@ impl Module {
             code: Vec::new(),
             data: Vec::new(),
             type_size: 0,
+            export_names: HashSet::new(),
         }
     }
 }
@@ -547,12 +551,12 @@ impl Module {
         // index in our newly generated module. Initially the option is `None` and will become a
         // `Some` when we encounter an import that uses this signature in the next portion of this
         // function. See also the `make_func_type` closure below.
-        let mut available_types = Vec::<(wasmparser::Type, Option<u32>)>::new();
+        let mut available_types = Vec::new();
         let mut available_imports = Vec::<wasmparser::Import>::new();
         for payload in wasmparser::Parser::new(0).parse_all(&example_module) {
             match payload.expect("could not parse the available import payload") {
                 wasmparser::Payload::TypeSection(type_reader) => {
-                    for ty in type_reader {
+                    for ty in type_reader.into_iter_err_on_gc_types() {
                         let ty = ty.expect("could not parse type section");
                         available_types.push((ty, None));
                     }
@@ -587,7 +591,7 @@ impl Module {
             let serialized_sig_idx = match available_types.get_mut(parsed_sig_idx as usize) {
                 None => panic!("signature index refers to a type out of bounds"),
                 Some((_, Some(idx))) => *idx as usize,
-                Some((wasmparser::Type::Func(func_type), index_store)) => {
+                Some((func_type, index_store)) => {
                     let multi_value_required = func_type.results().len() > 1;
                     let new_index = first_type_index + new_types.len();
                     if new_index >= max_types || (multi_value_required && !multi_value_enabled) {
@@ -936,14 +940,12 @@ impl Module {
                 .collect(),
         );
 
-        let mut export_names = HashSet::new();
-
         // If the configuration demands exporting everything, we do so here and
         // early-return.
         if self.config.export_everything() {
             for choices_by_kind in choices {
                 for (kind, idx) in choices_by_kind {
-                    let name = unique_string(1_000, &mut export_names, u)?;
+                    let name = unique_string(1_000, &mut self.export_names, u)?;
                     self.add_arbitrary_export(name, kind, idx)?;
                 }
             }
@@ -971,7 +973,7 @@ impl Module {
 
                 // Pick a name, then pick the export, and then we can record
                 // information about the chosen export.
-                let name = unique_string(1_000, &mut export_names, u)?;
+                let name = unique_string(1_000, &mut self.export_names, u)?;
                 let list = u.choose(&choices)?;
                 let (kind, idx) = *u.choose(list)?;
                 self.add_arbitrary_export(name, kind, idx)?;
@@ -1172,6 +1174,7 @@ impl Module {
             let body = self.arbitrary_func_body(u, ty, &mut allocs, allow_invalid)?;
             self.code.push(body);
         }
+        allocs.finish(u, self)?;
         Ok(())
     }
 
@@ -1639,11 +1642,19 @@ fn convert_type(parsed_type: wasmparser::ValType) -> ValType {
 
 fn convert_reftype(ty: wasmparser::RefType) -> RefType {
     wasm_encoder::RefType {
-        nullable: ty.nullable,
-        heap_type: match ty.heap_type {
-            wasmparser::HeapType::Func => wasm_encoder::HeapType::Func,
-            wasmparser::HeapType::Extern => wasm_encoder::HeapType::Extern,
-            wasmparser::HeapType::TypedFunc(i) => wasm_encoder::HeapType::TypedFunc(i.into()),
+        nullable: ty.is_nullable(),
+        heap_type: match ty.heap_type() {
+            wasmparser::HeapType::Func => HeapType::Func,
+            wasmparser::HeapType::Extern => HeapType::Extern,
+            wasmparser::HeapType::Any => HeapType::Any,
+            wasmparser::HeapType::None => HeapType::None,
+            wasmparser::HeapType::NoExtern => HeapType::NoExtern,
+            wasmparser::HeapType::NoFunc => HeapType::NoFunc,
+            wasmparser::HeapType::Eq => HeapType::Eq,
+            wasmparser::HeapType::Struct => HeapType::Struct,
+            wasmparser::HeapType::Array => HeapType::Array,
+            wasmparser::HeapType::I31 => HeapType::I31,
+            wasmparser::HeapType::Indexed(i) => HeapType::Indexed(i.into()),
         },
     }
 }

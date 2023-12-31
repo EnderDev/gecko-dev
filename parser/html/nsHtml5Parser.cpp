@@ -148,6 +148,9 @@ NS_IMETHODIMP_(bool)
 nsHtml5Parser::IsParserEnabled() { return !mBlocked; }
 
 NS_IMETHODIMP_(bool)
+nsHtml5Parser::IsParserClosed() { return mDocumentClosed; }
+
+NS_IMETHODIMP_(bool)
 nsHtml5Parser::IsComplete() { return mExecutor->IsComplete(); }
 
 NS_IMETHODIMP
@@ -332,7 +335,7 @@ nsresult nsHtml5Parser::Parse(const nsAString& aSourceBuffer, void* aKey,
         mTokenizer->setLineNumber(lineNumberSave);
       }
 
-      if (mTreeBuilder->HasScript()) {
+      if (mTreeBuilder->HasScriptThatMayDocumentWriteOrBlock()) {
         auto r = mTreeBuilder->Flush();  // Move ops to the executor
         if (r.isErr()) {
           return executor->MarkAsBroken(r.unwrapErr());
@@ -623,7 +626,7 @@ nsresult nsHtml5Parser::ParseUntilBlocked() {
       if (inRootContext) {
         mRootContextLineNumber = mTokenizer->getLineNumber();
       }
-      if (mTreeBuilder->HasScript()) {
+      if (mTreeBuilder->HasScriptThatMayDocumentWriteOrBlock()) {
         auto r = mTreeBuilder->Flush();
         if (r.isErr()) {
           return mExecutor->MarkAsBroken(r.unwrapErr());

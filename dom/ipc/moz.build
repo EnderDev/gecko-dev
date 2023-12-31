@@ -9,6 +9,8 @@ with Files("**"):
 
 DIRS += ["jsactor"]
 
+TEST_DIRS += ["gtest"]
+
 XPIDL_SOURCES += [
     "nsIDOMProcessChild.idl",
     "nsIDOMProcessParent.idl",
@@ -179,7 +181,6 @@ IPDL_SOURCES += [
     "PInProcess.ipdl",
     "PJSOracle.ipdl",
     "PJSValidator.ipdl",
-    "PLoginReputation.ipdl",
     "PProcessHangMonitor.ipdl",
     "PrefsTypes.ipdlh",
     "PTabContext.ipdlh",
@@ -259,13 +260,13 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
 JAR_MANIFESTS += ["jar.mn"]
 
 BROWSER_CHROME_MANIFESTS += [
-    "tests/browser.ini",
-    "tests/JSProcessActor/browser.ini",
-    "tests/JSWindowActor/browser.ini",
+    "tests/browser.toml",
+    "tests/JSProcessActor/browser.toml",
+    "tests/JSWindowActor/browser.toml",
 ]
 
-MOCHITEST_CHROME_MANIFESTS += ["tests/chrome.ini"]
-MOCHITEST_MANIFESTS += ["tests/mochitest.ini"]
+MOCHITEST_CHROME_MANIFESTS += ["tests/chrome.toml"]
+MOCHITEST_MANIFESTS += ["tests/mochitest.toml"]
 XPCSHELL_TESTS_MANIFESTS += ["tests/xpcshell.ini"]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":

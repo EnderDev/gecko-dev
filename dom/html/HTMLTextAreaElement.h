@@ -71,8 +71,6 @@ class HTMLTextAreaElement final : public TextControlElement,
 
   void FieldSetDisabledChanged(bool aNotify) override;
 
-  ElementState IntrinsicState() const override;
-
   void SetLastValueChangeWasInteractive(bool);
 
   // TextControlElement
@@ -83,9 +81,9 @@ class HTMLTextAreaElement final : public TextControlElement,
   int32_t GetCols() override;
   int32_t GetWrapCols() override;
   int32_t GetRows() override;
-  void GetDefaultValueFromContent(nsAString& aValue) override;
+  void GetDefaultValueFromContent(nsAString& aValue, bool aForDisplay) override;
   bool ValueChanged() const override;
-  void GetTextEditorValue(nsAString& aValue, bool aIgnoreWrap) const override;
+  void GetTextEditorValue(nsAString& aValue) const override;
   MOZ_CAN_RUN_SCRIPT TextEditor* GetTextEditor() override;
   TextEditor* GetTextEditorWithoutCreation() override;
   nsISelectionController* GetSelectionController() override;
@@ -99,6 +97,7 @@ class HTMLTextAreaElement final : public TextControlElement,
   void EnablePreview() override;
   bool IsPreviewEnabled() override;
   void InitializeKeyboardEventListeners() override;
+  void UpdatePlaceholderShownState();
   void OnValueChanged(ValueChangeKind, bool aNewValueEmpty,
                       const nsAString* aKnownNewValue) override;
   void GetValueFromSetRangeText(nsAString& aValue) override;
@@ -243,12 +242,6 @@ class HTMLTextAreaElement final : public TextControlElement,
   void GetDefaultValue(nsAString& aDefaultValue, ErrorResult& aError) const;
   void SetDefaultValue(const nsAString& aDefaultValue, ErrorResult& aError);
   void GetValue(nsAString& aValue);
-  /**
-   * ValueEquals() is designed for internal use so that aValue shouldn't
-   * include \r character.  It should be handled before calling this with
-   * nsContentUtils::PlatformToDOMLineBreaks().
-   */
-  bool ValueEquals(const nsAString& aValue) const;
   MOZ_CAN_RUN_SCRIPT void SetValue(const nsAString&, ErrorResult&);
 
   uint32_t GetTextLength();
@@ -397,6 +390,8 @@ class HTMLTextAreaElement final : public TextControlElement,
    */
   void GetSelectionRange(uint32_t* aSelectionStart, uint32_t* aSelectionEnd,
                          ErrorResult& aRv);
+
+  void UpdateValidityElementStates(bool aNotify) final;
 
  private:
   static void MapAttributesIntoRule(MappedDeclarationsBuilder&);

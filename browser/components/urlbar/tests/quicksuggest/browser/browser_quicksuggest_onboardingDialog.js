@@ -35,6 +35,11 @@ if (AppConstants.platform === "macosx") {
 let gCanTabMoveFocus;
 add_setup(async function () {
   gCanTabMoveFocus = await canTabMoveFocus();
+
+  // Ensure the test remote settings server is set up. This test doesn't trigger
+  // any suggestions but it enables Suggest, which will attempt to sync from
+  // remote settings.
+  await QuickSuggestTestUtils.ensureQuickSuggestInit();
 });
 
 // When the user has already enabled the data-collection pref, the dialog should
@@ -380,6 +385,7 @@ const VARIATION_TEST_DATA = [
       defaultFocusOrder: [
         "onboardingNext",
         "onboardingClose",
+        "onboardingDialog",
         "onboardingNext",
       ],
       actions: ["onboardingClose", "onboardingNext"],
@@ -410,6 +416,7 @@ const VARIATION_TEST_DATA = [
         "onboardingLearnMore",
         "onboardingReject",
         "onboardingSkipLink",
+        "onboardingDialog",
         "onboardingAccept",
       ],
       acceptFocusOrder: [
@@ -417,12 +424,14 @@ const VARIATION_TEST_DATA = [
         "onboardingLearnMore",
         "onboardingSubmit",
         "onboardingSkipLink",
+        "onboardingDialog",
         "onboardingAccept",
       ],
       rejectFocusOrder: [
         "onboardingReject",
         "onboardingSubmit",
         "onboardingSkipLink",
+        "onboardingDialog",
         "onboardingLearnMore",
         "onboardingReject",
       ],
@@ -705,6 +714,7 @@ const VARIATION_TEST_DATA = [
         "onboardingNext",
         "onboardingLearnMoreOnIntroduction",
         "onboardingClose",
+        "onboardingDialog",
         "onboardingNext",
       ],
       actions: [
@@ -739,12 +749,14 @@ const VARIATION_TEST_DATA = [
         "onboardingAccept",
         "onboardingReject",
         "onboardingSkipLink",
+        "onboardingDialog",
         "onboardingLearnMore",
       ],
       acceptFocusOrder: [
         "onboardingAccept",
         "onboardingSubmit",
         "onboardingSkipLink",
+        "onboardingDialog",
         "onboardingLearnMore",
         "onboardingAccept",
       ],
@@ -752,6 +764,7 @@ const VARIATION_TEST_DATA = [
         "onboardingReject",
         "onboardingSubmit",
         "onboardingSkipLink",
+        "onboardingDialog",
         "onboardingLearnMore",
         "onboardingReject",
       ],
@@ -792,6 +805,7 @@ const VARIATION_TEST_DATA = [
         "onboardingAccept",
         "onboardingReject",
         "onboardingSkipLink",
+        "onboardingDialog",
         "onboardingLearnMore",
       ],
     },

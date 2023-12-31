@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Api;
 pub struct Context;
 #[derive(Debug)]
@@ -327,7 +327,7 @@ impl crate::CommandEncoder<Api> for Encoder {
         &mut self,
         layout: &Resource,
         stages: wgt::ShaderStages,
-        offset: u32,
+        offset_bytes: u32,
         data: &[u32],
     ) {
     }
@@ -403,7 +403,7 @@ impl crate::CommandEncoder<Api> for Encoder {
 
     // compute
 
-    unsafe fn begin_compute_pass(&mut self, desc: &crate::ComputePassDescriptor) {}
+    unsafe fn begin_compute_pass(&mut self, desc: &crate::ComputePassDescriptor<Api>) {}
     unsafe fn end_compute_pass(&mut self) {}
 
     unsafe fn set_compute_pipeline(&mut self, pipeline: &Resource) {}

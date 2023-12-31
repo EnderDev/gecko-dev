@@ -226,6 +226,10 @@ class ChromeUtils {
                                     JS::Handle<JSObject*> modules,
                                     ErrorResult& aRv);
 
+#ifdef XP_UNIX
+  static void GetLibcConstants(const GlobalObject&, LibcConstants& aConsts);
+#endif
+
   static void GetCallerLocation(const GlobalObject& global,
                                 nsIPrincipal* principal,
                                 JS::MutableHandle<JSObject*> aRetval);
@@ -300,8 +304,9 @@ class ChromeUtils {
   static void GetAllPossibleUtilityActorNames(GlobalObject& aGlobal,
                                               nsTArray<nsCString>& aNames);
 
-  static bool ShouldResistFingerprinting(GlobalObject& aGlobal,
-                                         JSRFPTarget aTarget);
+  static bool ShouldResistFingerprinting(
+      GlobalObject& aGlobal, JSRFPTarget aTarget,
+      const Nullable<uint64_t>& aOverriddenFingerprintingSettings);
 
  private:
   // Number of DevTools session debugging the current process

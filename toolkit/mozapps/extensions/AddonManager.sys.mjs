@@ -36,6 +36,7 @@ const PREF_EM_STRICT_COMPATIBILITY = "extensions.strictCompatibility";
 const PREF_EM_CHECK_UPDATE_SECURITY = "extensions.checkUpdateSecurity";
 const PREF_SYS_ADDON_UPDATE_ENABLED = "extensions.systemAddon.update.enabled";
 const PREF_REMOTESETTINGS_DISABLED = "extensions.remoteSettings.disabled";
+const PREF_USE_REMOTE = "extensions.webextensions.remote";
 
 const PREF_MIN_WEBEXT_PLATFORM_VERSION =
   "extensions.webExtensionsMinPlatformVersion";
@@ -786,6 +787,14 @@ var AddonManagerInternal = {
       );
     }
 
+    Glean.extensions.useRemotePolicy.set(
+      WebExtensionPolicy.useRemoteWebExtensions
+    );
+    Glean.extensions.useRemotePref.set(
+      Services.prefs.getBoolPref(PREF_USE_REMOTE)
+    );
+    Services.prefs.addObserver(PREF_USE_REMOTE, this);
+
     logger.debug("Completed startup sequence");
     this.callManagerListeners("onStartup");
   },
@@ -1138,6 +1147,12 @@ var AddonManagerInternal = {
         } else {
           AMRemoteSettings.init();
         }
+        break;
+      }
+      case PREF_USE_REMOTE: {
+        Glean.extensions.useRemotePref.set(
+          Services.prefs.getBoolPref(PREF_USE_REMOTE)
+        );
         break;
       }
     }
@@ -2371,18 +2386,10 @@ var AddonManagerInternal = {
 
     // When a chrome in-content UI has loaded a <browser> inside to host a
     // website we want to do our security checks on the inner-browser but
-    // notify front-end that install events came from the outer-browser (the
-    // main tab's browser). Check this by seeing if the browser we've been
-    // passed is in a content type docshell and if so get the outer-browser.
-    let topBrowser = aBrowser;
-    // GeckoView does not pass a browser.
-    if (aBrowser) {
-      let docShell = aBrowser.ownerGlobal.docShell;
-      if (docShell.itemType == Ci.nsIDocShellTreeItem.typeContent) {
-        topBrowser = docShell.chromeEventHandler;
-      }
-    }
-
+    // notify front-end that install events came from the top browser (the
+    // main tab's browser).
+    // aBrowser is null in GeckoView.
+    let topBrowser = aBrowser?.browsingContext.top.embedderElement;
     try {
       // Use fullscreenElement to check for DOM fullscreen, while still allowing
       // macOS fullscreen, which still has a browser chrome.
@@ -4038,6 +4045,10 @@ export var AddonManager = {
     ["ERROR_INVALID_DOMAIN", -8],
     // Updates only: The downloaded add-on had a different version than expected.
     ["ERROR_UNEXPECTED_ADDON_VERSION", -9],
+    // The add-on is blocklisted.
+    ["ERROR_BLOCKLISTED", -10],
+    // The add-on is incompatible (w.r.t. the compatibility range).
+    ["ERROR_INCOMPATIBLE", -11],
   ]),
   // The update check timed out
   ERROR_TIMEOUT: -1,
@@ -4657,6 +4668,12 @@ AMRemoteSettings = {
           default:
             throw new Error(`Unexpected type ${typeof prefValue}`);
         }
+
+        // Notify observers about the pref set from AMRemoteSettings.
+        Services.obs.notifyObservers(
+          { entryId, groupName, prefName, prefValue },
+          "am-remote-settings-setpref"
+        );
       } catch (e) {
         logger.error(
           `Failed to process AddonManager RemoteSettings "${entryId}" - "${groupName}": ${prefName}`,
@@ -5038,6 +5055,17 @@ AMTelemetry = {
     }
 
     this.recordEvent({ method, object, value: install.hashedAddonId, extra });
+    Glean.addonsManager.installStats.record(
+      this.formatExtraVars({
+        addon_id: extra.addon_id,
+        addon_type: object,
+        taar_based: extra.taar_based,
+        utm_campaign: extra.utm_campaign,
+        utm_content: extra.utm_content,
+        utm_medium: extra.utm_medium,
+        utm_source: extra.utm_source,
+      })
+    );
   },
 
   /**
@@ -5140,6 +5168,21 @@ AMTelemetry = {
     extra = this.formatExtraVars({ ...extraVars, ...extra });
 
     this.recordEvent({ method: eventMethod, object, value: installId, extra });
+    Glean.addonsManager[eventMethod]?.record(
+      this.formatExtraVars({
+        addon_id: extra.addon_id,
+        addon_type: object,
+        install_id: installId,
+        download_time: extra.download_time,
+        error: extra.error,
+        source: extra.source,
+        source_method: extra.method,
+        num_strings: extra.num_strings,
+        updated_from: extra.updated_from,
+        install_origins: extra.install_origins,
+        step: extra.step,
+      })
+    );
   },
 
   /**
@@ -5193,6 +5236,16 @@ AMTelemetry = {
       value,
       extra: hasExtraVars ? extra : null,
     });
+    Glean.addonsManager.manage.record(
+      this.formatExtraVars({
+        method,
+        addon_id: value,
+        addon_type: object,
+        source: extra.source,
+        source_method: extra.method,
+        num_strings: extra.num_strings,
+      })
+    );
   },
 
   /**
@@ -5219,6 +5272,31 @@ AMTelemetry = {
         error_type: errorType,
       }),
     });
+    Glean.addonsManager.report.record(
+      this.formatExtraVars({
+        addon_id: addonId,
+        addon_type: addonType,
+        entry_point: reportEntryPoint,
+        error_type: errorType,
+      })
+    );
+  },
+
+  /**
+   * @params {object} opts
+   * @params {nsIURI} opts.displayURI
+   */
+  recordSuspiciousSiteEvent({ displayURI }) {
+    let site = displayURI?.displayHost ?? "(unknown)";
+    this.recordEvent({
+      method: "reportSuspiciousSite",
+      object: "suspiciousSite",
+      value: site,
+      extra: {},
+    });
+    Glean.addonsManager.reportSuspiciousSite.record(
+      this.formatExtraVars({ suspiciousSite: site })
+    );
   },
 
   recordEvent({ method, object, value, extra }) {
@@ -5308,10 +5386,17 @@ AMBrowserExtensionsImport = {
     // might not have as many mapped add-ons as extension IDs because not all
     // browser extensions will be mapped to Firefox add-ons.
     try {
-      importedAddons = await this.addonRepository.getMappedAddons(
-        browserId,
-        extensionIDs
-      );
+      let matchedIDs = [];
+      let unmatchedIDs = [];
+
+      ({
+        addons: importedAddons,
+        matchedIDs,
+        unmatchedIDs,
+      } = await this.addonRepository.getMappedAddons(browserId, extensionIDs));
+
+      Glean.browserMigration.matchedExtensions.set(matchedIDs);
+      Glean.browserMigration.unmatchedExtensions.set(unmatchedIDs);
     } catch (err) {
       Cu.reportError(err);
     }

@@ -180,7 +180,7 @@ static void DiscardFramesFromTail(MediaQueue<Type>& aQueue,
 // decoding is suspended.
 static TimeDuration SuspendBackgroundVideoDelay() {
   return TimeDuration::FromMilliseconds(
-      StaticPrefs::media_suspend_bkgnd_video_delay_ms());
+      StaticPrefs::media_suspend_background_video_delay_ms());
 }
 
 class MediaDecoderStateMachine::StateObject {
@@ -855,6 +855,10 @@ class MediaDecoderStateMachine::LoopingDecodingState
         mAudioEndedBeforeEnteringStateWithoutDuration(false),
         mVideoEndedBeforeEnteringStateWithoutDuration(false) {
     MOZ_ASSERT(mMaster->mLooping);
+    SLOG(
+        "LoopingDecodingState ctor, mIsReachingAudioEOS=%d, "
+        "mIsReachingVideoEOS=%d",
+        mIsReachingAudioEOS, mIsReachingVideoEOS);
     // If the track has reached EOS and we already have its last data, then we
     // can know its duration. But if playback starts from EOS (due to seeking),
     // the decoded end time would be zero because none of data gets decoded yet.
@@ -863,8 +867,10 @@ class MediaDecoderStateMachine::LoopingDecodingState
           !mMaster->mAudioTrackDecodedDuration) {
         mMaster->mAudioTrackDecodedDuration.emplace(
             mMaster->mDecodedAudioEndTime);
+        SLOG("determine mAudioTrackDecodedDuration");
       } else {
         mAudioEndedBeforeEnteringStateWithoutDuration = true;
+        SLOG("still don't know mAudioTrackDecodedDuration");
       }
     }
 
@@ -873,14 +879,21 @@ class MediaDecoderStateMachine::LoopingDecodingState
           !mMaster->mVideoTrackDecodedDuration) {
         mMaster->mVideoTrackDecodedDuration.emplace(
             mMaster->mDecodedVideoEndTime);
+        SLOG("determine mVideoTrackDecodedDuration");
       } else {
         mVideoEndedBeforeEnteringStateWithoutDuration = true;
+        SLOG("still don't know mVideoTrackDecodedDuration");
       }
     }
 
-    // If we've looped at least once before, the master's media queues have
-    // already stored some adjusted data. If a track has reached EOS, we need to
-    // update queue offset correctly. Otherwise, it would cause a/v unsync.
+    // We might be able to determine the duration already, let's check.
+    if (mIsReachingAudioEOS || mIsReachingVideoEOS) {
+      Unused << DetermineOriginalDecodedDurationIfNeeded();
+    }
+
+    // If we've looped at least once before, then we need to update queue offset
+    // correctly to make the media data time and the clock time consistent.
+    // Otherwise, it would cause a/v desync.
     if (mMaster->mOriginalDecodedDuration != media::TimeUnit::Zero()) {
       if (mIsReachingAudioEOS && mMaster->HasAudio()) {
         AudioQueue().SetOffset(AudioQueue().GetOffset() +
@@ -894,7 +907,6 @@ class MediaDecoderStateMachine::LoopingDecodingState
   }
 
   void Enter() {
-    UpdatePlaybackPositionToZeroIfNeeded();
     if (mMaster->HasAudio() && mIsReachingAudioEOS) {
       SLOG("audio has ended, request the data again.");
       RequestDataFromStartPosition(TrackInfo::TrackType::kAudioTrack);
@@ -944,10 +956,6 @@ class MediaDecoderStateMachine::LoopingDecodingState
       VideoQueue().Finish();
     }
 
-    if (mWaitingAudioDataFromStart) {
-      mMaster->mMediaSink->EnableTreatAudioUnderrunAsSilence(false);
-    }
-
     // Clear waiting data should be done after marking queue as finished.
     mDataWaitingTimestampAdjustment = nullptr;
 
@@ -970,11 +978,6 @@ class MediaDecoderStateMachine::LoopingDecodingState
   void HandleAudioDecoded(AudioData* aAudio) override {
     // TODO : check if we need to update mOriginalDecodedDuration
 
-    if (mWaitingAudioDataFromStart) {
-      mMaster->mMediaSink->EnableTreatAudioUnderrunAsSilence(false);
-      mWaitingAudioDataFromStart = false;
-    }
-
     // After pushing data to the queue, timestamp might be adjusted.
     DecodingState::HandleAudioDecoded(aAudio);
     mMaster->mDecodedAudioEndTime =
@@ -985,6 +988,39 @@ class MediaDecoderStateMachine::LoopingDecodingState
 
   void HandleVideoDecoded(VideoData* aVideo) override {
     // TODO : check if we need to update mOriginalDecodedDuration
+
+    // Here sample still keeps its original timestamp.
+
+    // This indicates there is a shorter audio track, and it's the first time in
+    // the looping (audio ends but video is playing) so that we haven't been
+    // able to determine the decoded duration. Therefore, we fill the gap
+    // between two tracks before video ends. Afterward, this adjustment will be
+    // done in `HandleEndOfAudio()`.
+    if (mMaster->mOriginalDecodedDuration == media::TimeUnit::Zero() &&
+        mMaster->mAudioTrackDecodedDuration &&
+        aVideo->GetEndTime() > *mMaster->mAudioTrackDecodedDuration) {
+      media::TimeUnit gap;
+      // First time we fill gap between the video frame to the last audio.
+      if (auto prevVideo = VideoQueue().PeekBack();
+          prevVideo &&
+          prevVideo->GetEndTime() < *mMaster->mAudioTrackDecodedDuration) {
+        gap =
+            aVideo->GetEndTime().ToBase(*mMaster->mAudioTrackDecodedDuration) -
+            *mMaster->mAudioTrackDecodedDuration;
+      }
+      // Then fill the gap for all following videos.
+      else {
+        gap = aVideo->mDuration.ToBase(*mMaster->mAudioTrackDecodedDuration);
+      }
+      SLOG("Longer video %" PRId64 "%s (audio-durtaion=%" PRId64
+           "%s), insert silence to fill the gap %" PRId64 "%s",
+           aVideo->GetEndTime().ToMicroseconds(),
+           aVideo->GetEndTime().ToString().get(),
+           mMaster->mAudioTrackDecodedDuration->ToMicroseconds(),
+           mMaster->mAudioTrackDecodedDuration->ToString().get(),
+           gap.ToMicroseconds(), gap.ToString().get());
+      PushFakeAudioDataIfNeeded(gap);
+    }
 
     // After pushing data to the queue, timestamp might be adjusted.
     DecodingState::HandleVideoDecoded(aVideo);
@@ -1004,6 +1040,30 @@ class MediaDecoderStateMachine::LoopingDecodingState
     if (DetermineOriginalDecodedDurationIfNeeded()) {
       AudioQueue().SetOffset(AudioQueue().GetOffset() +
                              mMaster->mOriginalDecodedDuration);
+    }
+
+    // This indicates that the audio track is shorter than the video track, so
+    // we need to add some silence to fill the gap.
+    if (mMaster->mAudioTrackDecodedDuration &&
+        mMaster->mOriginalDecodedDuration >
+            *mMaster->mAudioTrackDecodedDuration) {
+      MOZ_ASSERT(mMaster->HasVideo());
+      MOZ_ASSERT(mMaster->mVideoTrackDecodedDuration);
+      MOZ_ASSERT(mMaster->mOriginalDecodedDuration ==
+                 *mMaster->mVideoTrackDecodedDuration);
+      auto gap = mMaster->mOriginalDecodedDuration.ToBase(
+                     *mMaster->mAudioTrackDecodedDuration) -
+                 *mMaster->mAudioTrackDecodedDuration;
+      SLOG(
+          "Audio track is shorter than the original decoded duration "
+          "(a=%" PRId64 "%s, t=%" PRId64
+          "%s), insert silence to fill the gap %" PRId64 "%s",
+          mMaster->mAudioTrackDecodedDuration->ToMicroseconds(),
+          mMaster->mAudioTrackDecodedDuration->ToString().get(),
+          mMaster->mOriginalDecodedDuration.ToMicroseconds(),
+          mMaster->mOriginalDecodedDuration.ToString().get(),
+          gap.ToMicroseconds(), gap.ToString().get());
+      PushFakeAudioDataIfNeeded(gap);
     }
 
     SLOG(
@@ -1238,40 +1298,22 @@ class MediaDecoderStateMachine::LoopingDecodingState
         ->Track(mVideoDataRequest);
   }
 
-  void UpdatePlaybackPositionToZeroIfNeeded() {
-    // Hasn't reached EOS, no need to adjust playback position.
-    if (!mIsReachingAudioEOS || !mIsReachingVideoEOS) {
-      return;
-    }
-
-    // If we have already reached EOS before starting media sink, the sink
-    // has not started yet and the current position is larger than last decoded
-    // end time, that means we directly seeked to EOS and playback would start
-    // from the start position soon. Therefore, we should reset the position to
-    // 0s so that when media sink starts we can make it start from 0s, not from
-    // EOS position which would result in wrong estimation of decoded audio
-    // duration because decoded data's time which can't be adjusted as offset is
-    // zero would be always less than media sink time.
-    if (!mMaster->mMediaSink->IsStarted() &&
-        (mMaster->mCurrentPosition.Ref() > mMaster->mDecodedAudioEndTime ||
-         mMaster->mCurrentPosition.Ref() > mMaster->mDecodedVideoEndTime)) {
-      mMaster->UpdatePlaybackPositionInternal(TimeUnit::Zero());
-    }
-  }
-
   void HandleError(const MediaResult& aError, bool aIsAudio);
 
   bool ShouldRequestData(MediaData::Type aType) const {
     MOZ_DIAGNOSTIC_ASSERT(aType == MediaData::Type::AUDIO_DATA ||
                           aType == MediaData::Type::VIDEO_DATA);
+
     if (aType == MediaData::Type::AUDIO_DATA &&
         (mAudioSeekRequest.Exists() || mAudioDataRequest.Exists() ||
-         IsDataWaitingForTimestampAdjustment(MediaData::Type::AUDIO_DATA))) {
+         IsDataWaitingForTimestampAdjustment(MediaData::Type::AUDIO_DATA) ||
+         mMaster->IsWaitingAudioData())) {
       return false;
     }
     if (aType == MediaData::Type::VIDEO_DATA &&
         (mVideoSeekRequest.Exists() || mVideoDataRequest.Exists() ||
-         IsDataWaitingForTimestampAdjustment(MediaData::Type::VIDEO_DATA))) {
+         IsDataWaitingForTimestampAdjustment(MediaData::Type::VIDEO_DATA) ||
+         mMaster->IsWaitingVideoData())) {
       return false;
     }
     return true;
@@ -1507,6 +1549,59 @@ class MediaDecoderStateMachine::LoopingDecodingState
     }
   }
 
+  void PushFakeAudioDataIfNeeded(const media::TimeUnit& aDuration) {
+    MOZ_ASSERT(Info().HasAudio());
+
+    const auto& audioInfo = Info().mAudio;
+    CheckedInt64 frames = aDuration.ToTicksAtRate(audioInfo.mRate);
+    if (!frames.isValid() || !audioInfo.mChannels || !audioInfo.mRate) {
+      NS_WARNING("Can't create fake audio, invalid frames/channel/rate?");
+      return;
+    }
+
+    if (!frames.value()) {
+      NS_WARNING(nsPrintfCString("Duration (%s) too short, no frame needed",
+                                 aDuration.ToString().get())
+                     .get());
+      return;
+    }
+
+    // If we can get the last sample, use its frame. Otherwise, use common 1024.
+    int64_t typicalPacketFrameCount = 1024;
+    if (RefPtr<AudioData> audio = AudioQueue().PeekBack()) {
+      typicalPacketFrameCount = audio->Frames();
+    }
+
+    media::TimeUnit totalDuration = TimeUnit::Zero(audioInfo.mRate);
+    // Generate fake audio in a smaller size of audio chunk.
+    while (frames.value()) {
+      int64_t packetFrameCount =
+          std::min(frames.value(), typicalPacketFrameCount);
+      frames -= packetFrameCount;
+      AlignedAudioBuffer samples(packetFrameCount * audioInfo.mChannels);
+      if (!samples) {
+        NS_WARNING("Can't create audio buffer, OOM?");
+        return;
+      }
+      // `mDecodedAudioEndTime` is adjusted time, and we want unadjusted time
+      // otherwise the time would be adjusted twice when pushing sample into the
+      // media queue.
+      media::TimeUnit startTime = mMaster->mDecodedAudioEndTime;
+      if (AudioQueue().GetOffset() != media::TimeUnit::Zero()) {
+        startTime -= AudioQueue().GetOffset();
+      }
+      RefPtr<AudioData> data(new AudioData(0, startTime, std::move(samples),
+                                           audioInfo.mChannels,
+                                           audioInfo.mRate));
+      SLOG("Created fake audio data (duration=%s, frame-left=%" PRId64 ")",
+           data->mDuration.ToString().get(), frames.value());
+      totalDuration += data->mDuration;
+      HandleAudioDecoded(data);
+    }
+    SLOG("Pushed fake silence audio data in total duration=%" PRId64 "%s",
+         totalDuration.ToMicroseconds(), totalDuration.ToString().get());
+  }
+
   bool HasDecodedLastAudioFrame() const {
     // when we're going to leave looping state and have got EOS before, we
     // should mark audio queue as ended because we have got all data we need.
@@ -1615,12 +1710,6 @@ class MediaDecoderStateMachine::LoopingDecodingState
   // determined.
   bool mAudioEndedBeforeEnteringStateWithoutDuration;
   bool mVideoEndedBeforeEnteringStateWithoutDuration;
-
-  // True if the audio has reached EOS, but the data from the start position is
-  // not avalible yet. We use this to determine whether we should enable
-  // appending silence audio frames into audio backend while audio underrun in
-  // order to keep audio clock running.
-  bool mWaitingAudioDataFromStart = false;
 };
 
 /**
@@ -2012,7 +2101,8 @@ class MediaDecoderStateMachine::AccurateSeekingState
     }
 
     bool ok = aAudio->SetTrimWindow(
-        {mSeekJob.mTarget->GetTime(), aAudio->GetEndTime()});
+        {mSeekJob.mTarget->GetTime().ToBase(aAudio->mTime),
+         aAudio->GetEndTime()});
     if (!ok) {
       return NS_ERROR_DOM_MEDIA_OVERFLOW_ERR;
     }
@@ -3164,17 +3254,6 @@ void MediaDecoderStateMachine::LoopingDecodingState::HandleError(
     case NS_ERROR_DOM_MEDIA_WAITING_FOR_DATA:
       if (aIsAudio) {
         HandleWaitingForAudio();
-        // Now we won't be able to get new audio from the start position.
-        // This could happen for MSE, because data for the start hasn't been
-        // appended yet. If we can get the data before all queued audio has been
-        // consumed, then nothing special would happen. If not, then the audio
-        // underrun would happen and the audio clock stalls, which means video
-        // playback would also stall. Therefore, in this special situation, we
-        // can treat those audio underrun as silent frames in order to keep
-        // driving the clock. But we would cancel this behavior once the new
-        // audio data comes, or we fallback to the non-seamless looping.
-        mWaitingAudioDataFromStart = true;
-        mMaster->mMediaSink->EnableTreatAudioUnderrunAsSilence(true);
       } else {
         HandleWaitingForVideo();
       }
@@ -3661,7 +3740,9 @@ void MediaDecoderStateMachine::UpdatePlaybackPositionInternal(
   MOZ_ASSERT(OnTaskQueue());
   LOGV("UpdatePlaybackPositionInternal(%" PRId64 ")", aTime.ToMicroseconds());
 
-  mCurrentPosition = aTime;
+  // Ensure the position has a precision that matches other TimeUnit such as
+  // buffering ranges and duration.
+  mCurrentPosition = aTime.ToBase(1000000);
   NS_ASSERTION(mCurrentPosition.Ref() >= TimeUnit::Zero(),
                "CurrentTime should be positive!");
   if (mDuration.Ref().ref() < mCurrentPosition.Ref()) {
@@ -3770,7 +3851,7 @@ void MediaDecoderStateMachine::SetVideoDecodeModeInternal(
       mVideoDecodeSuspended ? 'T' : 'F');
 
   // Should not suspend decoding if we don't turn on the pref.
-  if (!StaticPrefs::media_suspend_bkgnd_video_enabled() &&
+  if (!StaticPrefs::media_suspend_background_video_enabled() &&
       aMode == VideoDecodeMode::Suspend) {
     LOG("SetVideoDecodeModeInternal(), early return because preference off and "
         "set to Suspend");
@@ -4049,7 +4130,9 @@ nsresult MediaDecoderStateMachine::StartMediaSink() {
   }
 
   mAudioCompleted = false;
-  nsresult rv = mMediaSink->Start(GetMediaTime(), Info());
+  const auto startTime = GetMediaTime();
+  LOG("StartMediaSink, mediaTime=%" PRId64, startTime.ToMicroseconds());
+  nsresult rv = mMediaSink->Start(startTime, Info());
   StreamNameChanged();
 
   auto videoPromise = mMediaSink->OnEnded(TrackInfo::kVideoTrack);

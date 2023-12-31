@@ -221,6 +221,8 @@ add_setup(async function () {
       // Disable the telemetry client ID (and its associated UI warning).
       // browser_html_discover_view_clientid.js covers this functionality.
       ["browser.discovery.enabled", false],
+      // Disable mixed-content upgrading as this test is expecting an HTTP load
+      ["security.mixed_content.upgrade_display_content", false],
     ],
   });
 });
@@ -641,21 +643,25 @@ add_task(async function checkDiscopaneNotice() {
       ["datareporting.healthreport.uploadEnabled", true],
       ["extensions.htmlaboutaddons.recommendations.enabled", true],
       ["extensions.recommendations.hideNotice", false],
+      // Disable mixed-content upgrading as this test is expecting an HTTP load
+      ["security.mixed_content.upgrade_display_content", false],
     ],
   });
 
   let win = await loadInitialView("extension");
-  let messageBar = win.document.querySelector("message-bar.discopane-notice");
+  let messageBar = win.document.querySelector(
+    "moz-message-bar.discopane-notice"
+  );
   ok(messageBar, "Recommended notice should exist in extensions view");
   await switchToDiscoView(win);
-  messageBar = win.document.querySelector("message-bar.discopane-notice");
+  messageBar = win.document.querySelector("moz-message-bar.discopane-notice");
   ok(messageBar, "Recommended notice should exist in disco view");
 
-  messageBar.closeButton.click();
-  messageBar = win.document.querySelector("message-bar.discopane-notice");
+  messageBar.closeButtonEl.click();
+  messageBar = win.document.querySelector("moz-message-bar.discopane-notice");
   ok(!messageBar, "Recommended notice should not exist in disco view");
   await switchToNonDiscoView(win);
-  messageBar = win.document.querySelector("message-bar.discopane-notice");
+  messageBar = win.document.querySelector("moz-message-bar.discopane-notice");
   ok(!messageBar, "Recommended notice should not exist in extensions view");
 
   await closeView(win);

@@ -68,6 +68,7 @@ class ChildSHistory;
 class ContentParent;
 class Element;
 struct LoadingSessionHistoryInfo;
+class Location;
 template <typename>
 struct Nullable;
 template <typename T>
@@ -266,7 +267,9 @@ struct EmbedderColorSchemes {
    * a content process. */                                                    \
   FIELD(EmbeddedInContentDocument, bool)                                      \
   /* If true, this browsing context is within a hidden embedded document. */  \
-  FIELD(IsUnderHiddenEmbedderElement, bool)
+  FIELD(IsUnderHiddenEmbedderElement, bool)                                   \
+  /* If true, this browsing context is offline */                             \
+  FIELD(ForceOffline, bool)
 
 // BrowsingContext, in this context, is the cross process replicated
 // environment in which information about documents is stored. In
@@ -485,13 +488,7 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
     }
     return nullptr;
   }
-  void SetOpener(BrowsingContext* aOpener) {
-    MOZ_DIAGNOSTIC_ASSERT(!aOpener || aOpener->Group() == Group());
-    MOZ_DIAGNOSTIC_ASSERT(!aOpener || aOpener->mType == mType);
-
-    MOZ_ALWAYS_SUCCEEDS(SetOpenerId(aOpener ? aOpener->Id() : 0));
-  }
-
+  void SetOpener(BrowsingContext* aOpener);
   bool HasOpener() const;
 
   bool HadOriginalOpener() const { return GetHadOriginalOpener(); }
@@ -615,6 +612,8 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
                                 : ExplicitActiveStatus::Inactive,
                       aRv);
   }
+
+  bool ForceOffline() const { return GetForceOffline(); }
 
   bool ForceDesktopViewport() const { return GetForceDesktopViewport(); }
 
@@ -948,6 +947,9 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
     return GetIsUnderHiddenEmbedderElement();
   }
 
+  void LocationCreated(dom::Location* aLocation);
+  void ClearCachedValuesOfLocations();
+
  protected:
   virtual ~BrowsingContext();
   BrowsingContext(WindowContext* aParentWindow, BrowsingContextGroup* aGroup,
@@ -1023,7 +1025,7 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
           uintptr_t(this) - offsetof(BrowsingContext, mLocation));
     }
 
-    already_AddRefed<nsIDocShell> GetDocShell() override { return nullptr; }
+    nsIDocShell* GetDocShell() override { return nullptr; }
   };
 
   // Send a given `BaseTransaction` object to the correct remote.
@@ -1231,6 +1233,9 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
               const bool& aIsUnderHiddenEmbedderElement,
               ContentParent* aSource);
 
+  bool CanSet(FieldIndex<IDX_ForceOffline>, bool aNewValue,
+              ContentParent* aSource);
+
   bool CanSet(FieldIndex<IDX_EmbeddedInContentDocument>, bool,
               ContentParent* aSource) {
     return CheckOnlyEmbedderCanSet(aSource);
@@ -1406,6 +1411,8 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
   // Used by CheckLocationChangeRateLimit. Do not apply cross-process.
   uint32_t mLocationChangeRateLimitCount;
   mozilla::TimeStamp mLocationChangeRateLimitSpanStart;
+
+  mozilla::LinkedList<dom::Location> mLocations;
 };
 
 /**
@@ -1419,7 +1426,8 @@ class BrowsingContext : public nsILoadContext, public nsWrapperCache {
  *
  * If aTransplantTo is non-null, then the WindowProxy object will eventually be
  * transplanted onto it. Therefore it should be used as the value in the remote
- * proxy map.
+ * proxy map. We assume that in this case the failure is unrecoverable, so we
+ * crash immediately rather than return false.
  */
 extern bool GetRemoteOuterWindowProxy(JSContext* aCx, BrowsingContext* aContext,
                                       JS::Handle<JSObject*> aTransplantTo,

@@ -201,6 +201,9 @@ class CallCompileState {
   // nullptr if no stack results.
   MWasmStackResultArea* stackResultArea_ = nullptr;
 
+  // Indicates that the call is a return/tail call.
+  bool returnCall = false;
+
   // Only FunctionCompiler should be directly manipulating CallCompileState.
   friend class FunctionCompiler;
 };
@@ -836,21 +839,21 @@ class FunctionCompiler {
     curBlock_->setSlot(info().localSlot(slot), def);
   }
 
-  MDefinition* compareIsNull(MDefinition* value, JSOp compareOp) {
+  MDefinition* compareIsNull(MDefinition* ref, JSOp compareOp) {
     MDefinition* nullVal = constantNullRef();
     if (!nullVal) {
       return nullptr;
     }
-    return compare(value, nullVal, compareOp, MCompare::Compare_RefOrNull);
+    return compare(ref, nullVal, compareOp, MCompare::Compare_WasmAnyRef);
   }
 
-  [[nodiscard]] bool refAsNonNull(MDefinition* value) {
+  [[nodiscard]] bool refAsNonNull(MDefinition* ref) {
     if (inDeadCode()) {
       return true;
     }
 
     auto* ins = MWasmTrapIfNull::New(
-        alloc(), value, wasm::Trap::NullPointerDereference, bytecodeOffset());
+        alloc(), ref, wasm::Trap::NullPointerDereference, bytecodeOffset());
 
     curBlock_->add(ins);
     return true;
@@ -920,6 +923,20 @@ class FunctionCompiler {
   }
 
 #endif  // ENABLE_WASM_FUNCTION_REFERENCES
+
+#ifdef ENABLE_WASM_GC
+  MDefinition* refI31(MDefinition* input) {
+    auto* ins = MWasmNewI31Ref::New(alloc(), input);
+    curBlock_->add(ins);
+    return ins;
+  }
+
+  MDefinition* i31Get(MDefinition* input, FieldWideningOp wideningOp) {
+    auto* ins = MWasmI31RefGet::New(alloc(), input, wideningOp);
+    curBlock_->add(ins);
+    return ins;
+  }
+#endif  // ENABLE_WASM_GC
 
 #ifdef ENABLE_WASM_SIMD
   // About Wasm SIMD as supported by Ion:
@@ -1071,29 +1088,37 @@ class FunctionCompiler {
  private:
   // If the platform does not have a HeapReg, load the memory base from
   // instance.
-  MWasmLoadInstance* maybeLoadMemoryBase() {
-    MWasmLoadInstance* load = nullptr;
-#ifdef JS_CODEGEN_X86
-    AliasSet aliases = !moduleEnv_.memory->canMovingGrow()
-                           ? AliasSet::None()
-                           : AliasSet::Load(AliasSet::WasmHeapMeta);
-    load = MWasmLoadInstance::New(alloc(), instancePointer_,
-                                  wasm::Instance::offsetOfMemoryBase(),
-                                  MIRType::Pointer, aliases);
-    curBlock_->add(load);
+  MDefinition* maybeLoadMemoryBase(uint32_t memoryIndex) {
+#ifdef WASM_HAS_HEAPREG
+    if (memoryIndex == 0) {
+      return nullptr;
+    }
 #endif
-    return load;
+    return memoryBase(memoryIndex);
   }
 
  public:
   // A value holding the memory base, whether that's HeapReg or some other
   // register.
-  MWasmHeapBase* memoryBase() {
-    MWasmHeapBase* base = nullptr;
-    AliasSet aliases = !moduleEnv_.memory->canMovingGrow()
+  MDefinition* memoryBase(uint32_t memoryIndex) {
+    AliasSet aliases = !moduleEnv_.memories[memoryIndex].canMovingGrow()
                            ? AliasSet::None()
                            : AliasSet::Load(AliasSet::WasmHeapMeta);
-    base = MWasmHeapBase::New(alloc(), instancePointer_, aliases);
+#ifdef WASM_HAS_HEAPREG
+    if (memoryIndex == 0) {
+      MWasmHeapReg* base = MWasmHeapReg::New(alloc(), aliases);
+      curBlock_->add(base);
+      return base;
+    }
+#endif
+    uint32_t offset =
+        memoryIndex == 0
+            ? Instance::offsetOfMemory0Base()
+            : (Instance::offsetInData(
+                  moduleEnv_.offsetOfMemoryInstanceData(memoryIndex) +
+                  offsetof(MemoryInstanceData, base)));
+    MWasmLoadInstance* base = MWasmLoadInstance::New(
+        alloc(), instancePointer_, offset, MIRType::Pointer, aliases);
     curBlock_->add(base);
     return base;
   }
@@ -1101,17 +1126,23 @@ class FunctionCompiler {
  private:
   // If the bounds checking strategy requires it, load the bounds check limit
   // from the instance.
-  MWasmLoadInstance* maybeLoadBoundsCheckLimit(MIRType type) {
+  MWasmLoadInstance* maybeLoadBoundsCheckLimit(uint32_t memoryIndex,
+                                               MIRType type) {
     MOZ_ASSERT(type == MIRType::Int32 || type == MIRType::Int64);
-    if (moduleEnv_.hugeMemoryEnabled()) {
+    if (moduleEnv_.hugeMemoryEnabled(memoryIndex)) {
       return nullptr;
     }
-    AliasSet aliases = !moduleEnv_.memory->canMovingGrow()
+    uint32_t offset =
+        memoryIndex == 0
+            ? Instance::offsetOfMemory0BoundsCheckLimit()
+            : (Instance::offsetInData(
+                  moduleEnv_.offsetOfMemoryInstanceData(memoryIndex) +
+                  offsetof(MemoryInstanceData, boundsCheckLimit)));
+    AliasSet aliases = !moduleEnv_.memories[memoryIndex].canMovingGrow()
                            ? AliasSet::None()
                            : AliasSet::Load(AliasSet::WasmHeapMeta);
-    auto* load = MWasmLoadInstance::New(
-        alloc(), instancePointer_, wasm::Instance::offsetOfBoundsCheckLimit(),
-        type, aliases);
+    auto* load = MWasmLoadInstance::New(alloc(), instancePointer_, offset, type,
+                                        aliases);
     curBlock_->add(load);
     return load;
   }
@@ -1133,7 +1164,7 @@ class FunctionCompiler {
       // We only care about the low bits, so overflow is OK, as is chopping off
       // the high bits of an i64 pointer.
       uint32_t ptr = 0;
-      if (isMem64()) {
+      if (isMem64(access->memoryIndex())) {
         ptr = uint32_t(base->toConstant()->toInt64());
       } else {
         ptr = base->toConstant()->toInt32();
@@ -1154,12 +1185,12 @@ class FunctionCompiler {
   // the offset rather than vice versa is that a small offset can be ignored
   // by both explicit bounds checking and bounds check elimination.
   void foldConstantPointer(MemoryAccessDesc* access, MDefinition** base) {
-    uint32_t offsetGuardLimit =
-        GetMaxOffsetGuardLimit(moduleEnv_.hugeMemoryEnabled());
+    uint32_t offsetGuardLimit = GetMaxOffsetGuardLimit(
+        moduleEnv_.hugeMemoryEnabled(access->memoryIndex()));
 
     if ((*base)->isConstant()) {
       uint64_t basePtr = 0;
-      if (isMem64()) {
+      if (isMem64(access->memoryIndex())) {
         basePtr = uint64_t((*base)->toConstant()->toInt64());
       } else {
         basePtr = uint64_t(int64_t((*base)->toConstant()->toInt32()));
@@ -1170,7 +1201,8 @@ class FunctionCompiler {
       if (offset < offsetGuardLimit && basePtr < offsetGuardLimit - offset) {
         offset += uint32_t(basePtr);
         access->setOffset32(uint32_t(offset));
-        *base = isMem64() ? constantI64(int64_t(0)) : constantI32(0);
+        *base = isMem64(access->memoryIndex()) ? constantI64(int64_t(0))
+                                               : constantI32(0);
       }
     }
   }
@@ -1179,8 +1211,8 @@ class FunctionCompiler {
   // be checked, compute the effective address, trapping on overflow.
   void maybeComputeEffectiveAddress(MemoryAccessDesc* access,
                                     MDefinition** base, bool mustAddOffset) {
-    uint32_t offsetGuardLimit =
-        GetMaxOffsetGuardLimit(moduleEnv_.hugeMemoryEnabled());
+    uint32_t offsetGuardLimit = GetMaxOffsetGuardLimit(
+        moduleEnv_.hugeMemoryEnabled(access->memoryIndex()));
 
     if (access->offset64() >= offsetGuardLimit ||
         access->offset64() > UINT32_MAX || mustAddOffset ||
@@ -1189,7 +1221,7 @@ class FunctionCompiler {
     }
   }
 
-  MWasmLoadInstance* needBoundsCheck() {
+  MWasmLoadInstance* needBoundsCheck(uint32_t memoryIndex) {
 #ifdef JS_64BIT
     // For 32-bit base pointers:
     //
@@ -1201,20 +1233,23 @@ class FunctionCompiler {
     // If the memory's max size is known to be smaller than 64K pages exactly,
     // we can use a 32-bit check and avoid extension and wrapping.
     static_assert(0x100000000 % PageSize == 0);
-    bool mem32LimitIs64Bits = isMem32() &&
-                              !moduleEnv_.memory->boundsCheckLimitIs32Bits() &&
-                              MaxMemoryPages(moduleEnv_.memory->indexType()) >=
-                                  Pages(0x100000000 / PageSize);
+    bool mem32LimitIs64Bits =
+        isMem32(memoryIndex) &&
+        !moduleEnv_.memories[memoryIndex].boundsCheckLimitIs32Bits() &&
+        MaxMemoryPages(moduleEnv_.memories[memoryIndex].indexType()) >=
+            Pages(0x100000000 / PageSize);
 #else
     // On 32-bit platforms we have no more than 2GB memory and the limit for a
     // 32-bit base pointer is never a 64-bit value.
     bool mem32LimitIs64Bits = false;
 #endif
-    return maybeLoadBoundsCheckLimit(
-        mem32LimitIs64Bits || isMem64() ? MIRType::Int64 : MIRType::Int32);
+    return maybeLoadBoundsCheckLimit(memoryIndex,
+                                     mem32LimitIs64Bits || isMem64(memoryIndex)
+                                         ? MIRType::Int64
+                                         : MIRType::Int32);
   }
 
-  void performBoundsCheck(MDefinition** base,
+  void performBoundsCheck(uint32_t memoryIndex, MDefinition** base,
                           MWasmLoadInstance* boundsCheckLimit) {
     // At the outset, actualBase could be the result of pretty much any integer
     // operation, or it could be the load of an integer constant.  If its type
@@ -1225,16 +1260,17 @@ class FunctionCompiler {
     // Extend an i32 index value to perform a 64-bit bounds check if the memory
     // can be 4GB or larger.
     bool extendAndWrapIndex =
-        isMem32() && boundsCheckLimit->type() == MIRType::Int64;
+        isMem32(memoryIndex) && boundsCheckLimit->type() == MIRType::Int64;
     if (extendAndWrapIndex) {
       auto* extended = MWasmExtendU32Index::New(alloc(), actualBase);
       curBlock_->add(extended);
       actualBase = extended;
     }
 
-    auto* ins =
-        MWasmBoundsCheck::New(alloc(), actualBase, boundsCheckLimit,
-                              bytecodeOffset(), MWasmBoundsCheck::Memory0);
+    auto target = memoryIndex == 0 ? MWasmBoundsCheck::Memory0
+                                   : MWasmBoundsCheck::Unknown;
+    auto* ins = MWasmBoundsCheck::New(alloc(), actualBase, boundsCheckLimit,
+                                      bytecodeOffset(), target);
     curBlock_->add(ins);
     actualBase = ins;
 
@@ -1287,19 +1323,20 @@ class FunctionCompiler {
 
     // Emit the bounds check if necessary; it traps if it fails.  This may
     // update *base.
-    MWasmLoadInstance* boundsCheckLimit = needBoundsCheck();
+    MWasmLoadInstance* boundsCheckLimit =
+        needBoundsCheck(access->memoryIndex());
     if (boundsCheckLimit) {
-      performBoundsCheck(base, boundsCheckLimit);
+      performBoundsCheck(access->memoryIndex(), base, boundsCheckLimit);
     }
 
 #ifndef JS_64BIT
-    if (isMem64()) {
+    if (isMem64(access->memoryIndex())) {
       // We must have had an explicit bounds check (or one was elided if it was
       // proved redundant), and on 32-bit systems the index will for sure fit in
       // 32 bits: the max memory is 2GB.  So chop the index down to 32-bit to
       // simplify the back-end.
       MOZ_ASSERT((*base)->type() == MIRType::Int64);
-      MOZ_ASSERT(!moduleEnv_.hugeMemoryEnabled());
+      MOZ_ASSERT(!moduleEnv_.hugeMemoryEnabled(access->memoryIndex()));
       auto* chopped = MWasmWrapU32Index::New(alloc(), *base);
       MOZ_ASSERT(chopped->type() == MIRType::Int32);
       curBlock_->add(chopped);
@@ -1318,15 +1355,14 @@ class FunctionCompiler {
   }
 
  public:
-  bool isMem32() { return moduleEnv_.memory->indexType() == IndexType::I32; }
-  bool isMem64() { return moduleEnv_.memory->indexType() == IndexType::I64; }
-
-  // Sometimes, we need to determine the memory type before the opcode reader
-  // that will reject a memory opcode in the presence of no-memory gets a chance
-  // to do so. This predicate is safe.
-  bool isNoMemOrMem32() {
-    return !moduleEnv_.usesMemory() ||
-           moduleEnv_.memory->indexType() == IndexType::I32;
+  bool isMem32(uint32_t memoryIndex) {
+    return moduleEnv_.memories[memoryIndex].indexType() == IndexType::I32;
+  }
+  bool isMem64(uint32_t memoryIndex) {
+    return moduleEnv_.memories[memoryIndex].indexType() == IndexType::I64;
+  }
+  bool hugeMemoryEnabled(uint32_t memoryIndex) {
+    return moduleEnv_.hugeMemoryEnabled(memoryIndex);
   }
 
   // Add the offset into the pointer to yield the EA; trap on overflow.
@@ -1351,12 +1387,12 @@ class FunctionCompiler {
       return nullptr;
     }
 
-    MWasmLoadInstance* memoryBase = maybeLoadMemoryBase();
+    MDefinition* memoryBase = maybeLoadMemoryBase(access->memoryIndex());
     MInstruction* load = nullptr;
     if (moduleEnv_.isAsmJS()) {
       MOZ_ASSERT(access->offset64() == 0);
       MWasmLoadInstance* boundsCheckLimit =
-          maybeLoadBoundsCheckLimit(MIRType::Int32);
+          maybeLoadBoundsCheckLimit(access->memoryIndex(), MIRType::Int32);
       load = MAsmJSLoadHeap::New(alloc(), memoryBase, base, boundsCheckLimit,
                                  access->type());
     } else {
@@ -1379,12 +1415,12 @@ class FunctionCompiler {
       return;
     }
 
-    MWasmLoadInstance* memoryBase = maybeLoadMemoryBase();
+    MDefinition* memoryBase = maybeLoadMemoryBase(access->memoryIndex());
     MInstruction* store = nullptr;
     if (moduleEnv_.isAsmJS()) {
       MOZ_ASSERT(access->offset64() == 0);
       MWasmLoadInstance* boundsCheckLimit =
-          maybeLoadBoundsCheckLimit(MIRType::Int32);
+          maybeLoadBoundsCheckLimit(access->memoryIndex(), MIRType::Int32);
       store = MAsmJSStoreHeap::New(alloc(), memoryBase, base, boundsCheckLimit,
                                    access->type(), v);
     } else {
@@ -1425,7 +1461,7 @@ class FunctionCompiler {
       newv = cvtNewv;
     }
 
-    MWasmLoadInstance* memoryBase = maybeLoadMemoryBase();
+    MDefinition* memoryBase = maybeLoadMemoryBase(access->memoryIndex());
     MInstruction* cas = MWasmCompareExchangeHeap::New(
         alloc(), bytecodeOffset(), memoryBase, base, *access, oldv, newv,
         instancePointer_);
@@ -1460,7 +1496,7 @@ class FunctionCompiler {
       value = cvtValue;
     }
 
-    MWasmLoadInstance* memoryBase = maybeLoadMemoryBase();
+    MDefinition* memoryBase = maybeLoadMemoryBase(access->memoryIndex());
     MInstruction* xchg =
         MWasmAtomicExchangeHeap::New(alloc(), bytecodeOffset(), memoryBase,
                                      base, *access, value, instancePointer_);
@@ -1496,7 +1532,7 @@ class FunctionCompiler {
       value = cvtValue;
     }
 
-    MWasmLoadInstance* memoryBase = maybeLoadMemoryBase();
+    MDefinition* memoryBase = maybeLoadMemoryBase(access->memoryIndex());
     MInstruction* binop =
         MWasmAtomicBinopHeap::New(alloc(), bytecodeOffset(), op, memoryBase,
                                   base, *access, value, instancePointer_);
@@ -1521,8 +1557,9 @@ class FunctionCompiler {
       return nullptr;
     }
 
-    MemoryAccessDesc access(viewType, addr.align, addr.offset,
-                            bytecodeIfNotAsmJS());
+    MemoryAccessDesc access(addr.memoryIndex, viewType, addr.align, addr.offset,
+                            bytecodeIfNotAsmJS(),
+                            hugeMemoryEnabled(addr.memoryIndex));
 
     // Generate better code (on x86)
     // If AVX2 is enabled, more broadcast operators are available.
@@ -1557,8 +1594,9 @@ class FunctionCompiler {
 
     // Generate better code (on x86) by loading as a double with an
     // operation that sign extends directly.
-    MemoryAccessDesc access(Scalar::Float64, addr.align, addr.offset,
-                            bytecodeIfNotAsmJS());
+    MemoryAccessDesc access(addr.memoryIndex, Scalar::Float64, addr.align,
+                            addr.offset, bytecodeIfNotAsmJS(),
+                            hugeMemoryEnabled(addr.memoryIndex));
     access.setWidenSimd128Load(op);
     return load(addr.base, &access, ValType::V128);
   }
@@ -1569,8 +1607,9 @@ class FunctionCompiler {
       return nullptr;
     }
 
-    MemoryAccessDesc access(viewType, addr.align, addr.offset,
-                            bytecodeIfNotAsmJS());
+    MemoryAccessDesc access(addr.memoryIndex, viewType, addr.align, addr.offset,
+                            bytecodeIfNotAsmJS(),
+                            hugeMemoryEnabled(addr.memoryIndex));
     access.setZeroExtendSimd128Load();
     return load(addr.base, &access, ValType::V128);
   }
@@ -1582,9 +1621,10 @@ class FunctionCompiler {
       return nullptr;
     }
 
-    MemoryAccessDesc access(Scalar::Simd128, addr.align, addr.offset,
-                            bytecodeIfNotAsmJS());
-    MWasmLoadInstance* memoryBase = maybeLoadMemoryBase();
+    MemoryAccessDesc access(addr.memoryIndex, Scalar::Simd128, addr.align,
+                            addr.offset, bytecodeIfNotAsmJS(),
+                            hugeMemoryEnabled(addr.memoryIndex));
+    MDefinition* memoryBase = maybeLoadMemoryBase(access.memoryIndex());
     MDefinition* base = addr.base;
     MOZ_ASSERT(!moduleEnv_.isAsmJS());
     checkOffsetAndAlignmentAndBounds(&access, &base);
@@ -1606,9 +1646,10 @@ class FunctionCompiler {
     if (inDeadCode()) {
       return;
     }
-    MemoryAccessDesc access(Scalar::Simd128, addr.align, addr.offset,
-                            bytecodeIfNotAsmJS());
-    MWasmLoadInstance* memoryBase = maybeLoadMemoryBase();
+    MemoryAccessDesc access(addr.memoryIndex, Scalar::Simd128, addr.align,
+                            addr.offset, bytecodeIfNotAsmJS(),
+                            hugeMemoryEnabled(addr.memoryIndex));
+    MDefinition* memoryBase = maybeLoadMemoryBase(access.memoryIndex());
     MDefinition* base = addr.base;
     MOZ_ASSERT(!moduleEnv_.isAsmJS());
     checkOffsetAndAlignmentAndBounds(&access, &base);
@@ -1670,10 +1711,10 @@ class FunctionCompiler {
       curBlock_->add(valueAddr);
 
       // Handle a store to a ref-typed field specially
-      if (v->type() == MIRType::RefOrNull) {
+      if (v->type() == MIRType::WasmAnyRef) {
         // Load the previous value for the post-write barrier
         auto* prevValue =
-            MWasmLoadGlobalCell::New(alloc(), MIRType::RefOrNull, valueAddr);
+            MWasmLoadGlobalCell::New(alloc(), MIRType::WasmAnyRef, valueAddr);
         curBlock_->add(prevValue);
 
         // Store the new value
@@ -1694,7 +1735,7 @@ class FunctionCompiler {
     // Or else store the value directly in Instance::globalArea.
 
     // Handle a store to a ref-typed field specially
-    if (v->type() == MIRType::RefOrNull) {
+    if (v->type() == MIRType::WasmAnyRef) {
       // Compute the address of the ref-typed global
       auto* valueAddr = MWasmDerivedPointer::New(
           alloc(), instancePointer_,
@@ -1703,7 +1744,7 @@ class FunctionCompiler {
 
       // Load the previous value for the post-write barrier
       auto* prevValue =
-          MWasmLoadGlobalCell::New(alloc(), MIRType::RefOrNull, valueAddr);
+          MWasmLoadGlobalCell::New(alloc(), MIRType::WasmAnyRef, valueAddr);
       curBlock_->add(prevValue);
 
       // Store the new value
@@ -1938,6 +1979,8 @@ class FunctionCompiler {
     return passArgWorker(argDef, type.toMIRType(), call);
   }
 
+  void markReturnCall(CallCompileState* call) { call->returnCall = true; }
+
   // If the call returns results on the stack, prepare a stack area to receive
   // them, and pass the address of the stack area to the callee as an additional
   // argument.
@@ -1968,7 +2011,9 @@ class FunctionCompiler {
       stackResultArea->initResult(iter.index() - base, loc);
     }
     curBlock_->add(stackResultArea);
-    if (!passArg(stackResultArea, MIRType::Pointer, call)) {
+    MDefinition* def = call->returnCall ? (MDefinition*)stackResultPointer_
+                                        : (MDefinition*)stackResultArea;
+    if (!passArg(def, MIRType::Pointer, call)) {
       return false;
     }
     call->stackResultArea_ = stackResultArea;
@@ -2014,8 +2059,8 @@ class FunctionCompiler {
         def = MWasmFloatRegisterResult::New(alloc(), type, ReturnSimd128Reg);
         break;
 #endif
-      case MIRType::RefOrNull:
-        def = MWasmRegisterResult::New(alloc(), MIRType::RefOrNull, ReturnReg);
+      case MIRType::WasmAnyRef:
+        def = MWasmRegisterResult::New(alloc(), MIRType::WasmAnyRef, ReturnReg);
         break;
       default:
         MOZ_CRASH("unexpected MIRType result for builtin call");
@@ -2073,7 +2118,7 @@ class FunctionCompiler {
                                                 result.fpr());
             break;
           case wasm::ValType::Ref:
-            def = MWasmRegisterResult::New(alloc(), MIRType::RefOrNull,
+            def = MWasmRegisterResult::New(alloc(), MIRType::WasmAnyRef,
                                            result.gpr());
             break;
           case wasm::ValType::V128:
@@ -2135,9 +2180,7 @@ class FunctionCompiler {
                                 uint32_t lineOrBytecode,
                                 const CallCompileState& call,
                                 DefVector* results) {
-    if (inDeadCode()) {
-      return true;
-    }
+    MOZ_ASSERT(!inDeadCode());
 
     CallSiteDesc desc(lineOrBytecode, CallSiteDesc::Func);
     ResultType resultType = ResultType::Vector(funcType.results());
@@ -2150,13 +2193,83 @@ class FunctionCompiler {
     return collectCallResults(resultType, call.stackResultArea_, results);
   }
 
+  [[nodiscard]] bool returnCallDirect(const FuncType& funcType,
+                                      uint32_t funcIndex,
+                                      uint32_t lineOrBytecode,
+                                      const CallCompileState& call,
+                                      DefVector* results) {
+    MOZ_ASSERT(!inDeadCode());
+
+    CallSiteDesc desc(lineOrBytecode, CallSiteDesc::ReturnFunc);
+    auto callee = CalleeDesc::function(funcIndex);
+    ArgTypeVector args(funcType);
+
+    auto ins = MWasmReturnCall::New(alloc(), desc, callee, call.regArgs_,
+                                    StackArgAreaSizeUnaligned(args), nullptr);
+    if (!ins) {
+      return false;
+    }
+    curBlock_->end(ins);
+    curBlock_ = nullptr;
+    return true;
+  }
+
+  [[nodiscard]] bool returnCallImport(unsigned globalDataOffset,
+                                      uint32_t lineOrBytecode,
+                                      const CallCompileState& call,
+                                      const FuncType& funcType,
+                                      DefVector* results) {
+    MOZ_ASSERT(!inDeadCode());
+
+    CallSiteDesc desc(lineOrBytecode, CallSiteDesc::Import);
+    auto callee = CalleeDesc::import(globalDataOffset);
+    ArgTypeVector args(funcType);
+
+    auto* ins = MWasmReturnCall::New(alloc(), desc, callee, call.regArgs_,
+                                     StackArgAreaSizeUnaligned(args), nullptr);
+    if (!ins) {
+      return false;
+    }
+    curBlock_->end(ins);
+    curBlock_ = nullptr;
+    return true;
+  }
+
+  [[nodiscard]] bool returnCallIndirect(uint32_t funcTypeIndex,
+                                        uint32_t tableIndex, MDefinition* index,
+                                        uint32_t lineOrBytecode,
+                                        const CallCompileState& call,
+                                        DefVector* results) {
+    MOZ_ASSERT(!inDeadCode());
+
+    const FuncType& funcType = (*moduleEnv_.types)[funcTypeIndex].funcType();
+    CallIndirectId callIndirectId =
+        CallIndirectId::forFuncType(moduleEnv_, funcTypeIndex);
+
+    CalleeDesc callee;
+    MOZ_ASSERT(callIndirectId.kind() != CallIndirectIdKind::AsmJS);
+    const TableDesc& table = moduleEnv_.tables[tableIndex];
+    callee =
+        CalleeDesc::wasmTable(moduleEnv_, table, tableIndex, callIndirectId);
+
+    CallSiteDesc desc(lineOrBytecode, CallSiteDesc::Indirect);
+    ArgTypeVector args(funcType);
+
+    auto* ins = MWasmReturnCall::New(alloc(), desc, callee, call.regArgs_,
+                                     StackArgAreaSizeUnaligned(args), index);
+    if (!ins) {
+      return false;
+    }
+    curBlock_->end(ins);
+    curBlock_ = nullptr;
+    return true;
+  }
+
   [[nodiscard]] bool callIndirect(uint32_t funcTypeIndex, uint32_t tableIndex,
                                   MDefinition* index, uint32_t lineOrBytecode,
                                   const CallCompileState& call,
                                   DefVector* results) {
-    if (inDeadCode()) {
-      return true;
-    }
+    MOZ_ASSERT(!inDeadCode());
 
     const FuncType& funcType = (*moduleEnv_.types)[funcTypeIndex].funcType();
     CallIndirectId callIndirectId =
@@ -2197,9 +2310,7 @@ class FunctionCompiler {
                                 uint32_t lineOrBytecode,
                                 const CallCompileState& call,
                                 const FuncType& funcType, DefVector* results) {
-    if (inDeadCode()) {
-      return true;
-    }
+    MOZ_ASSERT(!inDeadCode());
 
     CallSiteDesc desc(lineOrBytecode, CallSiteDesc::Import);
     auto callee = CalleeDesc::import(instanceDataOffset);
@@ -2264,9 +2375,7 @@ class FunctionCompiler {
   [[nodiscard]] bool callRef(const FuncType& funcType, MDefinition* ref,
                              uint32_t lineOrBytecode,
                              const CallCompileState& call, DefVector* results) {
-    if (inDeadCode()) {
-      return true;
-    }
+    MOZ_ASSERT(!inDeadCode());
 
     CalleeDesc callee = CalleeDesc::wasmFuncRef();
 
@@ -2279,6 +2388,30 @@ class FunctionCompiler {
     }
     return collectCallResults(resultType, call.stackResultArea_, results);
   }
+
+#  ifdef ENABLE_WASM_TAIL_CALLS
+  [[nodiscard]] bool returnCallRef(const FuncType& funcType, MDefinition* ref,
+                                   uint32_t lineOrBytecode,
+                                   const CallCompileState& call,
+                                   DefVector* results) {
+    MOZ_ASSERT(!inDeadCode());
+
+    CalleeDesc callee = CalleeDesc::wasmFuncRef();
+
+    CallSiteDesc desc(lineOrBytecode, CallSiteDesc::FuncRef);
+    ArgTypeVector args(funcType);
+
+    auto* ins = MWasmReturnCall::New(alloc(), desc, callee, call.regArgs_,
+                                     StackArgAreaSizeUnaligned(args), ref);
+    if (!ins) {
+      return false;
+    }
+    curBlock_->end(ins);
+    curBlock_ = nullptr;
+    return true;
+  }
+
+#  endif  // ENABLE_WASM_TAIL_CALLS
 
 #endif  // ENABLE_WASM_FUNCTION_REFERENCES
 
@@ -2815,7 +2948,7 @@ class FunctionCompiler {
 
   MDefinition* loadTag(uint32_t tagIndex) {
     MWasmLoadInstanceDataField* tag = MWasmLoadInstanceDataField::New(
-        alloc(), MIRType::RefOrNull,
+        alloc(), MIRType::WasmAnyRef,
         moduleEnv_.offsetOfTagInstanceData(tagIndex), true, instancePointer_);
     curBlock_->add(tag);
     return tag;
@@ -2824,12 +2957,12 @@ class FunctionCompiler {
   void loadPendingExceptionState(MInstruction** exception, MInstruction** tag) {
     *exception = MWasmLoadInstance::New(
         alloc(), instancePointer_, wasm::Instance::offsetOfPendingException(),
-        MIRType::RefOrNull, AliasSet::Load(AliasSet::WasmPendingException));
+        MIRType::WasmAnyRef, AliasSet::Load(AliasSet::WasmPendingException));
     curBlock_->add(*exception);
 
     *tag = MWasmLoadInstance::New(
         alloc(), instancePointer_,
-        wasm::Instance::offsetOfPendingExceptionTag(), MIRType::RefOrNull,
+        wasm::Instance::offsetOfPendingExceptionTag(), MIRType::WasmAnyRef,
         AliasSet::Load(AliasSet::WasmPendingException));
     curBlock_->add(*tag);
   }
@@ -3106,7 +3239,7 @@ class FunctionCompiler {
     // block's tag.
     MDefinition* catchTag = loadTag(tagIndex);
     MDefinition* matchesCatchTag =
-        compare(exceptionTag, catchTag, JSOp::Eq, MCompare::Compare_RefOrNull);
+        compare(exceptionTag, catchTag, JSOp::Eq, MCompare::Compare_WasmAnyRef);
     curBlock_->end(
         MTest::New(alloc(), matchesCatchTag, catchBlock, fallthroughBlock));
 
@@ -3134,8 +3267,8 @@ class FunctionCompiler {
   [[nodiscard]] bool loadExceptionValues(MDefinition* exception,
                                          uint32_t tagIndex, DefVector* values) {
     SharedTagType tagType = moduleEnv().tags[tagIndex].type;
-    const ValTypeVector& params = tagType->argTypes_;
-    const TagOffsetVector& offsets = tagType->argOffsets_;
+    const ValTypeVector& params = tagType->argTypes();
+    const TagOffsetVector& offsets = tagType->argOffsets();
 
     // Get the data pointer from the exception object
     auto* data = MWasmLoadField::New(
@@ -3268,12 +3401,12 @@ class FunctionCompiler {
 
     // Store the params into the data pointer
     SharedTagType tagType = moduleEnv_.tags[tagIndex].type;
-    for (size_t i = 0; i < tagType->argOffsets_.length(); i++) {
+    for (size_t i = 0; i < tagType->argOffsets().length(); i++) {
       if (!mirGen_.ensureBallast()) {
         return false;
       }
-      ValType type = tagType->argTypes_[i];
-      uint32_t offset = tagType->argOffsets_[i];
+      ValType type = tagType->argTypes()[i];
+      uint32_t offset = tagType->argOffsets()[i];
 
       if (!type.isRefRepr()) {
         auto* store = MWasmStoreFieldKA::New(alloc(), exception, data, offset,
@@ -3354,8 +3487,8 @@ class FunctionCompiler {
     size_t exnSlotPosition = pad->nslots() - 2;
     MDefinition* tag = pad->getSlot(exnSlotPosition + 1);
     MDefinition* exception = pad->getSlot(exnSlotPosition);
-    MOZ_ASSERT(exception->type() == MIRType::RefOrNull &&
-               tag->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(exception->type() == MIRType::WasmAnyRef &&
+               tag->type() == MIRType::WasmAnyRef);
     return throwFrom(exception, tag);
   }
 
@@ -3548,7 +3681,7 @@ class FunctionCompiler {
       AliasSet::Flag aliasBitset, MDefinition* value, MDefinition* base,
       uint32_t offset, bool needsTrapInfo, WasmPreBarrierKind preBarrierKind) {
     MOZ_ASSERT(aliasBitset != 0);
-    MOZ_ASSERT(keepAlive->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(keepAlive->type() == MIRType::WasmAnyRef);
     MOZ_ASSERT(fieldType.widenToValType().toMIRType() == value->type());
     MNarrowingOp narrowingOp = fieldStoreInfoToMIR(fieldType);
 
@@ -3601,7 +3734,7 @@ class FunctionCompiler {
       AliasSet::Flag aliasBitset, MDefinition* value, MDefinition* base,
       uint32_t scale, MDefinition* index, WasmPreBarrierKind preBarrierKind) {
     MOZ_ASSERT(aliasBitset != 0);
-    MOZ_ASSERT(keepAlive->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(keepAlive->type() == MIRType::WasmAnyRef);
     MOZ_ASSERT(fieldType.widenToValType().toMIRType() == value->type());
     MOZ_ASSERT(scale == 1 || scale == 2 || scale == 4 || scale == 8 ||
                scale == 16);
@@ -3633,7 +3766,7 @@ class FunctionCompiler {
       MDefinition* keepAlive, AliasSet::Flag aliasBitset, MDefinition* base,
       uint32_t offset, bool needsTrapInfo) {
     MOZ_ASSERT(aliasBitset != 0);
-    MOZ_ASSERT(keepAlive->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(keepAlive->type() == MIRType::WasmAnyRef);
     MIRType mirType;
     MWideningOp mirWideningOp;
     fieldLoadInfoToMIR(fieldType, fieldWideningOp, &mirType, &mirWideningOp);
@@ -3660,7 +3793,7 @@ class FunctionCompiler {
       MDefinition* keepAlive, AliasSet::Flag aliasBitset, MDefinition* base,
       uint32_t scale, MDefinition* index) {
     MOZ_ASSERT(aliasBitset != 0);
-    MOZ_ASSERT(keepAlive->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(keepAlive->type() == MIRType::WasmAnyRef);
     MOZ_ASSERT(scale == 1 || scale == 2 || scale == 4 || scale == 8 ||
                scale == 16);
 
@@ -3694,12 +3827,11 @@ class FunctionCompiler {
 
   // Returns an MDefinition holding the supertype vector for `typeIndex`.
   [[nodiscard]] MDefinition* loadSuperTypeVector(uint32_t typeIndex) {
-    uint32_t superTypeVectorOffset =
-        moduleEnv().offsetOfSuperTypeVector(typeIndex);
+    uint32_t stvOffset = moduleEnv().offsetOfSuperTypeVector(typeIndex);
 
-    auto* load = MWasmLoadInstanceDataField::New(
-        alloc(), MIRType::Pointer, superTypeVectorOffset,
-        /*isConst=*/true, instancePointer_);
+    auto* load =
+        MWasmLoadInstanceDataField::New(alloc(), MIRType::Pointer, stvOffset,
+                                        /*isConst=*/true, instancePointer_);
     if (!load) {
       return nullptr;
     }
@@ -3911,7 +4043,7 @@ class FunctionCompiler {
   // Adds trap site info for the null check.
   [[nodiscard]] MDefinition* getWasmArrayObjectNumElements(
       MDefinition* arrayObject) {
-    MOZ_ASSERT(arrayObject->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(arrayObject->type() == MIRType::WasmAnyRef);
 
     auto* numElements = MWasmLoadField::New(
         alloc(), arrayObject, WasmArrayObject::offsetOfNumElements(),
@@ -3929,7 +4061,7 @@ class FunctionCompiler {
   // Given `arrayObject`, the address of a WasmArrayObject, generate MIR to
   // return the contents of the WasmArrayObject::data_ field.
   [[nodiscard]] MDefinition* getWasmArrayObjectData(MDefinition* arrayObject) {
-    MOZ_ASSERT(arrayObject->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(arrayObject->type() == MIRType::WasmAnyRef);
 
     auto* data = MWasmLoadField::New(
         alloc(), arrayObject, WasmArrayObject::offsetOfData(),
@@ -3945,7 +4077,7 @@ class FunctionCompiler {
   }
 
   // Given a JIT-time-known type index `typeIndex` and a run-time known number
-  // of elements `numElements`, create MIR to call `Instance::arrayNew`,
+  // of elements `numElements`, create MIR to call `Instance::arrayNew<true>`,
   // producing an array with the relevant type and size and initialized with
   // `typeIndex`s default value.
   [[nodiscard]] MDefinition* createDefaultInitializedArrayObject(
@@ -3956,11 +4088,12 @@ class FunctionCompiler {
       return nullptr;
     }
 
-    // Create call: arrayObject = Instance::arrayNew(numElements, typeDefData)
+    // Create call:
+    //   arrayObject = Instance::arrayNew<true>(numElements, typeDefData)
     // If the requested size exceeds MaxArrayPayloadBytes, the MIR generated
     // by this call will trap.
     MDefinition* arrayObject;
-    if (!emitInstanceCall2(lineOrBytecode, SASigArrayNew, numElements,
+    if (!emitInstanceCall2(lineOrBytecode, SASigArrayNew_true, numElements,
                            typeDefData, &arrayObject)) {
       return nullptr;
     }
@@ -3976,11 +4109,12 @@ class FunctionCompiler {
       return nullptr;
     }
 
-    // Create call: arrayObject = Instance::arrayNewUninit(numElements,
-    // typeDefData) If the requested size exceeds MaxArrayPayloadBytes, the MIR
-    // generated by this call will trap.
+    // Create call:
+    //   arrayObject = Instance::arrayNew<false>(numElements, typeDefData)
+    // If the requested size exceeds MaxArrayPayloadBytes, the MIR generated
+    // by this call will trap.
     MDefinition* arrayObject;
-    if (!emitInstanceCall2(lineOrBytecode, SASigArrayNewUninit, numElements,
+    if (!emitInstanceCall2(lineOrBytecode, SASigArrayNew_false, numElements,
                            typeDefData, &arrayObject)) {
       return nullptr;
     }
@@ -4001,7 +4135,7 @@ class FunctionCompiler {
   // The returned value is for the OOL object pointer.
   [[nodiscard]] MDefinition* setupForArrayAccess(MDefinition* arrayObject,
                                                  MDefinition* index) {
-    MOZ_ASSERT(arrayObject->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(arrayObject->type() == MIRType::WasmAnyRef);
     MOZ_ASSERT(index->type() == MIRType::Int32);
 
     // Check for null is done in getWasmArrayObjectNumElements.
@@ -4025,49 +4159,38 @@ class FunctionCompiler {
     return getWasmArrayObjectData(arrayObject);
   }
 
-  // This routine generates all MIR required for `array.new`.  The returned
-  // value is for the newly created array.
-  [[nodiscard]] MDefinition* createArrayNewCallAndLoop(uint32_t lineOrBytecode,
-                                                       uint32_t typeIndex,
-                                                       MDefinition* numElements,
-                                                       MDefinition* fillValue) {
-    const ArrayType& arrayType = (*moduleEnv_.types)[typeIndex].arrayType();
+  [[nodiscard]] bool fillArray(uint32_t lineOrBytecode,
+                               const ArrayType& arrayType,
+                               MDefinition* arrayObject, MDefinition* index,
+                               MDefinition* numElements, MDefinition* val) {
+    mozilla::DebugOnly<MIRType> valMIRType = val->type();
+    FieldType valFieldType = arrayType.elementType_;
+    MOZ_ASSERT(valFieldType.widenToValType().toMIRType() == valMIRType);
 
-    // Create the array object, default-initialized.
-    MDefinition* arrayObject =
-        createUninitializedArrayObject(lineOrBytecode, typeIndex, numElements);
-    if (!arrayObject) {
-      return nullptr;
-    }
-
-    mozilla::DebugOnly<MIRType> fillValueMIRType = fillValue->type();
-    FieldType fillValueFieldType = arrayType.elementType_;
-    MOZ_ASSERT(fillValueFieldType.widenToValType().toMIRType() ==
-               fillValueMIRType);
-
-    uint32_t elemSize = fillValueFieldType.size();
+    uint32_t elemSize = valFieldType.size();
     MOZ_ASSERT(elemSize >= 1 && elemSize <= 16);
 
-    // Make `base` point at the first byte of the (OOL) data area.
-    MDefinition* base = getWasmArrayObjectData(arrayObject);
-    if (!base) {
-      return nullptr;
+    // Make `arrayBase` point at the first byte of the (OOL) data area.
+    MDefinition* arrayBase = getWasmArrayObjectData(arrayObject);
+    if (!arrayBase) {
+      return false;
     }
 
     // We have:
-    //   base        : TargetWord
+    //   arrayBase   : TargetWord
+    //   index       : Int32
     //   numElements : Int32
-    //   fillValue   : <any FieldType>
+    //   val         : <any FieldType>
     //   $elemSize = arrayType.elementType_.size(); 1, 2, 4, 8 or 16
     //
     // Generate MIR:
     //   <in current block>
-    //     limit : TargetWord = base + nElems * elemSize
-    //     if (limit == base) goto after; // skip loop if trip count == 0
-    //     // optimisation (not done): skip loop if fill value == 0
+    //     fillBase : TargetWord = arrayBase + numElements * index
+    //     limit : TargetWord = fillBase + numElements * elemSize
+    //     if (limit == fillBase) goto after; // skip loop if trip count == 0
     //   loop:
-    //     ptrPhi = phi(base, ptrNext)
-    //     *ptrPhi = fillValue
+    //     ptrPhi = phi(fillBase, ptrNext)
+    //     *ptrPhi = val
     //     ptrNext = ptrPhi + $elemSize
     //     if (ptrNext <u limit) goto loop;
     //   after:
@@ -4079,59 +4202,59 @@ class FunctionCompiler {
     // ==== Create the "loop" and "after" blocks ====
     MBasicBlock* loopBlock;
     if (!newBlock(curBlock_, &loopBlock, MBasicBlock::LOOP_HEADER)) {
-      return nullptr;
+      return false;
     }
     MBasicBlock* afterBlock;
     if (!newBlock(loopBlock, &afterBlock)) {
-      return nullptr;
+      return false;
     }
 
     // ==== Fill in the remainder of the block preceding the loop ====
     MDefinition* elemSizeDef = constantTargetWord(intptr_t(elemSize));
     if (!elemSizeDef) {
-      return nullptr;
+      return false;
     }
 
+    MDefinition* fillBase =
+        computeBasePlusScaledIndex(arrayBase, elemSizeDef, index);
+    if (!fillBase) {
+      return false;
+    }
     MDefinition* limit =
-        computeBasePlusScaledIndex(base, elemSizeDef, numElements);
+        computeBasePlusScaledIndex(fillBase, elemSizeDef, numElements);
     if (!limit) {
-      return nullptr;
+      return false;
     }
 
     // Use JSOp::StrictEq, not ::Eq, so that the comparison (and eventually
     // the entire initialisation loop) will be folded out in the case where
     // the number of elements is zero.  See MCompare::tryFoldEqualOperands.
     MDefinition* limitEqualsBase = compare(
-        limit, base, JSOp::StrictEq,
+        limit, fillBase, JSOp::StrictEq,
         targetIs64Bit() ? MCompare::Compare_UInt64 : MCompare::Compare_UInt32);
     if (!limitEqualsBase) {
-      return nullptr;
+      return false;
     }
     MTest* skipIfLimitEqualsBase =
         MTest::New(alloc(), limitEqualsBase, afterBlock, loopBlock);
     if (!skipIfLimitEqualsBase) {
-      return nullptr;
+      return false;
     }
     curBlock_->end(skipIfLimitEqualsBase);
     if (!afterBlock->addPredecessor(alloc(), curBlock_)) {
-      return nullptr;
+      return false;
     }
-    // Optimisation opportunity: if the fill value is zero, maybe we should
-    // likewise skip over the initialisation loop entirely (and, if the zero
-    // value is visible at JIT time, the loop will be removed).  For the
-    // reftyped case, that would be a big win since each iteration requires a
-    // call to the post-write barrier routine.
 
     // ==== Fill in the loop block as best we can ====
     curBlock_ = loopBlock;
     MPhi* ptrPhi = MPhi::New(alloc(), TargetWordMIRType());
     if (!ptrPhi) {
-      return nullptr;
+      return false;
     }
     if (!ptrPhi->reserveLength(2)) {
-      return nullptr;
+      return false;
     }
-    ptrPhi->addInput(base);
+    ptrPhi->addInput(fillBase);
     curBlock_->addPhi(ptrPhi);
     curBlock_->setLoopDepth(loopDepth_ + 1);
 
@@ -4139,16 +4262,16 @@ class FunctionCompiler {
     // `writeGcValueAtBasePlusOffset` rather than
     // `writeGcValueAtBasePlusScaledIndex` to do the store.
     if (!writeGcValueAtBasePlusOffset(
-            lineOrBytecode, fillValueFieldType, arrayObject,
-            AliasSet::WasmArrayDataArea, fillValue, ptrPhi, /*offset=*/0,
+            lineOrBytecode, valFieldType, arrayObject,
+            AliasSet::WasmArrayDataArea, val, ptrPhi, /*offset=*/0,
             /*needsTrapInfo=*/false, WasmPreBarrierKind::None)) {
-      return nullptr;
+      return false;
     }
 
     auto* ptrNext =
         MAdd::NewWasm(alloc(), ptrPhi, elemSizeDef, TargetWordMIRType());
     if (!ptrNext) {
-      return nullptr;
+      return false;
     }
     curBlock_->add(ptrNext);
     ptrPhi->addInput(ptrNext);
@@ -4157,21 +4280,81 @@ class FunctionCompiler {
         ptrNext, limit, JSOp::Lt,
         targetIs64Bit() ? MCompare::Compare_UInt64 : MCompare::Compare_UInt32);
     if (!ptrNextLtuLimit) {
-      return nullptr;
+      return false;
     }
     auto* continueIfPtrNextLtuLimit =
         MTest::New(alloc(), ptrNextLtuLimit, loopBlock, afterBlock);
     if (!continueIfPtrNextLtuLimit) {
-      return nullptr;
+      return false;
     }
     curBlock_->end(continueIfPtrNextLtuLimit);
     if (!loopBlock->addPredecessor(alloc(), loopBlock)) {
-      return nullptr;
+      return false;
     }
     // ==== Loop block completed ====
 
     curBlock_ = afterBlock;
+    return true;
+  }
+
+  // This routine generates all MIR required for `array.new`.  The returned
+  // value is for the newly created array.
+  [[nodiscard]] MDefinition* createArrayNewCallAndLoop(uint32_t lineOrBytecode,
+                                                       uint32_t typeIndex,
+                                                       MDefinition* numElements,
+                                                       MDefinition* fillValue) {
+    const ArrayType& arrayType = (*moduleEnv_.types)[typeIndex].arrayType();
+
+    // Create the array object, uninitialized.
+    MDefinition* arrayObject =
+        createUninitializedArrayObject(lineOrBytecode, typeIndex, numElements);
+    if (!arrayObject) {
+      return nullptr;
+    }
+
+    // Optimisation opportunity: if the fill value is zero, maybe we should
+    // likewise skip over the initialisation loop entirely (and, if the zero
+    // value is visible at JIT time, the loop will be removed).  For the
+    // reftyped case, that would be a big win since each iteration requires a
+    // call to the post-write barrier routine.
+
+    if (!fillArray(lineOrBytecode, arrayType, arrayObject, constantI32(0),
+                   numElements, fillValue)) {
+      return nullptr;
+    }
+
     return arrayObject;
+  }
+
+  [[nodiscard]] bool createArrayFill(uint32_t lineOrBytecode,
+                                     uint32_t typeIndex,
+                                     MDefinition* arrayObject,
+                                     MDefinition* index, MDefinition* val,
+                                     MDefinition* numElements) {
+    MOZ_ASSERT(arrayObject->type() == MIRType::WasmAnyRef);
+    MOZ_ASSERT(index->type() == MIRType::Int32);
+    MOZ_ASSERT(numElements->type() == MIRType::Int32);
+
+    const ArrayType& arrayType = (*moduleEnv_.types)[typeIndex].arrayType();
+
+    // Check for null is done in getWasmArrayObjectNumElements.
+
+    // Get the array's actual size.
+    MDefinition* actualNumElements = getWasmArrayObjectNumElements(arrayObject);
+    if (!actualNumElements) {
+      return false;
+    }
+
+    // Create a bounds check.
+    auto* boundsCheck = MWasmBoundsCheckRange32::New(
+        alloc(), index, numElements, actualNumElements, bytecodeOffset());
+    if (!boundsCheck) {
+      return false;
+    }
+    curBlock_->add(boundsCheck);
+
+    return fillArray(lineOrBytecode, arrayType, arrayObject, index, numElements,
+                     val);
   }
 
   /*********************************************** WasmGC: other helpers ***/
@@ -4207,18 +4390,18 @@ class FunctionCompiler {
     return true;
   }
 
-  [[nodiscard]] MDefinition* isGcObjectSubtypeOf(MDefinition* object,
-                                                 RefType sourceType,
-                                                 RefType destType) {
+  [[nodiscard]] MDefinition* isRefSubtypeOf(MDefinition* ref,
+                                            RefType sourceType,
+                                            RefType destType) {
     MInstruction* isSubTypeOf = nullptr;
     if (destType.isTypeRef()) {
       uint32_t typeIndex = moduleEnv_.types->indexOf(*destType.typeDef());
-      MDefinition* superSuperTypeVector = loadSuperTypeVector(typeIndex);
-      isSubTypeOf = MWasmGcObjectIsSubtypeOfConcrete::New(
-          alloc(), object, superSuperTypeVector, sourceType, destType);
+      MDefinition* superSTV = loadSuperTypeVector(typeIndex);
+      isSubTypeOf = MWasmRefIsSubtypeOfConcrete::New(alloc(), ref, superSTV,
+                                                     sourceType, destType);
     } else {
-      isSubTypeOf = MWasmGcObjectIsSubtypeOfAbstract::New(alloc(), object,
-                                                          sourceType, destType);
+      isSubTypeOf =
+          MWasmRefIsSubtypeOfAbstract::New(alloc(), ref, sourceType, destType);
     }
     MOZ_ASSERT(isSubTypeOf);
 
@@ -4232,7 +4415,7 @@ class FunctionCompiler {
   // this point.
   [[nodiscard]] bool refCast(MDefinition* ref, RefType sourceType,
                              RefType destType) {
-    MDefinition* success = isGcObjectSubtypeOf(ref, sourceType, destType);
+    MDefinition* success = isRefSubtypeOf(ref, sourceType, destType);
     if (!success) {
       return false;
     }
@@ -4246,7 +4429,7 @@ class FunctionCompiler {
   // is possible to downcast `ref` to `destType`.
   [[nodiscard]] MDefinition* refTest(MDefinition* ref, RefType sourceType,
                                      RefType destType) {
-    return isGcObjectSubtypeOf(ref, sourceType, destType);
+    return isRefSubtypeOf(ref, sourceType, destType);
   }
 
   // Generates MIR for br_on_cast and br_on_cast_fail.
@@ -4273,9 +4456,9 @@ class FunctionCompiler {
     // reftyped.
     MOZ_RELEASE_ASSERT(values.length() > 0);
     MDefinition* ref = values.back();
-    MOZ_ASSERT(ref->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(ref->type() == MIRType::WasmAnyRef);
 
-    MDefinition* success = isGcObjectSubtypeOf(ref, sourceType, destType);
+    MDefinition* success = isRefSubtypeOf(ref, sourceType, destType);
     if (!success) {
       return false;
     }
@@ -4315,7 +4498,7 @@ class FunctionCompiler {
     }
 
     MOZ_ASSERT(values.length() > 0);
-    MOZ_ASSERT(values.back()->type() == MIRType::RefOrNull);
+    MOZ_ASSERT(values.back()->type() == MIRType::WasmAnyRef);
 
     MGoto* jump = MGoto::New(alloc(), fallthroughBlock);
     if (!jump) {
@@ -4573,11 +4756,7 @@ static bool EmitElse(FunctionCompiler& f) {
   }
 
   Control& control = f.iter().controlItem();
-  if (!f.switchToElse(control.block, &control.block)) {
-    return false;
-  }
-
-  return true;
+  return f.switchToElse(control.block, &control.block);
 }
 
 static bool EmitEnd(FunctionCompiler& f) {
@@ -4947,6 +5126,102 @@ static bool EmitCallIndirect(FunctionCompiler& f, bool oldStyle) {
   f.iter().setResults(results.length(), results);
   return true;
 }
+
+#ifdef ENABLE_WASM_TAIL_CALLS
+static bool EmitReturnCall(FunctionCompiler& f) {
+  uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
+
+  uint32_t funcIndex;
+  DefVector args;
+  if (!f.iter().readReturnCall(&funcIndex, &args)) {
+    return false;
+  }
+
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  const FuncType& funcType = *f.moduleEnv().funcs[funcIndex].type;
+
+  CallCompileState call;
+  f.markReturnCall(&call);
+  if (!EmitCallArgs(f, funcType, args, &call)) {
+    return false;
+  }
+
+  DefVector results;
+  if (f.moduleEnv().funcIsImport(funcIndex)) {
+    uint32_t globalDataOffset =
+        f.moduleEnv().offsetOfFuncImportInstanceData(funcIndex);
+    if (!f.returnCallImport(globalDataOffset, lineOrBytecode, call, funcType,
+                            &results)) {
+      return false;
+    }
+  } else {
+    if (!f.returnCallDirect(funcType, funcIndex, lineOrBytecode, call,
+                            &results)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool EmitReturnCallIndirect(FunctionCompiler& f) {
+  uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
+
+  uint32_t funcTypeIndex;
+  uint32_t tableIndex;
+  MDefinition* callee;
+  DefVector args;
+  if (!f.iter().readReturnCallIndirect(&funcTypeIndex, &tableIndex, &callee,
+                                       &args)) {
+    return false;
+  }
+
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  const FuncType& funcType = (*f.moduleEnv().types)[funcTypeIndex].funcType();
+
+  CallCompileState call;
+  f.markReturnCall(&call);
+  if (!EmitCallArgs(f, funcType, args, &call)) {
+    return false;
+  }
+
+  DefVector results;
+  return f.returnCallIndirect(funcTypeIndex, tableIndex, callee, lineOrBytecode,
+                              call, &results);
+}
+#endif
+
+#if defined(ENABLE_WASM_TAIL_CALLS) && defined(ENABLE_WASM_FUNCTION_REFERENCES)
+static bool EmitReturnCallRef(FunctionCompiler& f) {
+  uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
+
+  const FuncType* funcType;
+  MDefinition* callee;
+  DefVector args;
+
+  if (!f.iter().readReturnCallRef(&funcType, &callee, &args)) {
+    return false;
+  }
+
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  CallCompileState call;
+  f.markReturnCall(&call);
+  if (!EmitCallArgs(f, *funcType, args, &call)) {
+    return false;
+  }
+
+  DefVector results;
+  return f.returnCallRef(*funcType, callee, lineOrBytecode, call, &results);
+}
+#endif
 
 static bool EmitGetLocal(FunctionCompiler& f) {
   uint32_t id;
@@ -5363,8 +5638,9 @@ static bool EmitLoad(FunctionCompiler& f, ValType type, Scalar::Type viewType) {
     return false;
   }
 
-  MemoryAccessDesc access(viewType, addr.align, addr.offset,
-                          f.bytecodeIfNotAsmJS());
+  MemoryAccessDesc access(addr.memoryIndex, viewType, addr.align, addr.offset,
+                          f.bytecodeIfNotAsmJS(),
+                          f.hugeMemoryEnabled(addr.memoryIndex));
   auto* ins = f.load(addr.base, &access, type);
   if (!f.inDeadCode() && !ins) {
     return false;
@@ -5383,8 +5659,9 @@ static bool EmitStore(FunctionCompiler& f, ValType resultType,
     return false;
   }
 
-  MemoryAccessDesc access(viewType, addr.align, addr.offset,
-                          f.bytecodeIfNotAsmJS());
+  MemoryAccessDesc access(addr.memoryIndex, viewType, addr.align, addr.offset,
+                          f.bytecodeIfNotAsmJS(),
+                          f.hugeMemoryEnabled(addr.memoryIndex));
 
   f.store(addr.base, &access, value);
   return true;
@@ -5399,9 +5676,10 @@ static bool EmitTeeStore(FunctionCompiler& f, ValType resultType,
     return false;
   }
 
-  MOZ_ASSERT(f.isMem32());  // asm.js opcode
-  MemoryAccessDesc access(viewType, addr.align, addr.offset,
-                          f.bytecodeIfNotAsmJS());
+  MOZ_ASSERT(f.isMem32(addr.memoryIndex));  // asm.js opcode
+  MemoryAccessDesc access(addr.memoryIndex, viewType, addr.align, addr.offset,
+                          f.bytecodeIfNotAsmJS(),
+                          f.hugeMemoryEnabled(addr.memoryIndex));
 
   f.store(addr.base, &access, value);
   return true;
@@ -5424,9 +5702,10 @@ static bool EmitTeeStoreWithCoercion(FunctionCompiler& f, ValType resultType,
     MOZ_CRASH("unexpected coerced store");
   }
 
-  MOZ_ASSERT(f.isMem32());  // asm.js opcode
-  MemoryAccessDesc access(viewType, addr.align, addr.offset,
-                          f.bytecodeIfNotAsmJS());
+  MOZ_ASSERT(f.isMem32(addr.memoryIndex));  // asm.js opcode
+  MemoryAccessDesc access(addr.memoryIndex, viewType, addr.align, addr.offset,
+                          f.bytecodeIfNotAsmJS(),
+                          f.hugeMemoryEnabled(addr.memoryIndex));
 
   f.store(addr.base, &access, value);
   return true;
@@ -5527,15 +5806,26 @@ static bool EmitMemoryGrow(FunctionCompiler& f) {
   uint32_t bytecodeOffset = f.readBytecodeOffset();
 
   MDefinition* delta;
-  if (!f.iter().readMemoryGrow(&delta)) {
+  uint32_t memoryIndex;
+  if (!f.iter().readMemoryGrow(&memoryIndex, &delta)) {
+    return false;
+  }
+
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  MDefinition* memoryIndexValue = f.constantI32(int32_t(memoryIndex));
+  if (!memoryIndexValue) {
     return false;
   }
 
   const SymbolicAddressSignature& callee =
-      f.isNoMemOrMem32() ? SASigMemoryGrowM32 : SASigMemoryGrowM64;
+      f.isMem32(memoryIndex) ? SASigMemoryGrowM32 : SASigMemoryGrowM64;
 
   MDefinition* ret;
-  if (!f.emitInstanceCall1(bytecodeOffset, callee, delta, &ret)) {
+  if (!f.emitInstanceCall2(bytecodeOffset, callee, delta, memoryIndexValue,
+                           &ret)) {
     return false;
   }
 
@@ -5546,15 +5836,25 @@ static bool EmitMemoryGrow(FunctionCompiler& f) {
 static bool EmitMemorySize(FunctionCompiler& f) {
   uint32_t bytecodeOffset = f.readBytecodeOffset();
 
-  if (!f.iter().readMemorySize()) {
+  uint32_t memoryIndex;
+  if (!f.iter().readMemorySize(&memoryIndex)) {
+    return false;
+  }
+
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  MDefinition* memoryIndexValue = f.constantI32(int32_t(memoryIndex));
+  if (!memoryIndexValue) {
     return false;
   }
 
   const SymbolicAddressSignature& callee =
-      f.isNoMemOrMem32() ? SASigMemorySizeM32 : SASigMemorySizeM64;
+      f.isMem32(memoryIndex) ? SASigMemorySizeM32 : SASigMemorySizeM64;
 
   MDefinition* ret;
-  if (!f.emitInstanceCall0(bytecodeOffset, callee, &ret)) {
+  if (!f.emitInstanceCall1(bytecodeOffset, callee, memoryIndexValue, &ret)) {
     return false;
   }
 
@@ -5572,8 +5872,9 @@ static bool EmitAtomicCmpXchg(FunctionCompiler& f, ValType type,
     return false;
   }
 
-  MemoryAccessDesc access(viewType, addr.align, addr.offset, f.bytecodeOffset(),
-                          Synchronization::Full());
+  MemoryAccessDesc access(
+      addr.memoryIndex, viewType, addr.align, addr.offset, f.bytecodeOffset(),
+      f.hugeMemoryEnabled(addr.memoryIndex), Synchronization::Full());
   auto* ins =
       f.atomicCompareExchangeHeap(addr.base, &access, type, oldValue, newValue);
   if (!f.inDeadCode() && !ins) {
@@ -5591,8 +5892,9 @@ static bool EmitAtomicLoad(FunctionCompiler& f, ValType type,
     return false;
   }
 
-  MemoryAccessDesc access(viewType, addr.align, addr.offset, f.bytecodeOffset(),
-                          Synchronization::Load());
+  MemoryAccessDesc access(
+      addr.memoryIndex, viewType, addr.align, addr.offset, f.bytecodeOffset(),
+      f.hugeMemoryEnabled(addr.memoryIndex), Synchronization::Load());
   auto* ins = f.load(addr.base, &access, type);
   if (!f.inDeadCode() && !ins) {
     return false;
@@ -5610,8 +5912,9 @@ static bool EmitAtomicRMW(FunctionCompiler& f, ValType type,
     return false;
   }
 
-  MemoryAccessDesc access(viewType, addr.align, addr.offset, f.bytecodeOffset(),
-                          Synchronization::Full());
+  MemoryAccessDesc access(
+      addr.memoryIndex, viewType, addr.align, addr.offset, f.bytecodeOffset(),
+      f.hugeMemoryEnabled(addr.memoryIndex), Synchronization::Full());
   auto* ins = f.atomicBinopHeap(op, addr.base, &access, type, value);
   if (!f.inDeadCode() && !ins) {
     return false;
@@ -5629,8 +5932,9 @@ static bool EmitAtomicStore(FunctionCompiler& f, ValType type,
     return false;
   }
 
-  MemoryAccessDesc access(viewType, addr.align, addr.offset, f.bytecodeOffset(),
-                          Synchronization::Store());
+  MemoryAccessDesc access(
+      addr.memoryIndex, viewType, addr.align, addr.offset, f.bytecodeOffset(),
+      f.hugeMemoryEnabled(addr.memoryIndex), Synchronization::Store());
   f.store(addr.base, &access, value);
   return true;
 }
@@ -5648,22 +5952,32 @@ static bool EmitWait(FunctionCompiler& f, ValType type, uint32_t byteSize) {
     return false;
   }
 
-  MemoryAccessDesc access(type == ValType::I32 ? Scalar::Int32 : Scalar::Int64,
-                          addr.align, addr.offset, f.bytecodeOffset());
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  MemoryAccessDesc access(addr.memoryIndex,
+                          type == ValType::I32 ? Scalar::Int32 : Scalar::Int64,
+                          addr.align, addr.offset, f.bytecodeOffset(),
+                          f.hugeMemoryEnabled(addr.memoryIndex));
   MDefinition* ptr = f.computeEffectiveAddress(addr.base, &access);
-  if (!f.inDeadCode() && !ptr) {
+  if (!ptr) {
+    return false;
+  }
+
+  MDefinition* memoryIndex = f.constantI32(int32_t(addr.memoryIndex));
+  if (!memoryIndex) {
     return false;
   }
 
   const SymbolicAddressSignature& callee =
-      f.isNoMemOrMem32()
+      f.isMem32(addr.memoryIndex)
           ? (type == ValType::I32 ? SASigWaitI32M32 : SASigWaitI64M32)
           : (type == ValType::I32 ? SASigWaitI32M64 : SASigWaitI64M64);
-  MOZ_ASSERT(type.toMIRType() == callee.argTypes[2]);
 
   MDefinition* ret;
-  if (!f.emitInstanceCall3(bytecodeOffset, callee, ptr, expected, timeout,
-                           &ret)) {
+  if (!f.emitInstanceCall4(bytecodeOffset, callee, ptr, expected, timeout,
+                           memoryIndex, &ret)) {
     return false;
   }
 
@@ -5689,18 +6003,29 @@ static bool EmitWake(FunctionCompiler& f) {
     return false;
   }
 
-  MemoryAccessDesc access(Scalar::Int32, addr.align, addr.offset,
-                          f.bytecodeOffset());
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  MemoryAccessDesc access(addr.memoryIndex, Scalar::Int32, addr.align,
+                          addr.offset, f.bytecodeOffset(),
+                          f.hugeMemoryEnabled(addr.memoryIndex));
   MDefinition* ptr = f.computeEffectiveAddress(addr.base, &access);
-  if (!f.inDeadCode() && !ptr) {
+  if (!ptr) {
+    return false;
+  }
+
+  MDefinition* memoryIndex = f.constantI32(int32_t(addr.memoryIndex));
+  if (!memoryIndex) {
     return false;
   }
 
   const SymbolicAddressSignature& callee =
-      f.isNoMemOrMem32() ? SASigWakeM32 : SASigWakeM64;
+      f.isMem32(addr.memoryIndex) ? SASigWakeM32 : SASigWakeM64;
 
   MDefinition* ret;
-  if (!f.emitInstanceCall2(bytecodeOffset, callee, ptr, count, &ret)) {
+  if (!f.emitInstanceCall3(bytecodeOffset, callee, ptr, count, memoryIndex,
+                           &ret)) {
     return false;
   }
 
@@ -5716,8 +6041,9 @@ static bool EmitAtomicXchg(FunctionCompiler& f, ValType type,
     return false;
   }
 
-  MemoryAccessDesc access(viewType, addr.align, addr.offset, f.bytecodeOffset(),
-                          Synchronization::Full());
+  MemoryAccessDesc access(
+      addr.memoryIndex, viewType, addr.align, addr.offset, f.bytecodeOffset(),
+      f.hugeMemoryEnabled(addr.memoryIndex), Synchronization::Full());
   MDefinition* ins = f.atomicExchangeHeap(addr.base, &access, type, value);
   if (!f.inDeadCode() && !ins) {
     return false;
@@ -5727,21 +6053,64 @@ static bool EmitAtomicXchg(FunctionCompiler& f, ValType type,
   return true;
 }
 
-static bool EmitMemCopyCall(FunctionCompiler& f, MDefinition* dst,
+static bool EmitMemCopyCall(FunctionCompiler& f, uint32_t dstMemIndex,
+                            uint32_t srcMemIndex, MDefinition* dst,
                             MDefinition* src, MDefinition* len) {
   uint32_t bytecodeOffset = f.readBytecodeOffset();
 
-  MDefinition* memoryBase = f.memoryBase();
-  const SymbolicAddressSignature& callee =
-      (f.moduleEnv().usesSharedMemory()
-           ? (f.isMem32() ? SASigMemCopySharedM32 : SASigMemCopySharedM64)
-           : (f.isMem32() ? SASigMemCopyM32 : SASigMemCopyM64));
+  if (dstMemIndex == srcMemIndex) {
+    const SymbolicAddressSignature& callee =
+        (f.moduleEnv().usesSharedMemory(dstMemIndex)
+             ? (f.isMem32(dstMemIndex) ? SASigMemCopySharedM32
+                                       : SASigMemCopySharedM64)
+             : (f.isMem32(dstMemIndex) ? SASigMemCopyM32 : SASigMemCopyM64));
+    MDefinition* memoryBase = f.memoryBase(dstMemIndex);
+    if (!memoryBase) {
+      return false;
+    }
+    return f.emitInstanceCall4(bytecodeOffset, callee, dst, src, len,
+                               memoryBase);
+  }
 
-  return f.emitInstanceCall4(bytecodeOffset, callee, dst, src, len, memoryBase);
+  IndexType dstIndexType = f.moduleEnv().memories[dstMemIndex].indexType();
+  IndexType srcIndexType = f.moduleEnv().memories[srcMemIndex].indexType();
+
+  if (dstIndexType == IndexType::I32) {
+    dst = f.extendI32(dst, /*isUnsigned=*/true);
+    if (!dst) {
+      return false;
+    }
+  }
+  if (srcIndexType == IndexType::I32) {
+    src = f.extendI32(src, /*isUnsigned=*/true);
+    if (!src) {
+      return false;
+    }
+  }
+  if (dstIndexType == IndexType::I32 || srcIndexType == IndexType::I32) {
+    len = f.extendI32(len, /*isUnsigned=*/true);
+    if (!len) {
+      return false;
+    }
+  }
+
+  MDefinition* dstMemIndexValue = f.constantI32(int32_t(dstMemIndex));
+  if (!dstMemIndexValue) {
+    return false;
+  }
+
+  MDefinition* srcMemIndexValue = f.constantI32(int32_t(srcMemIndex));
+  if (!srcMemIndexValue) {
+    return false;
+  }
+
+  return f.emitInstanceCall5(bytecodeOffset, SASigMemCopyAny, dst, src, len,
+                             dstMemIndexValue, srcMemIndexValue);
 }
 
-static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
-                              MDefinition* src, uint32_t length) {
+static bool EmitMemCopyInline(FunctionCompiler& f, uint32_t memoryIndex,
+                              MDefinition* dst, MDefinition* src,
+                              uint32_t length) {
   MOZ_ASSERT(length != 0 && length <= MaxInlineMemoryCopyLength);
 
   // Compute the number of copies of each width we will need to do
@@ -5771,7 +6140,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
 
 #ifdef ENABLE_WASM_SIMD
   for (uint32_t i = 0; i < numCopies16; i++) {
-    MemoryAccessDesc access(Scalar::Simd128, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Simd128, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* load = f.load(src, &access, ValType::V128);
     if (!load || !loadedValues.append(load)) {
       return false;
@@ -5783,7 +6154,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
 
 #ifdef JS_64BIT
   for (uint32_t i = 0; i < numCopies8; i++) {
-    MemoryAccessDesc access(Scalar::Int64, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Int64, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* load = f.load(src, &access, ValType::I64);
     if (!load || !loadedValues.append(load)) {
       return false;
@@ -5794,7 +6167,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
 #endif
 
   for (uint32_t i = 0; i < numCopies4; i++) {
-    MemoryAccessDesc access(Scalar::Uint32, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Uint32, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* load = f.load(src, &access, ValType::I32);
     if (!load || !loadedValues.append(load)) {
       return false;
@@ -5804,7 +6179,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
   }
 
   if (numCopies2) {
-    MemoryAccessDesc access(Scalar::Uint16, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Uint16, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* load = f.load(src, &access, ValType::I32);
     if (!load || !loadedValues.append(load)) {
       return false;
@@ -5814,7 +6191,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
   }
 
   if (numCopies1) {
-    MemoryAccessDesc access(Scalar::Uint8, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Uint8, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* load = f.load(src, &access, ValType::I32);
     if (!load || !loadedValues.append(load)) {
       return false;
@@ -5829,7 +6208,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
   if (numCopies1) {
     offset -= sizeof(uint8_t);
 
-    MemoryAccessDesc access(Scalar::Uint8, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Uint8, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* value = loadedValues.popCopy();
     f.store(dst, &access, value);
   }
@@ -5837,7 +6218,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
   if (numCopies2) {
     offset -= sizeof(uint16_t);
 
-    MemoryAccessDesc access(Scalar::Uint16, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Uint16, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* value = loadedValues.popCopy();
     f.store(dst, &access, value);
   }
@@ -5845,7 +6228,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
   for (uint32_t i = 0; i < numCopies4; i++) {
     offset -= sizeof(uint32_t);
 
-    MemoryAccessDesc access(Scalar::Uint32, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Uint32, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* value = loadedValues.popCopy();
     f.store(dst, &access, value);
   }
@@ -5854,7 +6239,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
   for (uint32_t i = 0; i < numCopies8; i++) {
     offset -= sizeof(uint64_t);
 
-    MemoryAccessDesc access(Scalar::Int64, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Int64, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* value = loadedValues.popCopy();
     f.store(dst, &access, value);
   }
@@ -5864,7 +6251,9 @@ static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
   for (uint32_t i = 0; i < numCopies16; i++) {
     offset -= sizeof(V128);
 
-    MemoryAccessDesc access(Scalar::Simd128, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Simd128, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     auto* value = loadedValues.popCopy();
     f.store(dst, &access, value);
   }
@@ -5886,16 +6275,16 @@ static bool EmitMemCopy(FunctionCompiler& f) {
     return true;
   }
 
-  if (len->isConstant()) {
-    uint64_t length = f.isMem32() ? len->toConstant()->toInt32()
-                                  : len->toConstant()->toInt64();
+  if (dstMemIndex == srcMemIndex && len->isConstant()) {
+    uint64_t length = f.isMem32(dstMemIndex) ? len->toConstant()->toInt32()
+                                             : len->toConstant()->toInt64();
     static_assert(MaxInlineMemoryCopyLength <= UINT32_MAX);
     if (length != 0 && length <= MaxInlineMemoryCopyLength) {
-      return EmitMemCopyInline(f, dst, src, uint32_t(length));
+      return EmitMemCopyInline(f, dstMemIndex, dst, src, uint32_t(length));
     }
   }
 
-  return EmitMemCopyCall(f, dst, src, len);
+  return EmitMemCopyCall(f, dstMemIndex, srcMemIndex, dst, src, len);
 }
 
 static bool EmitTableCopy(FunctionCompiler& f) {
@@ -5938,22 +6327,24 @@ static bool EmitDataOrElemDrop(FunctionCompiler& f, bool isData) {
   return f.emitInstanceCall1(bytecodeOffset, callee, segIndex);
 }
 
-static bool EmitMemFillCall(FunctionCompiler& f, MDefinition* start,
-                            MDefinition* val, MDefinition* len) {
+static bool EmitMemFillCall(FunctionCompiler& f, uint32_t memoryIndex,
+                            MDefinition* start, MDefinition* val,
+                            MDefinition* len) {
+  MDefinition* memoryBase = f.memoryBase(memoryIndex);
+
   uint32_t bytecodeOffset = f.readBytecodeOffset();
-
-  MDefinition* memoryBase = f.memoryBase();
-
   const SymbolicAddressSignature& callee =
-      (f.moduleEnv().usesSharedMemory()
-           ? (f.isMem32() ? SASigMemFillSharedM32 : SASigMemFillSharedM64)
-           : (f.isMem32() ? SASigMemFillM32 : SASigMemFillM64));
+      (f.moduleEnv().usesSharedMemory(memoryIndex)
+           ? (f.isMem32(memoryIndex) ? SASigMemFillSharedM32
+                                     : SASigMemFillSharedM64)
+           : (f.isMem32(memoryIndex) ? SASigMemFillM32 : SASigMemFillM64));
   return f.emitInstanceCall4(bytecodeOffset, callee, start, val, len,
                              memoryBase);
 }
 
-static bool EmitMemFillInline(FunctionCompiler& f, MDefinition* start,
-                              MDefinition* val, uint32_t length) {
+static bool EmitMemFillInline(FunctionCompiler& f, uint32_t memoryIndex,
+                              MDefinition* start, MDefinition* val,
+                              uint32_t length) {
   MOZ_ASSERT(length != 0 && length <= MaxInlineMemoryFillLength);
   uint32_t value = val->toConstant()->toInt32();
 
@@ -6000,21 +6391,27 @@ static bool EmitMemFillInline(FunctionCompiler& f, MDefinition* start,
   if (numCopies1) {
     offset -= sizeof(uint8_t);
 
-    MemoryAccessDesc access(Scalar::Uint8, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Uint8, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     f.store(start, &access, val);
   }
 
   if (numCopies2) {
     offset -= sizeof(uint16_t);
 
-    MemoryAccessDesc access(Scalar::Uint16, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Uint16, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     f.store(start, &access, val2);
   }
 
   for (uint32_t i = 0; i < numCopies4; i++) {
     offset -= sizeof(uint32_t);
 
-    MemoryAccessDesc access(Scalar::Uint32, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Uint32, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     f.store(start, &access, val4);
   }
 
@@ -6022,7 +6419,9 @@ static bool EmitMemFillInline(FunctionCompiler& f, MDefinition* start,
   for (uint32_t i = 0; i < numCopies8; i++) {
     offset -= sizeof(uint64_t);
 
-    MemoryAccessDesc access(Scalar::Int64, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Int64, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     f.store(start, &access, val8);
   }
 #endif
@@ -6031,7 +6430,9 @@ static bool EmitMemFillInline(FunctionCompiler& f, MDefinition* start,
   for (uint32_t i = 0; i < numCopies16; i++) {
     offset -= sizeof(V128);
 
-    MemoryAccessDesc access(Scalar::Simd128, 1, offset, f.bytecodeOffset());
+    MemoryAccessDesc access(memoryIndex, Scalar::Simd128, 1, offset,
+                            f.bytecodeOffset(),
+                            f.hugeMemoryEnabled(memoryIndex));
     f.store(start, &access, val16);
   }
 #endif
@@ -6040,8 +6441,9 @@ static bool EmitMemFillInline(FunctionCompiler& f, MDefinition* start,
 }
 
 static bool EmitMemFill(FunctionCompiler& f) {
+  uint32_t memoryIndex;
   MDefinition *start, *val, *len;
-  if (!f.iter().readMemFill(&start, &val, &len)) {
+  if (!f.iter().readMemFill(&memoryIndex, &start, &val, &len)) {
     return false;
   }
 
@@ -6050,22 +6452,22 @@ static bool EmitMemFill(FunctionCompiler& f) {
   }
 
   if (len->isConstant() && val->isConstant()) {
-    uint64_t length = f.isMem32() ? len->toConstant()->toInt32()
-                                  : len->toConstant()->toInt64();
+    uint64_t length = f.isMem32(memoryIndex) ? len->toConstant()->toInt32()
+                                             : len->toConstant()->toInt64();
     static_assert(MaxInlineMemoryFillLength <= UINT32_MAX);
     if (length != 0 && length <= MaxInlineMemoryFillLength) {
-      return EmitMemFillInline(f, start, val, uint32_t(length));
+      return EmitMemFillInline(f, memoryIndex, start, val, uint32_t(length));
     }
   }
 
-  return EmitMemFillCall(f, start, val, len);
+  return EmitMemFillCall(f, memoryIndex, start, val, len);
 }
 
 static bool EmitMemOrTableInit(FunctionCompiler& f, bool isMem) {
-  uint32_t segIndexVal = 0, dstTableIndex = 0;
+  uint32_t segIndexVal = 0, dstMemOrTableIndex = 0;
   MDefinition *dstOff, *srcOff, *len;
-  if (!f.iter().readMemOrTableInit(isMem, &segIndexVal, &dstTableIndex, &dstOff,
-                                   &srcOff, &len)) {
+  if (!f.iter().readMemOrTableInit(isMem, &segIndexVal, &dstMemOrTableIndex,
+                                   &dstOff, &srcOff, &len)) {
     return false;
   }
 
@@ -6074,19 +6476,23 @@ static bool EmitMemOrTableInit(FunctionCompiler& f, bool isMem) {
   }
 
   uint32_t bytecodeOffset = f.readBytecodeOffset();
+  const SymbolicAddressSignature& callee =
+      isMem
+          ? (f.isMem32(dstMemOrTableIndex) ? SASigMemInitM32 : SASigMemInitM64)
+          : SASigTableInit;
 
   MDefinition* segIndex = f.constantI32(int32_t(segIndexVal));
-
-  if (isMem) {
-    const SymbolicAddressSignature& callee =
-        f.isMem32() ? SASigMemInitM32 : SASigMemInitM64;
-    return f.emitInstanceCall4(bytecodeOffset, callee, dstOff, srcOff, len,
-                               segIndex);
+  if (!segIndex) {
+    return false;
   }
 
-  MDefinition* dti = f.constantI32(int32_t(dstTableIndex));
-  return f.emitInstanceCall5(bytecodeOffset, SASigTableInit, dstOff, srcOff,
-                             len, segIndex, dti);
+  MDefinition* dti = f.constantI32(int32_t(dstMemOrTableIndex));
+  if (!dti) {
+    return false;
+  }
+
+  return f.emitInstanceCall5(bytecodeOffset, callee, dstOff, srcOff, len,
+                             segIndex, dti);
 }
 
 // Note, table.{get,grow,set} on table(funcref) are currently rejected by the
@@ -6116,8 +6522,9 @@ static bool EmitTableFill(FunctionCompiler& f) {
 
 #if ENABLE_WASM_MEMORY_CONTROL
 static bool EmitMemDiscard(FunctionCompiler& f) {
+  uint32_t memoryIndex;
   MDefinition *start, *len;
-  if (!f.iter().readMemDiscard(&start, &len)) {
+  if (!f.iter().readMemDiscard(&memoryIndex, &start, &len)) {
     return false;
   }
 
@@ -6127,12 +6534,13 @@ static bool EmitMemDiscard(FunctionCompiler& f) {
 
   uint32_t bytecodeOffset = f.readBytecodeOffset();
 
-  MDefinition* memoryBase = f.memoryBase();
+  MDefinition* memoryBase = f.memoryBase(memoryIndex);
+  bool isMem32 = f.isMem32(memoryIndex);
 
   const SymbolicAddressSignature& callee =
-      (f.moduleEnv().usesSharedMemory()
-           ? (f.isMem32() ? SASigMemDiscardSharedM32 : SASigMemDiscardSharedM64)
-           : (f.isMem32() ? SASigMemDiscardM32 : SASigMemDiscardM64));
+      (f.moduleEnv().usesSharedMemory(memoryIndex)
+           ? (isMem32 ? SASigMemDiscardSharedM32 : SASigMemDiscardSharedM64)
+           : (isMem32 ? SASigMemDiscardM32 : SASigMemDiscardM64));
   return f.emitInstanceCall3(bytecodeOffset, callee, start, len, memoryBase);
 }
 #endif
@@ -6314,7 +6722,7 @@ static bool EmitRefIsNull(FunctionCompiler& f) {
     return false;
   }
   f.iter().setResult(
-      f.compare(input, nullVal, JSOp::Eq, MCompare::Compare_RefOrNull));
+      f.compare(input, nullVal, JSOp::Eq, MCompare::Compare_WasmAnyRef));
   return true;
 }
 
@@ -6491,12 +6899,12 @@ static bool EmitStoreLaneSimd128(FunctionCompiler& f, uint32_t laneSize) {
 
 #ifdef ENABLE_WASM_FUNCTION_REFERENCES
 static bool EmitRefAsNonNull(FunctionCompiler& f) {
-  MDefinition* value;
-  if (!f.iter().readRefAsNonNull(&value)) {
+  MDefinition* ref;
+  if (!f.iter().readRefAsNonNull(&ref)) {
     return false;
   }
 
-  return f.refAsNonNull(value);
+  return f.refAsNonNull(ref);
 }
 
 static bool EmitBrOnNull(FunctionCompiler& f) {
@@ -6572,16 +6980,23 @@ static bool EmitStructNew(FunctionCompiler& f) {
   const StructType& structType = (*f.moduleEnv().types)[typeIndex].structType();
   MOZ_ASSERT(args.length() == structType.fields_.length());
 
-  // Allocate a default initialized struct.  This requires the type definition
+  // Allocate an uninitialized struct.  This requires the type definition
   // for the struct.
   MDefinition* typeDefData = f.loadTypeDefInstanceData(typeIndex);
   if (!typeDefData) {
     return false;
   }
 
-  // Create call: structObject = Instance::structNewUninit(typeDefData)
+  // Figure out whether we need an OOL storage area, and hence which routine
+  // to call.
+  SymbolicAddressSignature calleeSASig =
+      WasmStructObject::requiresOutlineBytes(structType.size_)
+          ? SASigStructNewOOL_false
+          : SASigStructNewIL_false;
+
+  // Create call: structObject = Instance::structNew{IL,OOL}<false>(typeDefData)
   MDefinition* structObject;
-  if (!f.emitInstanceCall1(lineOrBytecode, SASigStructNewUninit, typeDefData,
+  if (!f.emitInstanceCall1(lineOrBytecode, calleeSASig, typeDefData,
                            &structObject)) {
     return false;
   }
@@ -6616,6 +7031,8 @@ static bool EmitStructNewDefault(FunctionCompiler& f) {
     return true;
   }
 
+  const StructType& structType = (*f.moduleEnv().types)[typeIndex].structType();
+
   // Allocate a default initialized struct.  This requires the type definition
   // for the struct.
   MDefinition* typeDefData = f.loadTypeDefInstanceData(typeIndex);
@@ -6623,9 +7040,16 @@ static bool EmitStructNewDefault(FunctionCompiler& f) {
     return false;
   }
 
-  // Create call: structObject = Instance::structNew(typeDefData)
+  // Figure out whether we need an OOL storage area, and hence which routine
+  // to call.
+  SymbolicAddressSignature calleeSASig =
+      WasmStructObject::requiresOutlineBytes(structType.size_)
+          ? SASigStructNewOOL_true
+          : SASigStructNewIL_true;
+
+  // Create call: structObject = Instance::structNew{IL,OOL}<true>(typeDefData)
   MDefinition* structObject;
-  if (!f.emitInstanceCall1(lineOrBytecode, SASigStructNew, typeDefData,
+  if (!f.emitInstanceCall1(lineOrBytecode, calleeSASig, typeDefData,
                            &structObject)) {
     return false;
   }
@@ -6888,6 +7312,82 @@ static bool EmitArrayNewElem(FunctionCompiler& f) {
   return true;
 }
 
+static bool EmitArrayInitData(FunctionCompiler& f) {
+  uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
+
+  uint32_t typeIndex, segIndex;
+  MDefinition* array;
+  MDefinition* arrayIndex;
+  MDefinition* segOffset;
+  MDefinition* length;
+  if (!f.iter().readArrayInitData(&typeIndex, &segIndex, &array, &arrayIndex,
+                                  &segOffset, &length)) {
+    return false;
+  }
+
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  // Get the type definition data for the array as a whole.
+  MDefinition* typeDefData = f.loadTypeDefInstanceData(typeIndex);
+  if (!typeDefData) {
+    return false;
+  }
+
+  // Other values we need to pass to the instance call:
+  MDefinition* segIndexM = f.constantI32(int32_t(segIndex));
+  if (!segIndexM) {
+    return false;
+  }
+
+  // Create call:
+  // Instance::arrayInitData(array:word, index:u32, segByteOffset:u32,
+  // numElements:u32, typeDefData:word, segIndex:u32) If the requested size
+  // exceeds MaxArrayPayloadBytes, the MIR generated by this call will trap.
+  return f.emitInstanceCall6(lineOrBytecode, SASigArrayInitData, array,
+                             arrayIndex, segOffset, length, typeDefData,
+                             segIndexM);
+}
+
+static bool EmitArrayInitElem(FunctionCompiler& f) {
+  uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
+
+  uint32_t typeIndex, segIndex;
+  MDefinition* array;
+  MDefinition* arrayIndex;
+  MDefinition* segOffset;
+  MDefinition* length;
+  if (!f.iter().readArrayInitElem(&typeIndex, &segIndex, &array, &arrayIndex,
+                                  &segOffset, &length)) {
+    return false;
+  }
+
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  // Get the type definition data for the array as a whole.
+  MDefinition* typeDefData = f.loadTypeDefInstanceData(typeIndex);
+  if (!typeDefData) {
+    return false;
+  }
+
+  // Other values we need to pass to the instance call:
+  MDefinition* segIndexM = f.constantI32(int32_t(segIndex));
+  if (!segIndexM) {
+    return false;
+  }
+
+  // Create call:
+  // Instance::arrayInitElem(array:word, index:u32, segByteOffset:u32,
+  // numElements:u32, typeDefData:word, segIndex:u32) If the requested size
+  // exceeds MaxArrayPayloadBytes, the MIR generated by this call will trap.
+  return f.emitInstanceCall6(lineOrBytecode, SASigArrayInitElem, array,
+                             arrayIndex, segOffset, length, typeDefData,
+                             segIndexM);
+}
+
 static bool EmitArraySet(FunctionCompiler& f) {
   uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
 
@@ -6961,9 +7461,9 @@ static bool EmitArrayGet(FunctionCompiler& f, FieldWideningOp wideningOp) {
   return true;
 }
 
-static bool EmitArrayLen(FunctionCompiler& f, bool decodeIgnoredTypeIndex) {
+static bool EmitArrayLen(FunctionCompiler& f) {
   MDefinition* arrayObject;
-  if (!f.iter().readArrayLen(decodeIgnoredTypeIndex, &arrayObject)) {
+  if (!f.iter().readArrayLen(&arrayObject)) {
     return false;
   }
 
@@ -7028,11 +7528,15 @@ static bool EmitArrayCopy(FunctionCompiler& f) {
                              numElements, elemSizeDef);
 }
 
-static bool EmitRefTestV5(FunctionCompiler& f) {
-  MDefinition* ref;
-  RefType sourceType;
+static bool EmitArrayFill(FunctionCompiler& f) {
+  uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
+
   uint32_t typeIndex;
-  if (!f.iter().readRefTestV5(&sourceType, &typeIndex, &ref)) {
+  MDefinition* array;
+  MDefinition* index;
+  MDefinition* val;
+  MDefinition* numElements;
+  if (!f.iter().readArrayFill(&typeIndex, &array, &index, &val, &numElements)) {
     return false;
   }
 
@@ -7040,22 +7544,34 @@ static bool EmitRefTestV5(FunctionCompiler& f) {
     return true;
   }
 
-  const TypeDef& typeDef = f.moduleEnv().types->type(typeIndex);
-  RefType destType = RefType::fromTypeDef(&typeDef, false);
-  MDefinition* success = f.refTest(ref, sourceType, destType);
-  if (!success) {
+  return f.createArrayFill(lineOrBytecode, typeIndex, array, index, val,
+                           numElements);
+}
+
+static bool EmitRefI31(FunctionCompiler& f) {
+  MDefinition* input;
+  if (!f.iter().readConversion(
+          ValType::I32, ValType(RefType::i31().asNonNullable()), &input)) {
     return false;
   }
 
-  f.iter().setResult(success);
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  MDefinition* output = f.refI31(input);
+  if (!output) {
+    return false;
+  }
+  f.iter().setResult(output);
   return true;
 }
 
-static bool EmitRefCastV5(FunctionCompiler& f) {
-  MDefinition* ref;
-  RefType sourceType;
-  uint32_t typeIndex;
-  if (!f.iter().readRefCastV5(&sourceType, &typeIndex, &ref)) {
+static bool EmitI31Get(FunctionCompiler& f, FieldWideningOp wideningOp) {
+  MOZ_ASSERT(wideningOp != FieldWideningOp::None);
+
+  MDefinition* input;
+  if (!f.iter().readConversion(ValType(RefType::i31()), ValType::I32, &input)) {
     return false;
   }
 
@@ -7063,13 +7579,14 @@ static bool EmitRefCastV5(FunctionCompiler& f) {
     return true;
   }
 
-  const TypeDef& typeDef = f.moduleEnv().types->type(typeIndex);
-  RefType destType = RefType::fromTypeDef(&typeDef, /*nullable=*/true);
-  if (!f.refCast(ref, sourceType, destType)) {
+  if (!f.refAsNonNull(input)) {
     return false;
   }
-
-  f.iter().setResult(ref);
+  MDefinition* output = f.i31Get(input, wideningOp);
+  if (!output) {
+    return false;
+  }
+  f.iter().setResult(output);
   return true;
 }
 
@@ -7114,81 +7631,19 @@ static bool EmitRefCast(FunctionCompiler& f, bool nullable) {
   return true;
 }
 
-static bool EmitBrOnCast(FunctionCompiler& f) {
-  bool onSuccess;
+static bool EmitBrOnCast(FunctionCompiler& f, bool onSuccess) {
   uint32_t labelRelativeDepth;
   RefType sourceType;
   RefType destType;
   ResultType labelType;
   DefVector values;
-  if (!f.iter().readBrOnCast(&onSuccess, &labelRelativeDepth, &sourceType,
+  if (!f.iter().readBrOnCast(onSuccess, &labelRelativeDepth, &sourceType,
                              &destType, &labelType, &values)) {
     return false;
   }
 
   return f.brOnCastCommon(onSuccess, labelRelativeDepth, sourceType, destType,
                           labelType, values);
-}
-
-static bool EmitBrOnCastCommonV5(FunctionCompiler& f, bool onSuccess) {
-  uint32_t labelRelativeDepth;
-  RefType sourceType;
-  uint32_t castTypeIndex;
-  ResultType labelType;
-  DefVector values;
-  if (onSuccess
-          ? !f.iter().readBrOnCastV5(&labelRelativeDepth, &sourceType,
-                                     &castTypeIndex, &labelType, &values)
-          : !f.iter().readBrOnCastFailV5(&labelRelativeDepth, &sourceType,
-                                         &castTypeIndex, &labelType, &values)) {
-    return false;
-  }
-
-  const TypeDef& typeDef = f.moduleEnv().types->type(castTypeIndex);
-  RefType type = RefType::fromTypeDef(&typeDef, false);
-  return f.brOnCastCommon(onSuccess, labelRelativeDepth, sourceType, type,
-                          labelType, values);
-}
-
-static bool EmitBrOnCastHeapV5(FunctionCompiler& f, bool onSuccess,
-                               bool nullable) {
-  uint32_t labelRelativeDepth;
-  RefType sourceType;
-  RefType destType;
-  ResultType labelType;
-  DefVector values;
-  if (onSuccess ? !f.iter().readBrOnCastHeapV5(nullable, &labelRelativeDepth,
-                                               &sourceType, &destType,
-                                               &labelType, &values)
-                : !f.iter().readBrOnCastFailHeapV5(
-                      nullable, &labelRelativeDepth, &sourceType, &destType,
-                      &labelType, &values)) {
-    return false;
-  }
-
-  return f.brOnCastCommon(onSuccess, labelRelativeDepth, sourceType, destType,
-                          labelType, values);
-}
-
-static bool EmitRefAsStructV5(FunctionCompiler& f) {
-  MDefinition* value;
-  if (!f.iter().readConversion(ValType(RefType::any()),
-                               ValType(RefType::struct_().asNonNullable()),
-                               &value)) {
-    return false;
-  }
-  f.iter().setResult(value);
-  return true;
-}
-
-static bool EmitBrOnNonStructV5(FunctionCompiler& f) {
-  uint32_t labelRelativeDepth;
-  ResultType labelType;
-  DefVector values;
-  if (!f.iter().readBrOnNonStructV5(&labelRelativeDepth, &labelType, &values)) {
-    return false;
-  }
-  return f.brOnNonStruct(values);
 }
 
 static bool EmitExternInternalize(FunctionCompiler& f) {
@@ -7243,7 +7698,7 @@ static bool EmitIntrinsic(FunctionCompiler& f) {
     return false;
   }
 
-  MDefinition* memoryBase = f.memoryBase();
+  MDefinition* memoryBase = f.memoryBase(0);
   if (!f.passArg(memoryBase, MIRType::Pointer, &args)) {
     return false;
   }
@@ -7730,7 +8185,7 @@ static bool EmitBodyExprs(FunctionCompiler& f) {
           return f.iter().unrecognizedOpcode(&op);
         }
         CHECK(EmitComparison(f, RefType::eq(), JSOp::Eq,
-                             MCompare::Compare_RefOrNull));
+                             MCompare::Compare_WasmAnyRef));
 #endif
       case uint16_t(Op::RefFunc):
         CHECK(EmitRefFunc(f));
@@ -7750,6 +8205,21 @@ static bool EmitBodyExprs(FunctionCompiler& f) {
         CHECK(EmitSignExtend(f, 2, 8));
       case uint16_t(Op::I64Extend32S):
         CHECK(EmitSignExtend(f, 4, 8));
+
+#ifdef ENABLE_WASM_TAIL_CALLS
+      case uint16_t(Op::ReturnCall): {
+        if (!f.moduleEnv().tailCallsEnabled()) {
+          return f.iter().unrecognizedOpcode(&op);
+        }
+        CHECK(EmitReturnCall(f));
+      }
+      case uint16_t(Op::ReturnCallIndirect): {
+        if (!f.moduleEnv().tailCallsEnabled()) {
+          return f.iter().unrecognizedOpcode(&op);
+        }
+        CHECK(EmitReturnCallIndirect(f));
+      }
+#endif
 
 #ifdef ENABLE_WASM_FUNCTION_REFERENCES
       case uint16_t(Op::RefAsNonNull):
@@ -7774,6 +8244,16 @@ static bool EmitBodyExprs(FunctionCompiler& f) {
           return f.iter().unrecognizedOpcode(&op);
         }
         CHECK(EmitCallRef(f));
+      }
+#endif
+
+#if defined(ENABLE_WASM_TAIL_CALLS) && defined(ENABLE_WASM_FUNCTION_REFERENCES)
+      case uint16_t(Op::ReturnCallRef): {
+        if (!f.moduleEnv().functionReferencesEnabled() ||
+            !f.moduleEnv().tailCallsEnabled()) {
+          return f.iter().unrecognizedOpcode(&op);
+        }
+        CHECK(EmitReturnCallRef(f));
       }
 #endif
 
@@ -7804,9 +8284,12 @@ static bool EmitBodyExprs(FunctionCompiler& f) {
             CHECK(EmitArrayNewFixed(f));
           case uint32_t(GcOp::ArrayNewData):
             CHECK(EmitArrayNewData(f));
-          case uint32_t(GcOp::ArrayInitFromElemStaticV5):
           case uint32_t(GcOp::ArrayNewElem):
             CHECK(EmitArrayNewElem(f));
+          case uint32_t(GcOp::ArrayInitData):
+            CHECK(EmitArrayInitData(f));
+          case uint32_t(GcOp::ArrayInitElem):
+            CHECK(EmitArrayInitElem(f));
           case uint32_t(GcOp::ArraySet):
             CHECK(EmitArraySet(f));
           case uint32_t(GcOp::ArrayGet):
@@ -7815,37 +8298,22 @@ static bool EmitBodyExprs(FunctionCompiler& f) {
             CHECK(EmitArrayGet(f, FieldWideningOp::Signed));
           case uint32_t(GcOp::ArrayGetU):
             CHECK(EmitArrayGet(f, FieldWideningOp::Unsigned));
-          case uint32_t(GcOp::ArrayLenWithTypeIndex):
-            CHECK(EmitArrayLen(f, /*decodeIgnoredTypeIndex=*/true));
           case uint32_t(GcOp::ArrayLen):
-            CHECK(EmitArrayLen(f, /*decodeIgnoredTypeIndex=*/false));
+            CHECK(EmitArrayLen(f));
           case uint32_t(GcOp::ArrayCopy):
             CHECK(EmitArrayCopy(f));
-          case uint32_t(GcOp::RefTestV5):
-            CHECK(EmitRefTestV5(f));
-          case uint32_t(GcOp::RefCastV5):
-            CHECK(EmitRefCastV5(f));
+          case uint32_t(GcOp::ArrayFill):
+            CHECK(EmitArrayFill(f));
+          case uint32_t(GcOp::RefI31):
+            CHECK(EmitRefI31(f));
+          case uint32_t(GcOp::I31GetS):
+            CHECK(EmitI31Get(f, FieldWideningOp::Signed));
+          case uint32_t(GcOp::I31GetU):
+            CHECK(EmitI31Get(f, FieldWideningOp::Unsigned));
           case uint32_t(GcOp::BrOnCast):
-            CHECK(EmitBrOnCast(f));
-          case uint32_t(GcOp::BrOnCastV5):
-            CHECK(EmitBrOnCastCommonV5(f, /*onSuccess=*/true));
-          case uint32_t(GcOp::BrOnCastFailV5):
-            CHECK(EmitBrOnCastCommonV5(f, /*onSuccess=*/false));
-          case uint32_t(GcOp::BrOnCastHeapV5):
-            CHECK(
-                EmitBrOnCastHeapV5(f, /*onSuccess=*/true, /*nullable=*/false));
-          case uint32_t(GcOp::BrOnCastHeapNullV5):
-            CHECK(EmitBrOnCastHeapV5(f, /*onSuccess=*/true, /*nullable=*/true));
-          case uint32_t(GcOp::BrOnCastFailHeapV5):
-            CHECK(
-                EmitBrOnCastHeapV5(f, /*onSuccess=*/false, /*nullable=*/false));
-          case uint32_t(GcOp::BrOnCastFailHeapNullV5):
-            CHECK(
-                EmitBrOnCastHeapV5(f, /*onSuccess=*/false, /*nullable=*/true));
-          case uint32_t(GcOp::RefAsStructV5):
-            CHECK(EmitRefAsStructV5(f));
-          case uint32_t(GcOp::BrOnNonStructV5):
-            CHECK(EmitBrOnNonStructV5(f));
+            CHECK(EmitBrOnCast(f, /*onSuccess=*/true));
+          case uint32_t(GcOp::BrOnCastFail):
+            CHECK(EmitBrOnCast(f, /*onSuccess=*/false));
           case uint32_t(GcOp::RefTest):
             CHECK(EmitRefTest(f, /*nullable=*/false));
           case uint32_t(GcOp::RefTestNull):
@@ -8603,11 +9071,11 @@ bool wasm::IonCompileFunctions(const ModuleEnvironment& moduleEnv,
     CompileInfo compileInfo(locals.length());
     MIRGenerator mir(nullptr, options, &alloc, &graph, &compileInfo,
                      IonOptimizations.get(OptimizationLevel::Wasm));
-    if (moduleEnv.usesMemory()) {
-      if (moduleEnv.memory->indexType() == IndexType::I32) {
-        mir.initMinWasmHeapLength(moduleEnv.memory->initialLength32());
+    if (moduleEnv.numMemories() > 0) {
+      if (moduleEnv.memories[0].indexType() == IndexType::I32) {
+        mir.initMinWasmMemory0Length(moduleEnv.memories[0].initialLength32());
       } else {
-        mir.initMinWasmHeapLength(moduleEnv.memory->initialLength64());
+        mir.initMinWasmMemory0Length(moduleEnv.memories[0].initialLength64());
       }
     }
 
@@ -8643,6 +9111,8 @@ bool wasm::IonCompileFunctions(const ModuleEnvironment& moduleEnv,
         return false;
       }
 
+      size_t unwindInfoBefore = masm.codeRangeUnwindInfos().length();
+
       CodeGenerator codegen(&mir, lir, &masm);
 
       BytecodeOffset prologueTrapOffset(func.lineOrBytecode);
@@ -8655,8 +9125,10 @@ bool wasm::IonCompileFunctions(const ModuleEnvironment& moduleEnv,
         return false;
       }
 
+      bool hasUnwindInfo =
+          unwindInfoBefore != masm.codeRangeUnwindInfos().length();
       if (!code->codeRanges.emplaceBack(func.index, func.lineOrBytecode,
-                                        offsets)) {
+                                        offsets, hasUnwindInfo)) {
         return false;
       }
     }

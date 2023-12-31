@@ -295,6 +295,12 @@ class MOZ_RAII WarpCacheIRTranspiler : public WarpBuilderShared {
                                     bool sameRealm,
                                     uint32_t nargsAndFlagsOffset);
 
+#ifndef JS_CODEGEN_X86
+  [[nodiscard]] bool emitCallScriptedProxyGetShared(
+      MDefinition* target, MDefinition* receiver, MDefinition* handler,
+      MDefinition* id, MDefinition* trapDef, WrappedFunction* trap);
+#endif
+
   CACHE_IR_TRANSPILER_GENERATED
 
  public:
@@ -422,6 +428,9 @@ bool WarpCacheIRTranspiler::emitGuardAnyClass(ObjOperandId objId,
 bool WarpCacheIRTranspiler::emitGuardShape(ObjOperandId objId,
                                            uint32_t shapeOffset) {
   MDefinition* def = getOperand(objId);
+
+  // No read barrier is required because snapshot data is not weak and is traced
+  // as part of IonCompileTask.
   Shape* shape = shapeStubField(shapeOffset);
 
   auto* ins = MGuardShape::New(alloc(), def, shape);
@@ -437,7 +446,7 @@ bool WarpCacheIRTranspiler::emitGuardMultipleShapes(ObjOperandId objId,
   MInstruction* shapeList = objectStubField(shapesOffset);
 
   auto* ins = MGuardMultipleShapes::New(alloc(), def, shapeList);
-  if (builder_->isMonomorphicInlined()) {
+  if (builder_->info().inlineScriptTree()->hasSharedICScript()) {
     ins->setBailoutKind(BailoutKind::MonomorphicInlinedStubFolding);
   }
   add(ins);
@@ -788,6 +797,18 @@ bool WarpCacheIRTranspiler::emitGuardIsTypedArray(ObjOperandId objId) {
   return true;
 }
 
+bool WarpCacheIRTranspiler::emitGuardHasProxyHandler(ObjOperandId objId,
+                                                     uint32_t handlerOffset) {
+  MDefinition* obj = getOperand(objId);
+  const void* handler = rawPointerField(handlerOffset);
+
+  auto* ins = MGuardHasProxyHandler::New(alloc(), obj, handler);
+  add(ins);
+
+  setOperand(objId, ins);
+  return true;
+}
+
 bool WarpCacheIRTranspiler::emitGuardProto(ObjOperandId objId,
                                            uint32_t protoOffset) {
   MDefinition* def = getOperand(objId);
@@ -889,6 +910,26 @@ bool WarpCacheIRTranspiler::emitGuardDynamicSlotValue(ObjOperandId objId,
   auto* guard = MGuardValue::New(alloc(), load, val);
   add(guard);
   return true;
+}
+
+bool WarpCacheIRTranspiler::emitLoadScriptedProxyHandler(ValOperandId resultId,
+                                                         ObjOperandId objId) {
+  MDefinition* obj = getOperand(objId);
+
+  auto* load = MLoadScriptedProxyHandler::New(alloc(), obj);
+  add(load);
+
+  return defineOperand(resultId, load);
+}
+
+bool WarpCacheIRTranspiler::emitIdToStringOrSymbol(ValOperandId resultId,
+                                                   ValOperandId idId) {
+  MDefinition* id = getOperand(idId);
+
+  auto* ins = MIdToStringOrSymbol::New(alloc(), id);
+  add(ins);
+
+  return defineOperand(resultId, ins);
 }
 
 bool WarpCacheIRTranspiler::emitGuardSpecificAtom(StringOperandId strId,
@@ -1161,7 +1202,12 @@ bool WarpCacheIRTranspiler::emitGuardToInt32(ValOperandId inputId) {
 
 bool WarpCacheIRTranspiler::emitGuardBooleanToInt32(ValOperandId inputId,
                                                     Int32OperandId resultId) {
+  if (!emitGuardTo(inputId, MIRType::Boolean)) {
+    return false;
+  }
+
   MDefinition* input = getOperand(inputId);
+  MOZ_ASSERT(input->type() == MIRType::Boolean);
 
   auto* ins = MBooleanToInt32::New(alloc(), input);
   add(ins);
@@ -2001,7 +2047,7 @@ bool WarpCacheIRTranspiler::emitLoadDenseElementHoleExistsResult(
   add(length);
 
   // Check if id < initLength and elem[id] not a hole.
-  auto* ins = MInArray::New(alloc(), elements, index, length, obj);
+  auto* ins = MInArray::New(alloc(), elements, index, length);
   add(ins);
 
   pushResult(ins);
@@ -3507,6 +3553,14 @@ bool WarpCacheIRTranspiler::emitCallRegExpSearcherResult(
   return resumeAfter(searcher);
 }
 
+bool WarpCacheIRTranspiler::emitRegExpSearcherLastLimitResult() {
+  auto* limit = MRegExpSearcherLastLimit::New(alloc());
+  addEffectful(limit);
+  pushResult(limit);
+
+  return resumeAfter(limit);
+}
+
 bool WarpCacheIRTranspiler::emitRegExpBuiltinExecMatchResult(
     ObjOperandId regexpId, StringOperandId inputId, uint32_t stubOffset) {
   MDefinition* regexp = getOperand(regexpId);
@@ -3529,6 +3583,18 @@ bool WarpCacheIRTranspiler::emitRegExpBuiltinExecTestResult(
   pushResult(ins);
 
   return resumeAfter(ins);
+}
+
+bool WarpCacheIRTranspiler::emitRegExpHasCaptureGroupsResult(
+    ObjOperandId regexpId, StringOperandId inputId) {
+  MDefinition* regexp = getOperand(regexpId);
+  MDefinition* input = getOperand(inputId);
+
+  auto* result = MRegExpHasCaptureGroups::New(alloc(), regexp, input);
+  addEffectful(result);
+  pushResult(result);
+
+  return resumeAfter(result);
 }
 
 MInstruction* WarpCacheIRTranspiler::convertToBoolean(MDefinition* input) {
@@ -3787,7 +3853,10 @@ bool WarpCacheIRTranspiler::emitTypedArrayByteLengthDoubleResult(
   auto* size = MTypedArrayElementSize::New(alloc(), obj);
   add(size);
 
-  auto* mul = MMul::New(alloc(), lengthDouble, size, MIRType::Double);
+  auto* sizeDouble = MToDouble::New(alloc(), size);
+  add(sizeDouble);
+
+  auto* mul = MMul::New(alloc(), lengthDouble, sizeDouble, MIRType::Double);
   mul->setCanBeNegativeZero(false);
   add(mul);
 
@@ -4883,7 +4952,7 @@ bool WarpCacheIRTranspiler::maybeCreateThis(MDefinition* callee,
   MOZ_ASSERT(thisArg->type() == MIRType::MagicIsConstructing ||
              thisArg->isPhi());
 
-  MDefinition* newTarget = callInfo_->getNewTarget();
+  auto* newTarget = unboxObjectInfallible(callInfo_->getNewTarget());
   auto* createThis = MCreateThis::New(alloc(), callee, newTarget);
   add(createThis);
 
@@ -5081,6 +5150,80 @@ bool WarpCacheIRTranspiler::emitCallInlinedFunction(ObjOperandId calleeId,
                           CallKind::Scripted);
 }
 
+#ifdef JS_PUNBOX64
+bool WarpCacheIRTranspiler::emitCallScriptedProxyGetShared(
+    MDefinition* target, MDefinition* receiver, MDefinition* handler,
+    MDefinition* id, MDefinition* trapDef, WrappedFunction* trap) {
+  CallInfo callInfo(alloc(), /* constructing = */ false,
+                    /* ignoresRval = */ false);
+  callInfo.initForProxyGet(trapDef, handler, target, id, receiver);
+
+  MCall* call = makeCall(callInfo, /* needsThisCheck = */ false, trap);
+  if (!call) {
+    return false;
+  }
+
+  addEffectful(call);
+
+  if (!current->ensureHasSlots(3)) {
+    return false;
+  }
+  current->push(call);
+  current->push(id);
+  current->push(target);
+
+  MResumePoint* resumePoint =
+      MResumePoint::New(alloc(), current, loc_.toRawBytecode(),
+                        ResumeMode::ResumeAfterCheckProxyGetResult);
+  if (!resumePoint) {
+    return false;
+  }
+  call->setResumePoint(resumePoint);
+
+  current->pop();
+  current->pop();
+
+  MCheckScriptedProxyGetResult* check =
+      MCheckScriptedProxyGetResult::New(alloc(), target, id, call);
+  addEffectfulUnsafe(check);
+
+  return resumeAfterUnchecked(check);
+}
+
+bool WarpCacheIRTranspiler::emitCallScriptedProxyGetResult(
+    ValOperandId targetId, ObjOperandId receiverId, ObjOperandId handlerId,
+    uint32_t trapOffset, uint32_t idOffset, uint32_t nargsAndFlags) {
+  MDefinition* target = getOperand(targetId);
+  MDefinition* receiver = getOperand(receiverId);
+  MDefinition* handler = getOperand(handlerId);
+  MDefinition* trap = objectStubField(trapOffset);
+  jsid id = idStubField(idOffset);
+  MDefinition* idDef = constant(StringValue(id.toAtom()));
+  uint16_t nargs = nargsAndFlags >> 16;
+  FunctionFlags flags = FunctionFlags(uint16_t(nargsAndFlags));
+  WrappedFunction* wrappedTarget =
+      maybeWrappedFunction(trap, CallKind::Scripted, nargs, flags);
+  return emitCallScriptedProxyGetShared(target, receiver, handler, idDef, trap,
+                                        wrappedTarget);
+}
+
+bool WarpCacheIRTranspiler::emitCallScriptedProxyGetByValueResult(
+    ValOperandId targetId, ObjOperandId receiverId, ObjOperandId handlerId,
+    ValOperandId idId, uint32_t trapOffset, uint32_t nargsAndFlags) {
+  MDefinition* target = getOperand(targetId);
+  MDefinition* receiver = getOperand(receiverId);
+  MDefinition* handler = getOperand(handlerId);
+  MDefinition* trap = objectStubField(trapOffset);
+  MDefinition* idDef = getOperand(idId);
+  uint16_t nargs = nargsAndFlags >> 16;
+  FunctionFlags flags = FunctionFlags(uint16_t(nargsAndFlags));
+  WrappedFunction* wrappedTarget =
+      maybeWrappedFunction(trap, CallKind::Scripted, nargs, flags);
+  return emitCallScriptedProxyGetShared(target, receiver, handler, idDef, trap,
+                                        wrappedTarget);
+}
+#endif
+
 bool WarpCacheIRTranspiler::emitCallClassHook(ObjOperandId calleeId,
                                               Int32OperandId argcId,
                                               CallFlags flags,
@@ -5170,7 +5313,8 @@ bool WarpCacheIRTranspiler::emitCallBoundScriptedFunction(
     auto* boundArgs = MLoadFixedSlot::New(
         alloc(), callee, BoundFunctionObject::firstInlineBoundArgSlot());
     add(boundArgs);
-    elements = MElements::New(alloc(), boundArgs);
+    auto* boundArgsObj = unboxObjectInfallible(boundArgs, IsMovable::Yes);
+    elements = MElements::New(alloc(), boundArgsObj);
     add(elements);
   }
 
@@ -5367,18 +5511,21 @@ MDefinition* WarpCacheIRTranspiler::convertWasmArg(MDefinition* arg,
       MOZ_CRASH("Unexpected type for Wasm JitEntry");
     case wasm::ValType::Ref:
       // Transform the JS representation into an AnyRef representation.
-      // The resulting type is MIRType::RefOrNull.  These cases are all
+      // The resulting type is MIRType::WasmAnyRef.  These cases are all
       // effect-free.
       switch (arg->type()) {
         case MIRType::Object:
           conversion = MWasmAnyRefFromJSObject::New(alloc(), arg);
+          break;
+        case MIRType::String:
+          conversion = MWasmAnyRefFromJSString::New(alloc(), arg);
           break;
         case MIRType::Null:
           arg->setImplicitlyUsedUnchecked();
           conversion = MWasmNullConstant::New(alloc());
           break;
         default:
-          conversion = MWasmBoxValue::New(alloc(), arg);
+          conversion = MWasmAnyRefFromJSValue::New(alloc(), arg);
           break;
       }
       break;
@@ -5708,9 +5855,9 @@ bool WarpCacheIRTranspiler::emitCloseIterScriptedResult(ObjOperandId iterId,
 
   MCheckIsObj* check = MCheckIsObj::New(
       alloc(), call, uint8_t(CheckIsObjectKind::IteratorReturn));
-  add(check);
+  addEffectfulUnsafe(check);
 
-  return true;
+  return resumeAfterUnchecked(check);
 }
 
 bool WarpCacheIRTranspiler::emitGuardGlobalGeneration(

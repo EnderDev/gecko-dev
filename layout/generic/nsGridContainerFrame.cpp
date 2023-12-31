@@ -76,7 +76,9 @@ GridTemplate::LineNameLists(bool aIsSubgrid) const {
     return AsTrackList()->line_names.AsSpan();
   }
   if (IsSubgrid() && aIsSubgrid) {
-    return AsSubgrid()->names.AsSpan();
+    // For subgrid, we need to resolve <line-name-list> from each
+    // StyleGenericLineNameListValue, so return empty.
+    return {};
   }
   MOZ_ASSERT(IsNone() || IsMasonry() || (IsSubgrid() && !aIsSubgrid));
   return {};
@@ -1453,23 +1455,13 @@ class MOZ_STACK_CLASS nsGridContainerFrame::LineNameMap {
     if (MOZ_UNLIKELY(aRange)) {  // subgrid case
       mClampMinLine = 1;
       mClampMaxLine = 1 + aRange->Extent();
+      MOZ_ASSERT(aTracks.mTemplate.IsSubgrid(), "Should be subgrid type");
+      ExpandRepeatLineNamesForSubgrid(*aTracks.mTemplate.AsSubgrid());
+      // we've expanded all subgrid auto-fill lines in
+      // ExpandRepeatLineNamesForSubgrid()
+      mRepeatAutoStart = 0;
       mRepeatAutoEnd = mRepeatAutoStart;
-      const auto& styleSubgrid = aTracks.mTemplate.AsSubgrid();
-      const auto fillLen = styleSubgrid->fill_len;
-      mHasRepeatAuto = fillLen != 0;
-      if (mHasRepeatAuto) {
-        const auto& lineNameLists = styleSubgrid->names;
-        const int32_t extraAutoFillLineCount =
-            mClampMaxLine - lineNameLists.Length();
-        // Maximum possible number of repeat name lists. This must be reduced
-        // to a whole number of repetitions of the fill length.
-        const uint32_t possibleRepeatLength =
-            std::max<int32_t>(0, extraAutoFillLineCount + fillLen);
-        const uint32_t repeatRemainder = possibleRepeatLength % fillLen;
-        mRepeatAutoStart = styleSubgrid->fill_start;
-        mRepeatAutoEnd =
-            mRepeatAutoStart + possibleRepeatLength - repeatRemainder;
-      }
+      mHasRepeatAuto = false;
     } else {
       mClampMinLine = kMinLine;
       mClampMaxLine = kMaxLine;
@@ -1477,8 +1469,8 @@ class MOZ_STACK_CLASS nsGridContainerFrame::LineNameMap {
         mTrackAutoRepeatLineNames =
             aTracks.mTemplate.GetRepeatAutoValue()->line_names.AsSpan();
       }
+      ExpandRepeatLineNames(aTracks);
     }
-    ExpandRepeatLineNames(!!aRange, aTracks);
     if (mHasRepeatAuto) {
       // We need mTemplateLinesEnd to be after all line names.
       // mExpandedLineNames has one repetition of the repeat(auto-fit/fill)
@@ -1501,48 +1493,17 @@ class MOZ_STACK_CLASS nsGridContainerFrame::LineNameMap {
   }
 
   // Store line names into mExpandedLineNames with `repeat(INTEGER, ...)`
-  // expanded (for non-subgrid), and all `repeat(...)` expanded (for subgrid).
-  void ExpandRepeatLineNames(bool aIsSubgrid,
-                             const TrackSizingFunctions& aTracks) {
-    auto lineNameLists = aTracks.mTemplate.LineNameLists(aIsSubgrid);
+  // expanded for non-subgrid.
+  void ExpandRepeatLineNames(const TrackSizingFunctions& aTracks) {
+    auto lineNameLists = aTracks.mTemplate.LineNameLists(false);
 
     const auto& trackListValues = aTracks.mTrackListValues;
     const NameList* nameListToMerge = nullptr;
     // NOTE(emilio): We rely on std::move clearing out the array.
     SmallPointerArray<const NameList> names;
-    // This adjusts for outputting the repeat auto names in subgrid. In that
-    // case, all of the repeat values are handled in a single iteration.
-    const uint32_t subgridRepeatDelta =
-        (aIsSubgrid && mHasRepeatAuto)
-            ? (aTracks.mTemplate.AsSubgrid()->fill_len - 1)
-            : 0;
-    const uint32_t end = std::min<uint32_t>(
-        lineNameLists.Length() - subgridRepeatDelta, mClampMaxLine + 1);
+    const uint32_t end =
+        std::min<uint32_t>(lineNameLists.Length(), mClampMaxLine + 1);
     for (uint32_t i = 0; i < end; ++i) {
-      if (aIsSubgrid) {
-        if (MOZ_UNLIKELY(mHasRepeatAuto && i == mRepeatAutoStart)) {
-          // XXX expand 'auto-fill' names for subgrid for now since HasNameAt()
-          // only deals with auto-repeat **tracks** currently.
-          const auto& styleSubgrid = aTracks.mTemplate.AsSubgrid();
-          MOZ_ASSERT(styleSubgrid->fill_len > 0);
-          for (auto j = i; j < mRepeatAutoEnd; ++j) {
-            const auto repeatIndex = (j - i) % styleSubgrid->fill_len;
-            names.AppendElement(
-                &lineNameLists[styleSubgrid->fill_start + repeatIndex]);
-            mExpandedLineNames.AppendElement(std::move(names));
-          }
-        } else if (mHasRepeatAuto && i > mRepeatAutoStart) {
-          const auto& styleSubgrid = aTracks.mTemplate.AsSubgrid();
-          names.AppendElement(&lineNameLists[i + styleSubgrid->fill_len - 1]);
-          mExpandedLineNames.AppendElement(std::move(names));
-        } else {
-          names.AppendElement(&lineNameLists[i]);
-          mExpandedLineNames.AppendElement(std::move(names));
-        }
-        // XXX expand repeat(<integer>, ...) line names here (bug 1583429)
-        continue;
-      }
-
       if (nameListToMerge) {
         names.AppendElement(nameListToMerge);
         nameListToMerge = nullptr;
@@ -1595,8 +1556,76 @@ class MOZ_STACK_CLASS nsGridContainerFrame::LineNameMap {
     if (MOZ_UNLIKELY(mExpandedLineNames.Length() > uint32_t(mClampMaxLine))) {
       mExpandedLineNames.TruncateLength(mClampMaxLine);
     }
-    if (MOZ_UNLIKELY(mHasRepeatAuto && aIsSubgrid)) {
-      mHasRepeatAuto = false;  // we've expanded all subgrid auto-fill lines
+  }
+
+  // Store line names into mExpandedLineNames with `repeat(INTEGER, ...)`
+  // expanded, and all `repeat(...)` expanded for subgrid.
+  // https://drafts.csswg.org/css-grid/#resolved-track-list-subgrid
+  void ExpandRepeatLineNamesForSubgrid(
+      const StyleGenericLineNameList<StyleInteger>& aStyleLineNameList) {
+    const auto& lineNameList = aStyleLineNameList.line_names.AsSpan();
+    const uint32_t maxCount = mClampMaxLine + 1;
+    const uint32_t end = lineNameList.Length();
+    for (uint32_t i = 0; i < end && mExpandedLineNames.Length() < maxCount;
+         ++i) {
+      const auto& item = lineNameList[i];
+      if (item.IsLineNames()) {
+        // <line-names> case. Just copy it.
+        SmallPointerArray<const NameList> names;
+        names.AppendElement(&item.AsLineNames());
+        mExpandedLineNames.AppendElement(std::move(names));
+        continue;
+      }
+
+      MOZ_ASSERT(item.IsRepeat());
+      const auto& repeat = item.AsRepeat();
+      const auto repeatLineNames = repeat.line_names.AsSpan();
+
+      if (repeat.count.IsNumber()) {
+        // Clone all <line-names>+ (repeated by N) into
+        // |mExpandedLineNames|.
+        for (uint32_t repeatCount = 0;
+             repeatCount < (uint32_t)repeat.count.AsNumber(); ++repeatCount) {
+          for (const NameList& lineNames : repeatLineNames) {
+            SmallPointerArray<const NameList> names;
+            names.AppendElement(&lineNames);
+            mExpandedLineNames.AppendElement(std::move(names));
+            if (mExpandedLineNames.Length() >= maxCount) {
+              break;
+            }
+          }
+        }
+        continue;
+      }
+
+      MOZ_ASSERT(repeat.count.IsAutoFill(),
+                 "RepeatCount of subgrid is number or auto-fill");
+
+      const size_t fillLen = repeatLineNames.Length();
+      const int32_t extraAutoFillLineCount =
+          mClampMaxLine -
+          (int32_t)aStyleLineNameList.expanded_line_names_length;
+      // Maximum possible number of repeat name lists.
+      // Note: |expanded_line_names_length| doesn't include auto repeat.
+      const uint32_t possibleRepeatLength =
+          std::max<int32_t>(0, extraAutoFillLineCount);
+      const uint32_t repeatRemainder = possibleRepeatLength % fillLen;
+
+      // Note: Expand 'auto-fill' names for subgrid for now since
+      // HasNameAt() only deals with auto-repeat **tracks** currently.
+      const size_t len = possibleRepeatLength - repeatRemainder;
+      for (size_t j = 0; j < len; ++j) {
+        SmallPointerArray<const NameList> names;
+        names.AppendElement(&repeatLineNames[j % fillLen]);
+        mExpandedLineNames.AppendElement(std::move(names));
+        if (mExpandedLineNames.Length() >= maxCount) {
+          break;
+        }
+      }
+    }
+
+    if (MOZ_UNLIKELY(mExpandedLineNames.Length() > uint32_t(mClampMaxLine))) {
+      mExpandedLineNames.TruncateLength(mClampMaxLine);
     }
   }
 
@@ -1876,6 +1905,8 @@ class MOZ_STACK_CLASS nsGridContainerFrame::LineNameMap {
     // The index into mExpandedLineNames to use, if aIndex doesn't point to a
     // name inside of a auto repeat.
     uint32_t repeatAdjustedIndex = aIndex;
+    // Note: For subgrid, |mHasRepeatAuto| is always false because we have
+    // expanded it in the constructor of LineNameMap.
     if (mHasRepeatAuto) {
       // If the index is inside of the auto repeat, use the repeat line
       // names. Otherwise, if the index is past the end of the repeat it must
@@ -1907,6 +1938,8 @@ class MOZ_STACK_CLASS nsGridContainerFrame::LineNameMap {
         repeatAdjustedIndex += mTrackAutoRepeatLineNames.Length() - 2;
       }
     }
+    MOZ_ASSERT(repeatAdjustedIndex < mExpandedLineNames.Length(),
+               "Incorrect repeatedAdjustedIndex");
     MOZ_ASSERT(names.IsEmpty());
     // The index is not inside the repeat tracks, or no repeat tracks exist.
     const auto& nameLists = mExpandedLineNames[repeatAdjustedIndex];
@@ -3924,39 +3957,69 @@ nsContainerFrame* NS_NewGridContainerFrame(PresShell* aPresShell,
   return *cb;
 }
 
+void nsGridContainerFrame::AddImplicitNamedAreasInternal(
+    LineNameList& aNameList,
+    nsGridContainerFrame::ImplicitNamedAreas*& aAreas) {
+  for (const auto& nameIdent : aNameList.AsSpan()) {
+    nsAtom* name = nameIdent.AsAtom();
+    uint32_t indexOfSuffix;
+    if (Grid::IsNameWithStartSuffix(name, &indexOfSuffix) ||
+        Grid::IsNameWithEndSuffix(name, &indexOfSuffix)) {
+      // Extract the name that was found earlier.
+      nsDependentSubstring areaName(nsDependentAtomString(name), 0,
+                                    indexOfSuffix);
+
+      // Lazily create the ImplicitNamedAreas.
+      if (!aAreas) {
+        aAreas = new nsGridContainerFrame::ImplicitNamedAreas;
+        SetProperty(nsGridContainerFrame::ImplicitNamedAreasProperty(), aAreas);
+      }
+
+      RefPtr<nsAtom> name = NS_Atomize(areaName);
+      auto addPtr = aAreas->lookupForAdd(name);
+      if (!addPtr) {
+        if (!aAreas->add(addPtr, name,
+                         nsGridContainerFrame::NamedArea{
+                             StyleAtom(do_AddRef(name)), {0, 0}, {0, 0}})) {
+          MOZ_CRASH("OOM while adding grid name lists");
+        }
+      }
+    }
+  }
+}
+
 void nsGridContainerFrame::AddImplicitNamedAreas(
     Span<LineNameList> aLineNameLists) {
   // http://dev.w3.org/csswg/css-grid/#implicit-named-areas
   // Note: recording these names for fast lookup later is just an optimization.
-  const uint32_t len = std::min(aLineNameLists.Length(), size_t(kMaxLine));
-  nsTHashSet<nsString> currentStarts;
   ImplicitNamedAreas* areas = GetImplicitNamedAreas();
+  const uint32_t len = std::min(aLineNameLists.Length(), size_t(kMaxLine));
   for (uint32_t i = 0; i < len; ++i) {
-    for (const auto& nameIdent : aLineNameLists[i].AsSpan()) {
-      nsAtom* name = nameIdent.AsAtom();
-      uint32_t indexOfSuffix;
-      if (Grid::IsNameWithStartSuffix(name, &indexOfSuffix) ||
-          Grid::IsNameWithEndSuffix(name, &indexOfSuffix)) {
-        // Extract the name that was found earlier.
-        nsDependentSubstring areaName(nsDependentAtomString(name), 0,
-                                      indexOfSuffix);
+    AddImplicitNamedAreasInternal(aLineNameLists[i], areas);
+  }
+}
 
-        // Lazily create the ImplicitNamedAreas.
-        if (!areas) {
-          areas = new ImplicitNamedAreas;
-          SetProperty(ImplicitNamedAreasProperty(), areas);
-        }
-
-        RefPtr<nsAtom> name = NS_Atomize(areaName);
-        auto addPtr = areas->lookupForAdd(name);
-        if (!addPtr) {
-          if (!areas->add(
-                  addPtr, name,
-                  NamedArea{StyleAtom(do_AddRef(name)), {0, 0}, {0, 0}})) {
-            MOZ_CRASH("OOM while adding grid name lists");
-          }
-        }
+void nsGridContainerFrame::AddImplicitNamedAreas(
+    Span<StyleLineNameListValue> aLineNameList) {
+  // http://dev.w3.org/csswg/css-grid/#implicit-named-areas
+  // Note: recording these names for fast lookup later is just an optimization.
+  uint32_t count = 0;
+  ImplicitNamedAreas* areas = GetImplicitNamedAreas();
+  for (const auto& nameList : aLineNameList) {
+    if (nameList.IsRepeat()) {
+      for (const auto& repeatNameList :
+           nameList.AsRepeat().line_names.AsSpan()) {
+        AddImplicitNamedAreasInternal(repeatNameList, areas);
+        ++count;
       }
+    } else {
+      MOZ_ASSERT(nameList.IsLineNames());
+      AddImplicitNamedAreasInternal(nameList.AsLineNames(), areas);
+      ++count;
+    }
+
+    if (count >= size_t(kMaxLine)) {
+      break;
     }
   }
 }
@@ -3975,6 +4038,12 @@ void nsGridContainerFrame::InitImplicitNamedAreas(
       if (value.IsTrackRepeat()) {
         AddImplicitNamedAreas(value.AsTrackRepeat().line_names.AsSpan());
       }
+    }
+
+    if (aIsSubgrid && aTemplate.IsSubgrid()) {
+      // For subgrid, |aTemplate.LineNameLists(aIsSubgrid)| returns an empty
+      // list so we have to manually add each item.
+      AddImplicitNamedAreas(aTemplate.AsSubgrid()->line_names.AsSpan());
     }
   };
   Add(aStyle->mGridTemplateColumns, IsSubgrid(eLogicalAxisInline));
@@ -4951,7 +5020,7 @@ void nsGridContainerFrame::Grid::PlaceGridItems(
       // name of the lines, knowing that the line placement algorithm will
       // add the -start and -end suffixes as appropriate for layout.
       StyleGridLine lineStartAndEnd;
-      lineStartAndEnd.ident = areaInfo.name;
+      lineStartAndEnd.ident._0 = areaInfo.name;
 
       LineRange columnLines =
           ResolveLineRange(lineStartAndEnd, lineStartAndEnd, colLineNameMap,
@@ -5046,22 +5115,20 @@ static nscoord MeasuringReflow(nsIFrame* aChild,
       nsIFrame::ReflowChildFlags::NoSizeView |
       nsIFrame::ReflowChildFlags::NoDeleteNextInFlowChild;
 
-  if (StaticPrefs::layout_css_grid_item_baxis_measurement_enabled()) {
-    bool found;
-    GridItemCachedBAxisMeasurement cachedMeasurement =
-        aChild->GetProperty(GridItemCachedBAxisMeasurement::Prop(), &found);
-    if (found && cachedMeasurement.IsValidFor(aChild, aCBSize)) {
-      childSize.BSize(wm) = cachedMeasurement.BSize();
-      childSize.ISize(wm) = aChild->ISize(wm);
-      nsContainerFrame::FinishReflowChild(aChild, pc, childSize, &childRI, wm,
-                                          LogicalPoint(wm), nsSize(), flags);
-      GRID_LOG(
-          "[perf] MeasuringReflow accepted cached value=%d, child=%p, "
-          "aCBSize.ISize=%d",
-          cachedMeasurement.BSize(), aChild,
-          aCBSize.ISize(aChild->GetWritingMode()));
-      return cachedMeasurement.BSize();
-    }
+  bool found;
+  GridItemCachedBAxisMeasurement cachedMeasurement =
+      aChild->GetProperty(GridItemCachedBAxisMeasurement::Prop(), &found);
+  if (found && cachedMeasurement.IsValidFor(aChild, aCBSize)) {
+    childSize.BSize(wm) = cachedMeasurement.BSize();
+    childSize.ISize(wm) = aChild->ISize(wm);
+    nsContainerFrame::FinishReflowChild(aChild, pc, childSize, &childRI, wm,
+                                        LogicalPoint(wm), nsSize(), flags);
+    GRID_LOG(
+        "[perf] MeasuringReflow accepted cached value=%d, child=%p, "
+        "aCBSize.ISize=%d",
+        cachedMeasurement.BSize(), aChild,
+        aCBSize.ISize(aChild->GetWritingMode()));
+    return cachedMeasurement.BSize();
   }
 
   parent->ReflowChild(aChild, pc, childSize, childRI, wm, LogicalPoint(wm),
@@ -5071,42 +5138,36 @@ static nscoord MeasuringReflow(nsIFrame* aChild,
 #ifdef DEBUG
   parent->RemoveProperty(nsContainerFrame::DebugReflowingWithInfiniteISize());
 #endif
-
-  if (StaticPrefs::layout_css_grid_item_baxis_measurement_enabled()) {
-    bool found;
-    GridItemCachedBAxisMeasurement cachedMeasurement =
-        aChild->GetProperty(GridItemCachedBAxisMeasurement::Prop(), &found);
-    if (!found &&
-        GridItemCachedBAxisMeasurement::CanCacheMeasurement(aChild, aCBSize)) {
-      GridItemCachedBAxisMeasurement cachedMeasurement(aChild, aCBSize,
-                                                       childSize.BSize(wm));
-      aChild->SetProperty(GridItemCachedBAxisMeasurement::Prop(),
-                          cachedMeasurement);
+  if (!found &&
+      GridItemCachedBAxisMeasurement::CanCacheMeasurement(aChild, aCBSize)) {
+    GridItemCachedBAxisMeasurement cachedMeasurement(aChild, aCBSize,
+                                                     childSize.BSize(wm));
+    aChild->SetProperty(GridItemCachedBAxisMeasurement::Prop(),
+                        cachedMeasurement);
+    GRID_LOG(
+        "[perf] MeasuringReflow created new cached value=%d, child=%p, "
+        "aCBSize.ISize=%d",
+        cachedMeasurement.BSize(), aChild,
+        aCBSize.ISize(aChild->GetWritingMode()));
+  } else if (found) {
+    if (GridItemCachedBAxisMeasurement::CanCacheMeasurement(aChild, aCBSize)) {
+      cachedMeasurement.Update(aChild, aCBSize, childSize.BSize(wm));
       GRID_LOG(
-          "[perf] MeasuringReflow created new cached value=%d, child=%p, "
-          "aCBSize.ISize=%d",
+          "[perf] MeasuringReflow rejected but updated cached value=%d, "
+          "child=%p, aCBSize.ISize=%d",
           cachedMeasurement.BSize(), aChild,
           aCBSize.ISize(aChild->GetWritingMode()));
-    } else if (found) {
-      if (GridItemCachedBAxisMeasurement::CanCacheMeasurement(aChild,
-                                                              aCBSize)) {
-        cachedMeasurement.Update(aChild, aCBSize, childSize.BSize(wm));
-        GRID_LOG(
-            "[perf] MeasuringReflow rejected but updated cached value=%d, "
-            "child=%p, aCBSize.ISize=%d",
-            cachedMeasurement.BSize(), aChild,
-            aCBSize.ISize(aChild->GetWritingMode()));
-        aChild->SetProperty(GridItemCachedBAxisMeasurement::Prop(),
-                            cachedMeasurement);
-      } else {
-        aChild->RemoveProperty(GridItemCachedBAxisMeasurement::Prop());
-        GRID_LOG(
-            "[perf] MeasuringReflow rejected and removed cached value, "
-            "child=%p",
-            aChild);
-      }
+      aChild->SetProperty(GridItemCachedBAxisMeasurement::Prop(),
+                          cachedMeasurement);
+    } else {
+      aChild->RemoveProperty(GridItemCachedBAxisMeasurement::Prop());
+      GRID_LOG(
+          "[perf] MeasuringReflow rejected and removed cached value, "
+          "child=%p",
+          aChild);
     }
   }
+
   return childSize.BSize(wm);
 }
 
@@ -5352,7 +5413,7 @@ static nscoord ContentContribution(
     size += child->GetLogicalUsedMargin(childWM).BStartEnd(childWM);
     nscoord overflow = size - aMinSizeClamp;
     if (MOZ_UNLIKELY(overflow > 0)) {
-      nscoord contentSize = child->ContentSize(childWM).BSize(childWM);
+      nscoord contentSize = child->ContentBSize(childWM);
       nscoord newContentSize = std::max(nscoord(0), contentSize - overflow);
       // XXXmats deal with percentages better, see bug 1300369 comment 27.
       size -= contentSize - newContentSize;
@@ -9483,7 +9544,8 @@ void nsGridContainerFrame::InsertFrames(
                                  std::move(aFrameList));
 }
 
-void nsGridContainerFrame::RemoveFrame(ChildListID aListID,
+void nsGridContainerFrame::RemoveFrame(DestroyContext& aContext,
+                                       ChildListID aListID,
                                        nsIFrame* aOldFrame) {
   MOZ_ASSERT(aListID == FrameChildListID::Principal, "unexpected child list");
 
@@ -9491,7 +9553,7 @@ void nsGridContainerFrame::RemoveFrame(ChildListID aListID,
   SetDidPushItemsBitIfNeeded(aListID, aOldFrame);
 #endif
 
-  nsContainerFrame::RemoveFrame(aListID, aOldFrame);
+  nsContainerFrame::RemoveFrame(aContext, aListID, aOldFrame);
 }
 
 StyleAlignFlags nsGridContainerFrame::CSSAlignmentForAbsPosChild(

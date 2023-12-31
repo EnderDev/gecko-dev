@@ -17,7 +17,7 @@
 #include "nsXULElement.h"
 #include "nsIDOMXULCommandDispatcher.h"
 #include "nsCSSFrameConstructor.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowOuter.h"
 #include "nsIContentInlines.h"
 #include "nsLayoutUtils.h"
 #include "nsViewManager.h"
@@ -287,7 +287,8 @@ nsXULPopupManager* nsXULPopupManager::GetInstance() {
 }
 
 bool nsXULPopupManager::RollupTooltips() {
-  return RollupInternal(RollupKind::Tooltip, {}, nullptr);
+  const RollupOptions options{0, FlushViews::Yes, nullptr, AllowAnimations::No};
+  return RollupInternal(RollupKind::Tooltip, options, nullptr);
 }
 
 bool nsXULPopupManager::Rollup(const RollupOptions& aOptions,
@@ -1258,8 +1259,14 @@ void nsXULPopupManager::HidePopup(Element* aPopup, HidePopupOptions aOptions,
   }
 
   nsPopupState state = popupFrame->PopupState();
-  // If the popup is already being hidden, don't attempt to hide it again
   if (state == ePopupHiding) {
+    // If the popup is already being hidden, don't fire another popuphiding
+    // event. But finish hiding it sync if we need to.
+    if (aOptions.contains(HidePopupOption::DisableAnimations) &&
+        !aOptions.contains(HidePopupOption::Async)) {
+      HidePopupCallback(popupToHide, popupFrame, nullptr, nullptr,
+                        popupFrame->GetPopupType(), aOptions);
+    }
     return;
   }
 
@@ -1275,7 +1282,7 @@ void nsXULPopupManager::HidePopup(Element* aPopup, HidePopupOptions aOptions,
     nsCOMPtr<nsIRunnable> event =
         new nsXULPopupHidingEvent(popupToHide, nextPopup, lastPopup,
                                   popupFrame->GetPopupType(), aOptions);
-    aPopup->OwnerDoc()->Dispatch(TaskCategory::Other, event.forget());
+    aPopup->OwnerDoc()->Dispatch(event.forget());
   } else {
     RefPtr<nsPresContext> presContext = popupFrame->PresContext();
     FirePopupHidingEvent(popupToHide, nextPopup, lastPopup, presContext,
@@ -1321,9 +1328,10 @@ class TransitionEnder final : public nsIDOMEventListener {
 
   MOZ_CAN_RUN_SCRIPT NS_IMETHOD HandleEvent(Event* aEvent) override {
     mElement->RemoveSystemEventListener(u"transitionend"_ns, this, false);
+    mElement->RemoveSystemEventListener(u"transitioncancel"_ns, this, false);
 
     nsMenuPopupFrame* popupFrame = do_QueryFrame(mElement->GetPrimaryFrame());
-    if (!popupFrame) {
+    if (!popupFrame || popupFrame->PopupState() != ePopupHiding) {
       return NS_OK;
     }
 
@@ -1421,8 +1429,7 @@ void nsXULPopupManager::HidePopupAfterDelay(nsMenuPopupFrame* aPopup,
   KillMenuTimer();
 
   // Kick off the timer.
-  nsIEventTarget* target =
-      aPopup->PopupElement().OwnerDoc()->EventTargetFor(TaskCategory::Other);
+  nsIEventTarget* target = GetMainThreadSerialEventTarget();
   NS_NewTimerWithFuncCallback(
       getter_AddRefs(mCloseTimer),
       [](nsITimer* aTimer, void* aClosure) {
@@ -1548,7 +1555,7 @@ void nsXULPopupManager::ExecuteMenu(nsIContent* aMenu,
   HideOpenMenusBeforeExecutingMenu(cmm);
   aEvent->SetCloseMenuMode(cmm);
   nsCOMPtr<nsIRunnable> event = aEvent;
-  aMenu->OwnerDoc()->Dispatch(TaskCategory::Other, event.forget());
+  aMenu->OwnerDoc()->Dispatch(event.forget());
 }
 
 bool nsXULPopupManager::ActivateNativeMenuItem(nsIContent* aItem,
@@ -1758,6 +1765,7 @@ void nsXULPopupManager::FirePopupHidingEvent(Element* aPopup,
                            aPopup, PseudoStyleType::NotPseudo)) {
     RefPtr<TransitionEnder> ender = new TransitionEnder(aPopup, aOptions);
     aPopup->AddSystemEventListener(u"transitionend"_ns, ender, false, false);
+    aPopup->AddSystemEventListener(u"transitioncancel"_ns, ender, false, false);
     return;
   }
 
@@ -2719,7 +2727,7 @@ bool nsXULPopupPositionedEvent::DispatchIfNeeded(Element* aPopup) {
   if (aPopup->AttrValueIs(kNameSpaceID_None, nsGkAtoms::type, nsGkAtoms::arrow,
                           eCaseMatters)) {
     nsCOMPtr<nsIRunnable> event = new nsXULPopupPositionedEvent(aPopup);
-    aPopup->OwnerDoc()->Dispatch(TaskCategory::Other, event.forget());
+    aPopup->OwnerDoc()->Dispatch(event.forget());
     return true;
   }
 
@@ -2753,6 +2761,33 @@ static void AlignmentPositionToString(nsMenuPopupFrame* aFrame,
       return aString.AssignLiteral("after_pointer");
     case POPUPPOSITION_SELECTION:
       return aString.AssignLiteral("selection");
+    default:
+      // Leave as an empty string.
+      break;
+  }
+}
+
+static void PopupAlignmentToString(nsMenuPopupFrame* aFrame,
+                                   nsAString& aString) {
+  aString.Truncate();
+  int alignment = aFrame->GetPopupAlignment();
+  switch (alignment) {
+    case POPUPALIGNMENT_TOPLEFT:
+      return aString.AssignLiteral("topleft");
+    case POPUPALIGNMENT_TOPRIGHT:
+      return aString.AssignLiteral("topright");
+    case POPUPALIGNMENT_BOTTOMLEFT:
+      return aString.AssignLiteral("bottomleft");
+    case POPUPALIGNMENT_BOTTOMRIGHT:
+      return aString.AssignLiteral("bottomright");
+    case POPUPALIGNMENT_LEFTCENTER:
+      return aString.AssignLiteral("leftcenter");
+    case POPUPALIGNMENT_RIGHTCENTER:
+      return aString.AssignLiteral("rightcenter");
+    case POPUPALIGNMENT_TOPCENTER:
+      return aString.AssignLiteral("topcenter");
+    case POPUPALIGNMENT_BOTTOMCENTER:
+      return aString.AssignLiteral("bottomcenter");
     default:
       // Leave as an empty string.
       break;
@@ -2795,6 +2830,7 @@ nsXULPopupPositionedEvent::Run() {
   init.mIsAnchored = popupFrame->IsAnchored();
   init.mAlignmentOffset = popupOffset;
   AlignmentPositionToString(popupFrame, init.mAlignmentPosition);
+  PopupAlignmentToString(popupFrame, init.mPopupAlignment);
   RefPtr<PopupPositionedEvent> event =
       PopupPositionedEvent::Constructor(mPopup, u"popuppositioned"_ns, init);
   event->SetTrusted(true);

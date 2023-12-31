@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <stdint.h>
 
+#include "builtin/temporal/Calendar.h"
 #include "builtin/temporal/TemporalTypes.h"
 #include "builtin/temporal/Wrapped.h"
 #include "js/TypeDecls.h"
@@ -44,7 +45,9 @@ class PlainDateObject : public NativeObject {
 
   int32_t isoDay() const { return getFixedSlot(ISO_DAY_SLOT).toInt32(); }
 
-  JSObject* calendar() const { return &getFixedSlot(CALENDAR_SLOT).toObject(); }
+  CalendarValue calendar() const {
+    return CalendarValue(getFixedSlot(CALENDAR_SLOT));
+  }
 
  private:
   static const ClassSpec classSpec_;
@@ -57,9 +60,9 @@ inline PlainDate ToPlainDate(const PlainDateObject* date) {
   return {date->isoYear(), date->isoMonth(), date->isoDay()};
 }
 
-enum class CalendarField;
 enum class TemporalOverflow;
 enum class TemporalUnit;
+class ZonedDateTimeObject;
 
 #ifdef DEBUG
 /**
@@ -87,8 +90,8 @@ bool ThrowIfInvalidISODate(JSContext* cx, double year, double month,
 /**
  * ToTemporalDate ( item [ , options ] )
  */
-Wrapped<PlainDateObject*> ToTemporalDate(JSContext* cx,
-                                         JS::Handle<JSObject*> item);
+PlainDateObject* ToTemporalDate(JSContext* cx,
+                                JS::Handle<Wrapped<ZonedDateTimeObject*>> item);
 
 /**
  * ToTemporalDate ( item [ , options ] )
@@ -100,13 +103,14 @@ bool ToTemporalDate(JSContext* cx, JS::Handle<JS::Value> item,
  * ToTemporalDate ( item [ , options ] )
  */
 bool ToTemporalDate(JSContext* cx, JS::Handle<JS::Value> item,
-                    PlainDate* result, JS::MutableHandle<JSObject*> calendar);
+                    PlainDate* result,
+                    JS::MutableHandle<CalendarValue> calendar);
 
 /**
  * CreateTemporalDate ( isoYear, isoMonth, isoDay, calendar [ , newTarget ] )
  */
 PlainDateObject* CreateTemporalDate(JSContext* cx, const PlainDate& date,
-                                    JS::Handle<JSObject*> calendar);
+                                    JS::Handle<CalendarValue> calendar);
 
 /**
  * RegulateISODate ( year, month, day, overflow )
@@ -135,9 +139,8 @@ bool AddISODate(JSContext* cx, const PlainDate& date, const Duration& duration,
 /**
  * DifferenceISODate ( y1, m1, d1, y2, m2, d2, largestUnit )
  */
-bool DifferenceISODate(JSContext* cx, const PlainDate& start,
-                       const PlainDate& end, TemporalUnit largestUnit,
-                       DateDuration* result);
+DateDuration DifferenceISODate(const PlainDate& start, const PlainDate& end,
+                               TemporalUnit largestUnit);
 
 /**
  * CompareISODate ( y1, m1, d1, y2, m2, d2 )

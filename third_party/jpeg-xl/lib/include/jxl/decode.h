@@ -199,16 +199,6 @@ typedef enum {
   JXL_DEC_BASIC_INFO = 0x40,
 
   /** Informative event by @ref JxlDecoderProcessInput
-   * "JxlDecoderProcessInput": User extensions of the codestream header. This
-   * event occurs max once per image and always later than @ref
-   * JXL_DEC_BASIC_INFO and earlier than any pixel data.
-   *
-   * @deprecated The decoder no longer returns this, the header extensions,
-   * if any, are available at the JXL_DEC_BASIC_INFO event.
-   */
-  JXL_DEC_EXTENSIONS = 0x80,
-
-  /** Informative event by @ref JxlDecoderProcessInput
    * "JxlDecoderProcessInput": Color encoding or ICC profile from the
    * codestream header. This event occurs max once per image and always later
    * than @ref JXL_DEC_BASIC_INFO and earlier than any pixel data.
@@ -330,6 +320,33 @@ typedef enum {
   JXL_DEC_FRAME_PROGRESSION = 0x8000,
 } JxlDecoderStatus;
 
+/** Types of progressive detail.
+ * Setting a progressive detail with value N implies all progressive details
+ * with smaller or equal value. Currently only the following level of
+ * progressive detail is implemented:
+ *  - kDC (which implies kFrames)
+ *  - kLastPasses (which implies kDC and kFrames)
+ *  - kPasses (which implies kLastPasses, kDC and kFrames)
+ */
+typedef enum {
+  // after completed kRegularFrames
+  kFrames = 0,
+  // after completed DC (1:8)
+  kDC = 1,
+  // after completed AC passes that are the last pass for their resolution
+  // target.
+  kLastPasses = 2,
+  // after completed AC passes that are not the last pass for their resolution
+  // target.
+  kPasses = 3,
+  // during DC frame when lower resolution are completed (1:32, 1:16)
+  kDCProgressive = 4,
+  // after completed groups
+  kDCGroups = 5,
+  // after completed groups
+  kGroups = 6,
+} JxlProgressiveDetail;
+
 /** Rewinds decoder to the beginning. The same input must be given again from
  * the beginning of the file and the decoder will emit events from the beginning
  * again. When rewinding (as opposed to @ref JxlDecoderReset), the decoder can
@@ -388,23 +405,6 @@ JXL_EXPORT void JxlDecoderSkipFrames(JxlDecoder* dec, size_t amount);
  *     JXL_DEC_ERROR if the function was not called during frame processing.
  */
 JXL_EXPORT JxlDecoderStatus JxlDecoderSkipCurrentFrame(JxlDecoder* dec);
-
-/**
- * Get the default pixel format for this decoder.
- *
- * Requires that the decoder can produce JxlBasicInfo.
- *
- * @param dec @ref JxlDecoder to query when creating the recommended pixel
- *     format.
- * @param format JxlPixelFormat to populate with the recommended settings for
- *     the data loaded into this decoder.
- * @return @ref JXL_DEC_SUCCESS if no error, @ref JXL_DEC_NEED_MORE_INPUT if the
- *     basic info isn't yet available, and @ref JXL_DEC_ERROR otherwise.
- *
- * DEPRECATED: this function will be removed in the future.
- */
-JXL_DEPRECATED JXL_EXPORT JxlDecoderStatus
-JxlDecoderDefaultPixelFormat(const JxlDecoder* dec, JxlPixelFormat* format);
 
 /**
  * Set the parallel runner for multithreading. May only be set before starting
@@ -737,7 +737,6 @@ typedef enum {
  * JxlDecoderGetColorAsEncodedProfile should be used first.
  *
  * @param dec decoder object
- * @param unused_format deprecated, can be NULL
  * @param target whether to get the original color profile from the metadata
  *     or the color profile of the decoded pixels.
  * @param color_encoding struct to copy the information into, or NULL to only
@@ -748,8 +747,8 @@ typedef enum {
  *     codestream.
  */
 JXL_EXPORT JxlDecoderStatus JxlDecoderGetColorAsEncodedProfile(
-    const JxlDecoder* dec, const JxlPixelFormat* unused_format,
-    JxlColorProfileTarget target, JxlColorEncoding* color_encoding);
+    const JxlDecoder* dec, JxlColorProfileTarget target,
+    JxlColorEncoding* color_encoding);
 
 /**
  * Outputs the size in bytes of the ICC profile returned by @ref
@@ -763,7 +762,6 @@ JXL_EXPORT JxlDecoderStatus JxlDecoderGetColorAsEncodedProfile(
  * depending of what is encoded in the codestream.
  *
  * @param dec decoder object
- * @param unused_format deprecated, can be NULL
  * @param target whether to get the original color profile from the metadata
  *     or the color profile of the decoded pixels.
  * @param size variable to output the size into, or NULL to only check the
@@ -775,8 +773,7 @@ JXL_EXPORT JxlDecoderStatus JxlDecoderGetColorAsEncodedProfile(
  *     cannot be generated.
  */
 JXL_EXPORT JxlDecoderStatus JxlDecoderGetICCProfileSize(
-    const JxlDecoder* dec, const JxlPixelFormat* unused_format,
-    JxlColorProfileTarget target, size_t* size);
+    const JxlDecoder* dec, JxlColorProfileTarget target, size_t* size);
 
 /**
  * Outputs ICC profile if available. The profile is only available if @ref
@@ -784,7 +781,6 @@ JXL_EXPORT JxlDecoderStatus JxlDecoderGetICCProfileSize(
  * at least as many bytes as given by @ref JxlDecoderGetICCProfileSize.
  *
  * @param dec decoder object
- * @param unused_format deprecated, can be NULL
  * @param target whether to get the original color profile from the metadata
  *     or the color profile of the decoded pixels.
  * @param icc_profile buffer to copy the ICC profile into
@@ -795,8 +791,8 @@ JXL_EXPORT JxlDecoderStatus JxlDecoderGetICCProfileSize(
  *     large enough.
  */
 JXL_EXPORT JxlDecoderStatus JxlDecoderGetColorAsICCProfile(
-    const JxlDecoder* dec, const JxlPixelFormat* unused_format,
-    JxlColorProfileTarget target, uint8_t* icc_profile, size_t size);
+    const JxlDecoder* dec, JxlColorProfileTarget target, uint8_t* icc_profile,
+    size_t size);
 
 /** Sets the desired output color profile of the decoded image by calling
  * @ref JxlDecoderSetOutputColorProfile, passing on @c color_encoding and

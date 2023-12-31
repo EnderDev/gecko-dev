@@ -98,8 +98,9 @@ class DocAccessibleParent : public RemoteAccessible,
   virtual mozilla::ipc::IPCResult RecvEvent(const uint64_t& aID,
                                             const uint32_t& aType) override;
 
-  virtual mozilla::ipc::IPCResult RecvShowEvent(const ShowEventData& aData,
-                                                const bool& aFromUser) override;
+  virtual mozilla::ipc::IPCResult RecvShowEvent(
+      nsTArray<AccessibleData>&& aNewTree, const bool& aEventSuppressed,
+      const bool& aComplete, const bool& aFromUser) override;
   virtual mozilla::ipc::IPCResult RecvHideEvent(const uint64_t& aRootID,
                                                 const bool& aFromUser) override;
   mozilla::ipc::IPCResult RecvStateChangeEvent(const uint64_t& aID,
@@ -107,10 +108,7 @@ class DocAccessibleParent : public RemoteAccessible,
                                                const bool& aEnabled) final;
 
   mozilla::ipc::IPCResult RecvCaretMoveEvent(
-      const uint64_t& aID,
-#if defined(XP_WIN)
-      const LayoutDeviceIntRect& aCaretRect,
-#endif
+      const uint64_t& aID, const LayoutDeviceIntRect& aCaretRect,
       const int32_t& aOffset, const bool& aIsSelectionCollapsed,
       const bool& aIsAtEndOfLine, const int32_t& aGranularity) final;
 
@@ -119,10 +117,8 @@ class DocAccessibleParent : public RemoteAccessible,
       const uint32_t& aLen, const bool& aIsInsert,
       const bool& aFromUser) override;
 
-#if defined(XP_WIN)
   virtual mozilla::ipc::IPCResult RecvFocusEvent(
       const uint64_t& aID, const LayoutDeviceIntRect& aCaretRect) override;
-#endif  // defined(XP_WIN)
 
   virtual mozilla::ipc::IPCResult RecvSelectionEvent(
       const uint64_t& aID, const uint64_t& aWidgetID,
@@ -350,9 +346,9 @@ class DocAccessibleParent : public RemoteAccessible,
     RemoteAccessible* mProxy;
   };
 
-  uint32_t AddSubtree(RemoteAccessible* aParent,
-                      const nsTArray<AccessibleData>& aNewTree, uint32_t aIdx,
-                      uint32_t aIdxInParent);
+  RemoteAccessible* CreateAcc(const AccessibleData& aAccData);
+  void AttachChild(RemoteAccessible* aParent, uint32_t aIndex,
+                   RemoteAccessible* aChild);
   [[nodiscard]] bool CheckDocTree() const;
   xpcAccessibleGeneric* GetXPCAccessible(RemoteAccessible* aProxy);
 
@@ -377,6 +373,9 @@ class DocAccessibleParent : public RemoteAccessible,
    * proxy object so we can't use a real map.
    */
   nsTHashtable<ProxyEntry> mAccessibles;
+  uint64_t mPendingShowChild = 0;
+  uint64_t mPendingShowParent = 0;
+  uint32_t mPendingShowIndex = 0;
   nsTHashSet<uint64_t> mMovingIDs;
   uint64_t mActorID;
   bool mTopLevel;

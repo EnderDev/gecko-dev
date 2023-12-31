@@ -370,7 +370,6 @@ const TEST_GLOBAL = {
       removeListener() {},
     },
   },
-  PluralForm: { get() {} },
   Preferences: FakePrefs,
   PrivateBrowsingUtils: {
     isBrowserPrivate: () => false,
@@ -499,7 +498,6 @@ const TEST_GLOBAL = {
       updateGlobalOrObject(object)[name] = f();
     },
     defineLazyGlobalGetters: updateGlobalOrObject,
-    defineLazyModuleGetter: updateGlobalOrObject,
     defineLazyModuleGetters: updateGlobalOrObject,
     defineLazyServiceGetter: updateGlobalOrObject,
     defineLazyServiceGetters: updateGlobalOrObject,
@@ -651,6 +649,9 @@ const TEST_GLOBAL = {
       topicClick: {
         record() {},
       },
+      shim: {
+        set() {},
+      },
     },
     topsites: {
       enabled: {
@@ -667,6 +668,15 @@ const TEST_GLOBAL = {
       },
       rows: {
         set() {},
+      },
+      showPrivacyClick: {
+        record() {},
+      },
+      dismiss: {
+        record() {},
+      },
+      prefChanged: {
+        record() {},
       },
     },
     topSites: {
@@ -698,6 +708,9 @@ const TEST_GLOBAL = {
       submit() {},
     },
     topSites: {
+      submit() {},
+    },
+    spoc: {
       submit() {},
     },
   },

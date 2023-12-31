@@ -287,6 +287,13 @@ bool gfxAndroidPlatform::RequiresLinearZoom() {
   return gfxPlatform::RequiresLinearZoom();
 }
 
+bool gfxAndroidPlatform::CheckVariationFontSupport() {
+  // Don't attempt to use variations on Android API versions up to Marshmallow,
+  // because the system freetype version is too old and the parent process may
+  // access it during printing (bug 1845174).
+  return jni::GetAPIVersion() > 23;
+}
+
 class AndroidVsyncSource final : public VsyncSource,
                                  public widget::AndroidVsync::Observer {
  public:
@@ -357,13 +364,6 @@ class AndroidVsyncSource final : public VsyncSource,
 
 already_AddRefed<mozilla::gfx::VsyncSource>
 gfxAndroidPlatform::CreateGlobalHardwareVsyncSource() {
-  // Vsync was introduced since JB (API 16~18) but inaccurate. Enable only for
-  // KK (API 19) and later.
-  if (jni::GetAPIVersion() >= 19) {
-    RefPtr<AndroidVsyncSource> vsyncSource = new AndroidVsyncSource();
-    return vsyncSource.forget();
-  }
-
-  NS_WARNING("Vsync not supported. Falling back to software vsync");
-  return GetSoftwareVsyncSource();
+  RefPtr<AndroidVsyncSource> vsyncSource = new AndroidVsyncSource();
+  return vsyncSource.forget();
 }

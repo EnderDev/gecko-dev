@@ -23,7 +23,7 @@
 //! let cfg = ConfigurationBuilder::new(true, "/tmp/data", "org.mozilla.glean_core.example").build();
 //! glean::initialize(cfg, ClientInfoMetrics::unknown());
 //!
-//! let prototype_ping = PingType::new("prototype", true, true, vec!());
+//! let prototype_ping = PingType::new("prototype", true, true, true, vec!());
 //!
 //! prototype_ping.submit(None);
 //! ```
@@ -36,8 +36,8 @@ pub use configuration::{Builder as ConfigurationBuilder, Configuration};
 pub use core_metrics::ClientInfoMetrics;
 pub use glean_core::{
     metrics::{Datetime, DistributionData, MemoryUnit, Rate, RecordedEvent, TimeUnit, TimerId},
-    traits, CommonMetricData, Error, ErrorType, Glean, HistogramType, Lifetime, RecordedExperiment,
-    Result,
+    traits, CommonMetricData, Error, ErrorType, Glean, HistogramType, Lifetime, PingRateLimit,
+    RecordedExperiment, Result,
 };
 
 mod configuration;
@@ -120,6 +120,8 @@ fn initialize_internal(cfg: Configuration, client_info: ClientInfoMetrics) -> Op
         trim_data_to_registered_pings: cfg.trim_data_to_registered_pings,
         log_level: cfg.log_level,
         rate_limit: cfg.rate_limit,
+        enable_event_timestamps: cfg.enable_event_timestamps,
+        experimentation_id: cfg.experimentation_id,
     };
 
     glean_core::glean_initialize(core_cfg, client_info.into(), callbacks);
@@ -168,6 +170,12 @@ pub fn set_experiment_active(
 /// See [`glean_core::Glean::set_experiment_inactive`].
 pub fn set_experiment_inactive(experiment_id: String) {
     glean_core::glean_set_experiment_inactive(experiment_id)
+}
+
+/// TEST ONLY FUNCTION.
+/// Gets stored experimentation id.
+pub fn test_get_experimentation_id() -> Option<String> {
+    glean_core::glean_test_get_experimentation_id()
 }
 
 /// Set the remote configuration values for the metrics' disabled property

@@ -1,6 +1,8 @@
 mod code;
+mod coredumps;
 mod custom;
 mod data;
+mod dylink0;
 mod elements;
 mod exports;
 mod functions;
@@ -16,8 +18,10 @@ mod tags;
 mod types;
 
 pub use self::code::*;
+pub use self::coredumps::*;
 pub use self::custom::*;
 pub use self::data::*;
+pub use self::dylink0::*;
 pub use self::elements::*;
 pub use self::exports::*;
 pub use self::functions::*;

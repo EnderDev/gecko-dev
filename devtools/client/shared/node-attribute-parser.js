@@ -39,6 +39,35 @@ const WILDCARD = Symbol();
 
 const ATTRIBUTE_TYPES = new Map([
   ["action", { form: { namespaceURI: HTML_NS, type: TYPE_URI } }],
+  [
+    "aria-activedescendant",
+    { WILDCARD: { namespaceURI: HTML_NS, type: TYPE_IDREF } },
+  ],
+  [
+    "aria-controls",
+    { WILDCARD: { namespaceURI: HTML_NS, type: TYPE_IDREF_LIST } },
+  ],
+  [
+    "aria-describedby",
+    { WILDCARD: { namespaceURI: HTML_NS, type: TYPE_IDREF_LIST } },
+  ],
+  [
+    "aria-details",
+    { WILDCARD: { namespaceURI: HTML_NS, type: TYPE_IDREF_LIST } },
+  ],
+  [
+    "aria-errormessage",
+    { WILDCARD: { namespaceURI: HTML_NS, type: TYPE_IDREF } },
+  ],
+  [
+    "aria-flowto",
+    { WILDCARD: { namespaceURI: HTML_NS, type: TYPE_IDREF_LIST } },
+  ],
+  [
+    "aria-labelledby",
+    { WILDCARD: { namespaceURI: HTML_NS, type: TYPE_IDREF_LIST } },
+  ],
+  ["aria-owns", { WILDCARD: { namespaceURI: HTML_NS, type: TYPE_IDREF_LIST } }],
   ["background", { body: { namespaceURI: HTML_NS, type: TYPE_URI } }],
   [
     "cite",
@@ -130,6 +159,7 @@ const ATTRIBUTE_TYPES = new Map([
       menuitem: { namespaceURI: HTML_NS, type: TYPE_URI },
     },
   ],
+  ["invoketarget", { WILDCARD: { namespaceURI: HTML_NS, type: TYPE_IDREF } }],
   ["list", { input: { namespaceURI: HTML_NS, type: TYPE_IDREF } }],
   [
     "longdesc",
@@ -390,5 +420,15 @@ function splitBy(value, splitChar) {
 }
 
 exports.parseAttribute = parseAttribute;
+exports.ATTRIBUTE_TYPES = {
+  TYPE_STRING,
+  TYPE_URI,
+  TYPE_URI_LIST,
+  TYPE_IDREF,
+  TYPE_IDREF_LIST,
+  TYPE_JS_RESOURCE_URI,
+  TYPE_CSS_RESOURCE_URI,
+};
+
 // Exported for testing only.
 exports.splitBy = splitBy;

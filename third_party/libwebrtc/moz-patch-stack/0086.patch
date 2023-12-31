@@ -1,77 +1,66 @@
-From: Jan Grulich <jgrulich@redhat.com>
-Date: Fri, 10 Mar 2023 09:21:00 +0000
-Subject: Bug 1819035 - get EGL display based on the used platform in the
- browser r=webrtc-reviewers,ng
+From: Byron Campen <docfaraday@gmail.com>
+Date: Thu, 20 Jul 2023 14:24:00 +0000
+Subject: Bug 1838080: Use the current TaskQueue, instead of the current
+ thread, to init this. r=pehrsons,webrtc-reviewers
 
-Because of a possible misconfiguration or a possible driver issue it
-might happen that the browser will use a different driver on X11 and
-end up using yet another one for wayland/gbm, which might lead to not
-working screen sharing in the better case, but also to a crash in the
-other driver (Nvidia). This adds a check for platform the browser runs
-on, if it's XWayland or Wayland and based on that query EGL display for
-that specific platform, rather than going for the Wayland one only.
+There are situations where the current thread is not set, but the current
+TaskQueue is (but not vice versa).
 
-Differential Revision: https://phabricator.services.mozilla.com/D171858
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/c8606497de1f461a6352456e0e511c2ae498d526
+Differential Revision: https://phabricator.services.mozilla.com/D180736
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/62e71a2f745c4b98d5ee7ce9e6386aa1b657be9b
 ---
- .../linux/wayland/egl_dmabuf.cc               | 30 +++++++++++++++++--
- 1 file changed, 28 insertions(+), 2 deletions(-)
+ .../rtp_video_stream_receiver_frame_transformer_delegate.cc  | 3 +--
+ .../rtp_video_stream_receiver_frame_transformer_delegate.h   | 5 ++---
+ video/rtp_video_stream_receiver2.cc                          | 2 +-
+ 3 files changed, 4 insertions(+), 6 deletions(-)
 
-diff --git a/modules/desktop_capture/linux/wayland/egl_dmabuf.cc b/modules/desktop_capture/linux/wayland/egl_dmabuf.cc
-index 5bbd5d7aba..80da597e29 100644
---- a/modules/desktop_capture/linux/wayland/egl_dmabuf.cc
-+++ b/modules/desktop_capture/linux/wayland/egl_dmabuf.cc
-@@ -13,6 +13,7 @@
- #include <asm/ioctl.h>
- #include <dlfcn.h>
- #include <fcntl.h>
-+#include <gdk/gdk.h>
- #include <libdrm/drm_fourcc.h>
- #include <linux/types.h>
- #include <spa/param/video/format-utils.h>
-@@ -200,6 +201,26 @@ static void CloseLibrary(void* library) {
+diff --git a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc
+index 5db5664147..5dd316e206 100644
+--- a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc
++++ b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.cc
+@@ -83,8 +83,7 @@ RtpVideoStreamReceiverFrameTransformerDelegate::
+         RtpVideoFrameReceiver* receiver,
+         Clock* clock,
+         rtc::scoped_refptr<FrameTransformerInterface> frame_transformer,
+-        rtc::Thread* network_thread,
+-        uint32_t ssrc)
++        TaskQueueBase* network_thread, uint32_t ssrc)
+     : receiver_(receiver),
+       frame_transformer_(std::move(frame_transformer)),
+       network_thread_(network_thread),
+diff --git a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.h b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.h
+index 62a42fdddf..20f9a5caa9 100644
+--- a/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.h
++++ b/modules/rtp_rtcp/source/rtp_video_stream_receiver_frame_transformer_delegate.h
+@@ -41,8 +41,7 @@ class RtpVideoStreamReceiverFrameTransformerDelegate
+       RtpVideoFrameReceiver* receiver,
+       Clock* clock,
+       rtc::scoped_refptr<FrameTransformerInterface> frame_transformer,
+-      rtc::Thread* network_thread,
+-      uint32_t ssrc);
++      TaskQueueBase* network_thread, uint32_t ssrc);
+ 
+   void Init();
+   void Reset();
+@@ -67,7 +66,7 @@ class RtpVideoStreamReceiverFrameTransformerDelegate
+   RtpVideoFrameReceiver* receiver_ RTC_GUARDED_BY(network_sequence_checker_);
+   rtc::scoped_refptr<FrameTransformerInterface> frame_transformer_
+       RTC_GUARDED_BY(network_sequence_checker_);
+-  rtc::Thread* const network_thread_;
++  TaskQueueBase* const network_thread_;
+   const uint32_t ssrc_;
+   Clock* const clock_;
+ };
+diff --git a/video/rtp_video_stream_receiver2.cc b/video/rtp_video_stream_receiver2.cc
+index be8ee88c09..faf5b3f45e 100644
+--- a/video/rtp_video_stream_receiver2.cc
++++ b/video/rtp_video_stream_receiver2.cc
+@@ -341,7 +341,7 @@ RtpVideoStreamReceiver2::RtpVideoStreamReceiver2(
+   if (frame_transformer) {
+     frame_transformer_delegate_ =
+         rtc::make_ref_counted<RtpVideoStreamReceiverFrameTransformerDelegate>(
+-            this, clock_, std::move(frame_transformer), rtc::Thread::Current(),
++            this, clock_, std::move(frame_transformer), TaskQueueBase::Current(),
+             config_.rtp.remote_ssrc);
+     frame_transformer_delegate_->Init();
    }
- }
- 
-+static bool IsWaylandDisplay() {
-+  static auto sGdkWaylandDisplayGetType =
-+    (GType (*)(void))dlsym(RTLD_DEFAULT, "gdk_wayland_display_get_type");
-+  if (!sGdkWaylandDisplayGetType) {
-+    return false;
-+  }
-+  return (G_TYPE_CHECK_INSTANCE_TYPE ((gdk_display_get_default()),
-+                                      sGdkWaylandDisplayGetType()));
-+}
-+
-+static bool IsX11Display() {
-+  static auto sGdkX11DisplayGetType =
-+    (GType (*)(void))dlsym(RTLD_DEFAULT, "gdk_x11_display_get_type");
-+  if (!sGdkX11DisplayGetType) {
-+    return false;
-+  }
-+  return (G_TYPE_CHECK_INSTANCE_TYPE ((gdk_display_get_default()),
-+                                      sGdkX11DisplayGetType()));
-+}
-+
- static void* g_lib_egl = nullptr;
- 
- RTC_NO_SANITIZE("cfi-icall")
-@@ -331,8 +352,13 @@ EglDmaBuf::EglDmaBuf() {
-     return;
-   }
- 
--  egl_.display = EglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR,
--                                       (void*)EGL_DEFAULT_DISPLAY, nullptr);
-+  if (IsWaylandDisplay()) {
-+    egl_.display = EglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR,
-+                                         (void*)EGL_DEFAULT_DISPLAY, nullptr);
-+  } else if (IsX11Display()) {
-+    egl_.display = EglGetPlatformDisplay(EGL_PLATFORM_X11_KHR,
-+                                         (void*)EGL_DEFAULT_DISPLAY, nullptr);
-+  }
- 
-   if (egl_.display == EGL_NO_DISPLAY) {
-     RTC_LOG(LS_ERROR) << "Failed to obtain default EGL display: "
--- 
-2.34.1
-

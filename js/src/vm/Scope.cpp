@@ -14,7 +14,6 @@
 #include "frontend/ParserAtom.h"  // frontend::ParserAtomsTable, frontend::ParserAtom
 #include "frontend/ScriptIndex.h"  // ScriptIndex
 #include "frontend/Stencil.h"
-#include "gc/Allocator.h"
 #include "util/StringBuffer.h"
 #include "vm/EnvironmentObject.h"
 #include "vm/ErrorReporting.h"  // MaybePrintAndClearPendingException
@@ -25,6 +24,7 @@
 #include "gc/GCContext-inl.h"
 #include "gc/ObjectKind-inl.h"
 #include "gc/TraceMethods-inl.h"
+#include "vm/JSContext-inl.h"
 #include "wasm/WasmInstance-inl.h"
 
 using namespace js;
@@ -392,88 +392,55 @@ void Scope::dump() {
 /* static */
 bool Scope::dumpForDisassemble(JSContext* cx, JS::Handle<Scope*> scope,
                                GenericPrinter& out, const char* indent) {
-  if (!out.put(ScopeKindString(scope->kind()))) {
-    return false;
-  }
-  if (!out.put(" {")) {
-    return false;
-  }
+  out.put(ScopeKindString(scope->kind()));
+  out.put(" {");
 
   size_t i = 0;
   for (Rooted<BindingIter> bi(cx, BindingIter(scope)); bi; bi++, i++) {
     if (i == 0) {
-      if (!out.put("\n")) {
-        return false;
-      }
+      out.put("\n");
     }
     UniqueChars bytes = AtomToPrintableString(cx, bi.name());
     if (!bytes) {
       return false;
     }
-    if (!out.put(indent)) {
-      return false;
-    }
-    if (!out.printf("  %2zu: %s %s ", i, BindingKindString(bi.kind()),
-                    bytes.get())) {
-      return false;
-    }
+    out.put(indent);
+    out.printf("  %2zu: %s %s ", i, BindingKindString(bi.kind()), bytes.get());
     switch (bi.location().kind()) {
       case BindingLocation::Kind::Global:
         if (bi.isTopLevelFunction()) {
-          if (!out.put("(global function)\n")) {
-            return false;
-          }
+          out.put("(global function)\n");
         } else {
-          if (!out.put("(global)\n")) {
-            return false;
-          }
+          out.put("(global)\n");
         }
         break;
       case BindingLocation::Kind::Argument:
-        if (!out.printf("(arg slot %u)\n", bi.location().argumentSlot())) {
-          return false;
-        }
+        out.printf("(arg slot %u)\n", bi.location().argumentSlot());
         break;
       case BindingLocation::Kind::Frame:
-        if (!out.printf("(frame slot %u)\n", bi.location().slot())) {
-          return false;
-        }
+        out.printf("(frame slot %u)\n", bi.location().slot());
         break;
       case BindingLocation::Kind::Environment:
-        if (!out.printf("(env slot %u)\n", bi.location().slot())) {
-          return false;
-        }
+        out.printf("(env slot %u)\n", bi.location().slot());
         break;
       case BindingLocation::Kind::NamedLambdaCallee:
-        if (!out.put("(named lambda callee)\n")) {
-          return false;
-        }
+        out.put("(named lambda callee)\n");
         break;
       case BindingLocation::Kind::Import:
-        if (!out.put("(import)\n")) {
-          return false;
-        }
+        out.put("(import)\n");
         break;
     }
   }
   if (i > 0) {
-    if (!out.put(indent)) {
-      return false;
-    }
+    out.put(indent);
   }
-  if (!out.put("}")) {
-    return false;
-  }
+  out.put("}");
 
   ScopeIter si(scope);
   si++;
   for (; si; si++) {
-    if (!out.put(" -> ")) {
-      return false;
-    }
-    if (!out.put(ScopeKindString(si.kind()))) {
-      return false;
-    }
+    out.put(" -> ");
+    out.put(ScopeKindString(si.kind()));
   }
   return true;
 }
@@ -598,9 +565,9 @@ JSScript* FunctionScope::script() const {
 /* static */
 bool FunctionScope::isSpecialName(frontend::TaggedParserAtomIndex name) {
   return name == frontend::TaggedParserAtomIndex::WellKnown::arguments() ||
-         name == frontend::TaggedParserAtomIndex::WellKnown::dotThis() ||
-         name == frontend::TaggedParserAtomIndex::WellKnown::dotNewTarget() ||
-         name == frontend::TaggedParserAtomIndex::WellKnown::dotGenerator();
+         name == frontend::TaggedParserAtomIndex::WellKnown::dot_this_() ||
+         name == frontend::TaggedParserAtomIndex::WellKnown::dot_newTarget_() ||
+         name == frontend::TaggedParserAtomIndex::WellKnown::dot_generator_();
 }
 
 /* static */
@@ -730,9 +697,11 @@ WasmInstanceScope::RuntimeData::RuntimeData(size_t length) {
 WasmInstanceScope* WasmInstanceScope::create(JSContext* cx,
                                              WasmInstanceObject* instance) {
   size_t namesCount = 0;
-  if (instance->instance().memory()) {
-    namesCount++;
-  }
+
+  size_t memoriesStart = namesCount;
+  size_t memoriesCount = instance->instance().metadata().memories.length();
+  namesCount += memoriesCount;
+
   size_t globalsStart = namesCount;
   size_t globalsCount = instance->instance().metadata().globals.length();
   namesCount += globalsCount;
@@ -744,8 +713,8 @@ WasmInstanceScope* WasmInstanceScope::create(JSContext* cx,
   }
 
   Rooted<WasmInstanceObject*> rootedInstance(cx, instance);
-  if (instance->instance().memory()) {
-    JSAtom* wasmName = GenerateWasmName(cx, "memory", /* index = */ 0);
+  for (size_t i = 0; i < memoriesCount; i++) {
+    JSAtom* wasmName = GenerateWasmName(cx, "memory", i);
     if (!wasmName) {
       return nullptr;
     }
@@ -765,6 +734,7 @@ WasmInstanceScope* WasmInstanceScope::create(JSContext* cx,
   MOZ_ASSERT(data->length == namesCount);
 
   data->instance.init(rootedInstance);
+  data->slotInfo.memoriesStart = memoriesStart;
   data->slotInfo.globalsStart = globalsStart;
 
   Rooted<Scope*> enclosing(cx, &cx->global()->emptyGlobalScope());

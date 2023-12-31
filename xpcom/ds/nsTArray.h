@@ -1856,6 +1856,13 @@ class nsTArray_Impl
   void RemoveElementsAtUnsafe(index_type aStart, size_type aCount);
 
  public:
+  // Similar to the above, but it removes just one element. This does bounds
+  // checking only in debug builds.
+  void RemoveElementAtUnsafe(index_type aIndex) {
+    MOZ_ASSERT(aIndex < Length(), "Trying to remove an invalid element");
+    RemoveElementsAtUnsafe(aIndex, 1);
+  }
+
   // A variation on the RemoveElementsAt method defined above.
   void RemoveElementAt(index_type aIndex) { RemoveElementsAt(aIndex, 1); }
 
@@ -2397,6 +2404,12 @@ class nsTArray_Impl
                      });
   }
 
+  // A variation on the StableSort method defined above that assumes that
+  // 'operator<' is defined for value_type.
+  void StableSort() {
+    StableSort(nsDefaultComparator<value_type, value_type>());
+  }
+
   // This method reverses the array in place.
   void Reverse() {
     value_type* elements = Elements();
@@ -2720,8 +2733,9 @@ inline void ImplCycleCollectionTraverse(
     nsTArray_Impl<E, Alloc>& aField, const char* aName, uint32_t aFlags = 0) {
   ::detail::SetCycleCollectionArrayFlag(aFlags);
   size_t length = aField.Length();
+  E* elements = aField.Elements();
   for (size_t i = 0; i < length; ++i) {
-    ImplCycleCollectionTraverse(aCallback, aField[i], aName, aFlags);
+    ImplCycleCollectionTraverse(aCallback, elements[i], aName, aFlags);
   }
 }
 

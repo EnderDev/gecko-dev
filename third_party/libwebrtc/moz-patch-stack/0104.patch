@@ -1,40 +1,20 @@
-From: Andreas Pehrson <apehrson@mozilla.com>
-Date: Tue, 16 May 2023 06:38:00 +0000
-Subject: Bug 1832804 - Revert changeset b0339fd77c82. r=webrtc-reviewers,mjf
+From: Michael Froman <mfroman@mozilla.com>
+Date: Wed, 7 Dec 2022 17:09:00 +0000
+Subject: Bug 1744645 - pt1 - add a couple empty gni files to help with
+ BUILD.gn corrections. r=ng
 
-This bit is now restored to original libwebrtc M111 code.
-
-Differential Revision: https://phabricator.services.mozilla.com/D178006
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/47b1b27c8f75293c0861ca6197d438076ca9e693
+Differential Revision: https://phabricator.services.mozilla.com/D163991
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/81d86382ee468f3b36deed00d0c9d59eb85524be
 ---
- modules/rtp_rtcp/source/packet_sequencer.cc | 14 ++------------
- 1 file changed, 2 insertions(+), 12 deletions(-)
+ tools/generate_stubs/rules.gni | 2 ++
+ 1 file changed, 2 insertions(+)
+ create mode 100644 tools/generate_stubs/rules.gni
 
-diff --git a/modules/rtp_rtcp/source/packet_sequencer.cc b/modules/rtp_rtcp/source/packet_sequencer.cc
-index acc2e87aa3..55edd768a8 100644
---- a/modules/rtp_rtcp/source/packet_sequencer.cc
-+++ b/modules/rtp_rtcp/source/packet_sequencer.cc
-@@ -118,18 +118,8 @@ void PacketSequencer::PopulatePaddingFields(RtpPacketToSend& packet) {
-     return;
-   }
- 
--  if (last_timestamp_time_ms_ > 0) {
--    RTC_DCHECK_GT(last_rtp_timestamp_, 0);
--    RTC_DCHECK_GT(last_capture_time_ms_, 0);
--    packet.SetTimestamp(last_rtp_timestamp_);
--    packet.set_capture_time(Timestamp::Millis(last_capture_time_ms_));
--  } else {
--    // No media packet has been sent yet so timestamps are not known. Set them
--    // now as they will be needed when serializing the packet later on.
--    auto now = clock_->CurrentTime();
--    packet.SetTimestamp(now.ms() * kTimestampTicksPerMs);
--    packet.set_capture_time(now);
--  }
-+  packet.SetTimestamp(last_rtp_timestamp_);
-+  packet.set_capture_time(Timestamp::Millis(last_capture_time_ms_));
- 
-   // Only change the timestamp of padding packets sent over RTX.
-   // Padding only packets over RTP has to be sent as part of a media
--- 
-2.34.1
-
+diff --git a/tools/generate_stubs/rules.gni b/tools/generate_stubs/rules.gni
+new file mode 100644
+index 0000000000..1d9f36eb72
+--- /dev/null
++++ b/tools/generate_stubs/rules.gni
+@@ -0,0 +1,2 @@
++# "empty" file in place of importing new tools/generate_stubs
++# to allow BUILD.gn imports to succeed.

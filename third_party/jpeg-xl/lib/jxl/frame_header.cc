@@ -9,7 +9,9 @@
 
 #include "lib/jxl/base/printf_macros.h"
 #include "lib/jxl/base/status.h"
+#include "lib/jxl/common.h"  // kMaxNumPasses
 #include "lib/jxl/fields.h"
+#include "lib/jxl/pack_signed.h"
 
 namespace jxl {
 
@@ -78,6 +80,7 @@ Status BlendingInfo::VisitFields(Visitor* JXL_RESTRICT visitor) {
   return true;
 }
 
+#if JXL_DEBUG_V_LEVEL >= 1
 std::string BlendingInfo::DebugString() const {
   std::ostringstream os;
   os << (mode == BlendMode::kReplace            ? "Replace"
@@ -96,6 +99,7 @@ std::string BlendingInfo::DebugString() const {
   }
   return os.str();
 }
+#endif
 
 AnimationFrame::AnimationFrame(const CodecMetadata* metadata)
     : nonserialized_metadata(metadata) {
@@ -160,6 +164,7 @@ Status Passes::VisitFields(Visitor* JXL_RESTRICT visitor) {
   return true;
 }
 
+#if JXL_DEBUG_V_LEVEL >= 1
 std::string Passes::DebugString() const {
   std::ostringstream os;
   os << "p=" << num_passes;
@@ -183,6 +188,7 @@ std::string Passes::DebugString() const {
   }
   return os.str();
 }
+#endif
 
 FrameHeader::FrameHeader(const CodecMetadata* metadata)
     : animation_frame(metadata), nonserialized_metadata(metadata) {
@@ -419,6 +425,7 @@ Status FrameHeader::VisitFields(Visitor* JXL_RESTRICT visitor) {
   return visitor->EndExtensions();
 }
 
+#if JXL_DEBUG_V_LEVEL >= 1
 std::string FrameHeader::DebugString() const {
   std::ostringstream os;
   os << (encoding == FrameEncoding::kVarDCT ? "VarDCT" : "Modular");
@@ -490,5 +497,6 @@ std::string FrameHeader::DebugString() const {
   if (is_last) os << ",last";
   return os.str();
 }
+#endif
 
 }  // namespace jxl

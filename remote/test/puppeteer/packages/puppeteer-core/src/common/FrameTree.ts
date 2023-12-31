@@ -14,12 +14,8 @@
  * limitations under the License.
  */
 
-import {
-  createDeferredPromise,
-  DeferredPromise,
-} from '../util/DeferredPromise.js';
-
-import type {Frame} from './Frame.js';
+import {Frame} from '../api/Frame.js';
+import {Deferred} from '../util/Deferred.js';
 
 /**
  * Keeps track of the page frame tree and it's is managed by
@@ -28,20 +24,20 @@ import type {Frame} from './Frame.js';
  * structure is eventually consistent.
  * @internal
  */
-export class FrameTree {
-  #frames = new Map<string, Frame>();
+export class FrameTree<FrameType extends Frame> {
+  #frames = new Map<string, FrameType>();
   // frameID -> parentFrameID
   #parentIds = new Map<string, string>();
   // frameID -> childFrameIDs
   #childIds = new Map<string, Set<string>>();
-  #mainFrame?: Frame;
-  #waitRequests = new Map<string, Set<DeferredPromise<Frame>>>();
+  #mainFrame?: FrameType;
+  #waitRequests = new Map<string, Set<Deferred<FrameType>>>();
 
-  getMainFrame(): Frame | undefined {
+  getMainFrame(): FrameType | undefined {
     return this.#mainFrame;
   }
 
-  getById(frameId: string): Frame | undefined {
+  getById(frameId: string): FrameType | undefined {
     return this.#frames.get(frameId);
   }
 
@@ -49,23 +45,23 @@ export class FrameTree {
    * Returns a promise that is resolved once the frame with
    * the given ID is added to the tree.
    */
-  waitForFrame(frameId: string): Promise<Frame> {
+  waitForFrame(frameId: string): Promise<FrameType> {
     const frame = this.getById(frameId);
     if (frame) {
       return Promise.resolve(frame);
     }
-    const deferred = createDeferredPromise<Frame>();
+    const deferred = Deferred.create<FrameType>();
     const callbacks =
-      this.#waitRequests.get(frameId) || new Set<DeferredPromise<Frame>>();
+      this.#waitRequests.get(frameId) || new Set<Deferred<FrameType>>();
     callbacks.add(deferred);
-    return deferred;
+    return deferred.valueOrThrow();
   }
 
-  frames(): Frame[] {
+  frames(): FrameType[] {
     return Array.from(this.#frames.values());
   }
 
-  addFrame(frame: Frame): void {
+  addFrame(frame: FrameType): void {
     this.#frames.set(frame._id, frame);
     if (frame._parentId) {
       this.#parentIds.set(frame._id, frame._parentId);
@@ -73,7 +69,7 @@ export class FrameTree {
         this.#childIds.set(frame._parentId, new Set());
       }
       this.#childIds.get(frame._parentId)!.add(frame._id);
-    } else {
+    } else if (!this.#mainFrame) {
       this.#mainFrame = frame;
     }
     this.#waitRequests.get(frame._id)?.forEach(request => {
@@ -81,7 +77,7 @@ export class FrameTree {
     });
   }
 
-  removeFrame(frame: Frame): void {
+  removeFrame(frame: FrameType): void {
     this.#frames.delete(frame._id);
     this.#parentIds.delete(frame._id);
     if (frame._parentId) {
@@ -91,7 +87,7 @@ export class FrameTree {
     }
   }
 
-  childFrames(frameId: string): Frame[] {
+  childFrames(frameId: string): FrameType[] {
     const childIds = this.#childIds.get(frameId);
     if (!childIds) {
       return [];
@@ -100,12 +96,12 @@ export class FrameTree {
       .map(id => {
         return this.getById(id);
       })
-      .filter((frame): frame is Frame => {
+      .filter((frame): frame is FrameType => {
         return frame !== undefined;
       });
   }
 
-  parentFrame(frameId: string): Frame | undefined {
+  parentFrame(frameId: string): FrameType | undefined {
     const parentId = this.#parentIds.get(frameId);
     return parentId ? this.getById(parentId) : undefined;
   }

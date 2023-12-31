@@ -8,8 +8,12 @@ use crate::{
     conv,
     device::{DeviceError, WaitIdleError},
     get_lowest_common_denom,
-    hub::{Global, GlobalIdentityHandlerFactory, HalApi, Input, Token},
+    global::Global,
+    hal_api::HalApi,
+    hal_label,
+    hub::Token,
     id,
+    identity::{GlobalIdentityHandlerFactory, Input},
     init_tracker::{has_copy_partial_init_tracker_coverage, TextureInitRange},
     resource::{BufferAccessError, BufferMapState, StagingBuffer, TextureInner},
     track, FastHashSet, SubmissionIndex,
@@ -34,6 +38,13 @@ pub struct SubmittedWorkDoneClosureC {
     pub user_data: *mut u8,
 }
 
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+))]
 unsafe impl Send for SubmittedWorkDoneClosureC {}
 
 pub struct SubmittedWorkDoneClosure {
@@ -42,17 +53,30 @@ pub struct SubmittedWorkDoneClosure {
     inner: SubmittedWorkDoneClosureInner,
 }
 
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+))]
+type SubmittedWorkDoneCallback = Box<dyn FnOnce() + Send + 'static>;
+#[cfg(not(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+)))]
+type SubmittedWorkDoneCallback = Box<dyn FnOnce() + 'static>;
+
 enum SubmittedWorkDoneClosureInner {
-    Rust {
-        callback: Box<dyn FnOnce() + Send + 'static>,
-    },
-    C {
-        inner: SubmittedWorkDoneClosureC,
-    },
+    Rust { callback: SubmittedWorkDoneCallback },
+    C { inner: SubmittedWorkDoneClosureC },
 }
 
 impl SubmittedWorkDoneClosure {
-    pub fn from_rust(callback: Box<dyn FnOnce() + Send + 'static>) -> Self {
+    pub fn from_rust(callback: SubmittedWorkDoneCallback) -> Self {
         Self {
             inner: SubmittedWorkDoneClosureInner::Rust { callback },
         }
@@ -252,10 +276,11 @@ impl<A: hal::Api> PendingWrites<A> {
 fn prepare_staging_buffer<A: HalApi>(
     device: &mut A::Device,
     size: wgt::BufferAddress,
+    instance_flags: wgt::InstanceFlags,
 ) -> Result<(StagingBuffer<A>, *mut u8), DeviceError> {
     profiling::scope!("prepare_staging_buffer");
     let stage_desc = hal::BufferDescriptor {
-        label: Some("(wgpu internal) Staging"),
+        label: hal_label(Some("(wgpu internal) Staging"), instance_flags),
         size,
         usage: hal::BufferUses::MAP_WRITE | hal::BufferUses::COPY_SRC,
         memory_flags: hal::MemoryFlags::TRANSIENT,
@@ -362,7 +387,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         // freed, even if an error occurs. All paths from here must call
         // `device.pending_writes.consume`.
         let (staging_buffer, staging_buffer_ptr) =
-            prepare_staging_buffer(&mut device.raw, data_size)?;
+            prepare_staging_buffer(&mut device.raw, data_size, device.instance_flags)?;
 
         if let Err(flush_error) = unsafe {
             profiling::scope!("copy");
@@ -374,6 +399,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         }
 
         let result = self.queue_write_staging_buffer_impl(
+            queue_id,
             device,
             device_token,
             &staging_buffer,
@@ -401,7 +427,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .map_err(|_| DeviceError::Invalid)?;
 
         let (staging_buffer, staging_buffer_ptr) =
-            prepare_staging_buffer(&mut device.raw, buffer_size.get())?;
+            prepare_staging_buffer(&mut device.raw, buffer_size.get(), device.instance_flags)?;
 
         let fid = hub.staging_buffers.prepare(id_in);
         let id = fid.assign(staging_buffer, device_token);
@@ -441,6 +467,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         }
 
         let result = self.queue_write_staging_buffer_impl(
+            queue_id,
             device,
             device_token,
             &staging_buffer,
@@ -477,7 +504,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
     fn queue_validate_write_buffer_impl<A: HalApi>(
         &self,
-        buffer: &super::resource::Buffer<A>,
+        buffer: &crate::resource::Buffer<A>,
         buffer_id: id::BufferId,
         buffer_offset: u64,
         buffer_size: u64,
@@ -508,6 +535,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
     fn queue_write_staging_buffer_impl<A: HalApi>(
         &self,
+        device_id: id::DeviceId,
         device: &mut super::Device<A>,
         device_token: &mut Token<super::Device<A>>,
         staging_buffer: &StagingBuffer<A>,
@@ -527,6 +555,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .raw
             .as_ref()
             .ok_or(TransferError::InvalidBuffer(buffer_id))?;
+
+        if dst.device_id.value.0 != device_id {
+            return Err(DeviceError::WrongDevice.into());
+        }
 
         let src_buffer_size = staging_buffer.size;
         self.queue_validate_write_buffer_impl(dst, buffer_id, buffer_offset, src_buffer_size)?;
@@ -604,6 +636,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .get_mut(destination.texture)
             .map_err(|_| TransferError::InvalidTexture(destination.texture))?;
 
+        if dst.device_id.value.0 != queue_id {
+            return Err(DeviceError::WrongDevice.into());
+        }
+
         if !dst.desc.usage.contains(wgt::TextureUsages::COPY_DST) {
             return Err(
                 TransferError::MissingCopyDstUsageFlag(None, Some(destination.texture)).into(),
@@ -661,7 +697,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         let block_size = dst
             .desc
             .format
-            .block_size(Some(destination.aspect))
+            .block_copy_size(Some(destination.aspect))
             .unwrap();
         let bytes_per_row_alignment =
             get_lowest_common_denom(device.alignments.buffer_copy_pitch.get() as u32, block_size);
@@ -745,7 +781,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         // freed, even if an error occurs. All paths from here must call
         // `device.pending_writes.consume`.
         let (staging_buffer, staging_buffer_ptr) =
-            prepare_staging_buffer(&mut device.raw, stage_size)?;
+            prepare_staging_buffer(&mut device.raw, stage_size, device.instance_flags)?;
 
         if stage_bytes_per_row == bytes_per_row {
             profiling::scope!("copy aligned");
@@ -1028,6 +1064,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         command_buffer_ids: &[id::CommandBufferId],
     ) -> Result<WrappedSubmissionIndex, QueueSubmitError> {
         profiling::scope!("Queue::submit");
+        log::trace!("Queue::submit {queue_id:?}");
 
         let (submit_index, callbacks) = {
             let hub = A::hub(self);
@@ -1073,14 +1110,18 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         // it, so make sure to set_size on it.
                         used_surface_textures.set_size(texture_guard.len());
 
+                        // TODO: ideally we would use `get_and_mark_destroyed` but the code here
+                        // wants to consume the command buffer.
                         #[allow(unused_mut)]
-                        let mut cmdbuf = match hub
-                            .command_buffers
-                            .unregister_locked(cmb_id, &mut *command_buffer_guard)
-                        {
-                            Some(cmdbuf) => cmdbuf,
-                            None => continue,
+                        let mut cmdbuf = match command_buffer_guard.replace_with_error(cmb_id) {
+                            Ok(cmdbuf) => cmdbuf,
+                            Err(_) => continue,
                         };
+
+                        if cmdbuf.device_id.value.0 != queue_id {
+                            return Err(DeviceError::WrongDevice.into());
+                        }
+
                         #[cfg(feature = "trace")]
                         if let Some(ref trace) = device.trace {
                             trace.lock().add(Action::Submit(
@@ -1098,13 +1139,16 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
                         // update submission IDs
                         for id in cmdbuf.trackers.buffers.used() {
-                            let buffer = &mut buffer_guard[id];
-                            let raw_buf = match buffer.raw {
-                                Some(ref raw) => raw,
-                                None => {
+                            let buffer = match buffer_guard.get(id.0) {
+                                Ok(buf) => buf,
+                                Err(..) => {
                                     return Err(QueueSubmitError::DestroyedBuffer(id.0));
                                 }
                             };
+                            // get fails if the buffer is invalid or destroyed so we can assume
+                            // the raw buffer is not None.
+                            let raw_buf = buffer.raw.as_ref().unwrap();
+
                             if !buffer.life_guard.use_at(submit_index) {
                                 if let BufferMapState::Active { .. } = buffer.map_state {
                                     log::warn!("Dropped buffer has a pending mapping.");
@@ -1120,10 +1164,16 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                             }
                         }
                         for id in cmdbuf.trackers.textures.used() {
-                            let texture = &mut texture_guard[id];
+                            let texture = match texture_guard.get_mut(id.0) {
+                                Ok(tex) => tex,
+                                Err(..) => {
+                                    return Err(QueueSubmitError::DestroyedTexture(id.0));
+                                }
+                            };
+
                             let should_extend = match texture.inner {
                                 TextureInner::Native { raw: None } => {
-                                    return Err(QueueSubmitError::DestroyedTexture(id.0));
+                                    unreachable!();
                                 }
                                 TextureInner::Native { raw: Some(_) } => false,
                                 TextureInner::Surface {
@@ -1208,7 +1258,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         unsafe {
                             baked
                                 .encoder
-                                .begin_encoding(Some("(wgpu internal) Transit"))
+                                .begin_encoding(hal_label(
+                                    Some("(wgpu internal) Transit"),
+                                    device.instance_flags,
+                                ))
                                 .map_err(DeviceError::from)?
                         };
                         log::trace!("Stitching command buffer {:?} before submission", cmb_id);
@@ -1238,7 +1291,10 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                             unsafe {
                                 baked
                                     .encoder
-                                    .begin_encoding(Some("(wgpu internal) Present"))
+                                    .begin_encoding(hal_label(
+                                        Some("(wgpu internal) Present"),
+                                        device.instance_flags,
+                                    ))
                                     .map_err(DeviceError::from)?
                             };
                             trackers
@@ -1411,18 +1467,15 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         queue_id: id::QueueId,
         closure: SubmittedWorkDoneClosure,
     ) -> Result<(), InvalidQueue> {
+        log::trace!("Queue::on_submitted_work_done {queue_id:?}");
+
         //TODO: flush pending writes
-        let closure_opt = {
-            let hub = A::hub(self);
-            let mut token = Token::root();
-            let (device_guard, mut token) = hub.devices.read(&mut token);
-            match device_guard.get(queue_id) {
-                Ok(device) => device.lock_life(&mut token).add_work_done_closure(closure),
-                Err(_) => return Err(InvalidQueue),
-            }
-        };
-        if let Some(closure) = closure_opt {
-            closure.call();
+        let hub = A::hub(self);
+        let mut token = Token::root();
+        let (device_guard, mut token) = hub.devices.read(&mut token);
+        match device_guard.get(queue_id) {
+            Ok(device) => device.lock_life(&mut token).add_work_done_closure(closure),
+            Err(_) => return Err(InvalidQueue),
         }
         Ok(())
     }

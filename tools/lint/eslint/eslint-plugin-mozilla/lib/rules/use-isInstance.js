@@ -111,9 +111,14 @@ function isChromeContext(context) {
 module.exports = {
   meta: {
     docs: {
-      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/use-isInstance.html",
+      url: "https://firefox-source-docs.mozilla.org/code-quality/lint/linters/eslint-plugin-mozilla/rules/use-isInstance.html",
     },
     fixable: "code",
+    messages: {
+      preferIsInstance:
+        "Please prefer .isInstance() in chrome scripts over the standard instanceof operator for DOM interfaces, " +
+        "since the latter will return false when the object is created from a different context.",
+    },
     schema: [],
     type: "problem",
   },
@@ -134,9 +139,7 @@ module.exports = {
         ) {
           context.report({
             node,
-            message:
-              "Please prefer .isInstance() in chrome scripts over the standard instanceof operator for DOM interfaces, " +
-              "since the latter will return false when the object is created from a different context.",
+            messageId: "preferIsInstance",
             fix(fixer) {
               const sourceCode = context.getSourceCode();
               return fixer.replaceText(

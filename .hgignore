@@ -134,6 +134,9 @@ _OPT\.OBJ/
 ^remote/test/puppeteer/node_modules/
 ^remote/test/puppeteer/package-lock\.json
 ^remote/test/puppeteer/packages/ng-schematics/test/build
+^remote/test/puppeteer/packages/puppeteer/.*/README.md
+^remote/test/puppeteer/packages/puppeteer-core/src/generated
+^remote/test/puppeteer/packages/puppeteer-core/.*/README.md
 ^remote/test/puppeteer/src/generated
 ^remote/test/puppeteer/test/build
 ^remote/test/puppeteer/test/installation/puppeteer.*\.tgz
@@ -294,3 +297,6 @@ gfx/wr/target/
 
 # Ignore automatically generated mots documentation
 ^docs/mots/index.rst
+
+# Ignore generated directory with .class files for GeckoView annotation processor
+^mobile/android/annotations/bin/

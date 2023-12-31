@@ -16,7 +16,7 @@
 
 import path from 'path';
 
-import {httpRequest} from '../httpUtil.js';
+import {getJSON} from '../httpUtil.js';
 
 import {BrowserPlatform, ChromeReleaseChannel} from './types.js';
 
@@ -30,21 +30,6 @@ function folder(platform: BrowserPlatform): string {
       return 'mac-x64';
     case BrowserPlatform.WIN32:
       return 'win32';
-    case BrowserPlatform.WIN64:
-      return 'win64';
-  }
-}
-
-function chromiumDashPlatform(platform: BrowserPlatform): string {
-  switch (platform) {
-    case BrowserPlatform.LINUX:
-      return 'linux';
-    case BrowserPlatform.MAC_ARM:
-      return 'mac';
-    case BrowserPlatform.MAC:
-      return 'mac';
-    case BrowserPlatform.WIN32:
-      return 'win';
     case BrowserPlatform.WIN64:
       return 'win64';
   }
@@ -86,41 +71,92 @@ export function relativeExecutablePath(
       return path.join('chrome-' + folder(platform), 'chrome.exe');
   }
 }
+
+export async function getLastKnownGoodReleaseForChannel(
+  channel: ChromeReleaseChannel
+): Promise<{version: string; revision: string}> {
+  const data = (await getJSON(
+    new URL(
+      'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json'
+    )
+  )) as {
+    channels: Record<string, {version: string}>;
+  };
+
+  for (const channel of Object.keys(data.channels)) {
+    data.channels[channel.toLowerCase()] = data.channels[channel]!;
+    delete data.channels[channel];
+  }
+
+  return (
+    data as {
+      channels: {
+        [channel in ChromeReleaseChannel]: {version: string; revision: string};
+      };
+    }
+  ).channels[channel];
+}
+
+export async function getLastKnownGoodReleaseForMilestone(
+  milestone: string
+): Promise<{version: string; revision: string} | undefined> {
+  const data = (await getJSON(
+    new URL(
+      'https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone.json'
+    )
+  )) as {
+    milestones: Record<string, {version: string; revision: string}>;
+  };
+  return data.milestones[milestone] as
+    | {version: string; revision: string}
+    | undefined;
+}
+
+export async function getLastKnownGoodReleaseForBuild(
+  /**
+   * @example `112.0.23`,
+   */
+  buildPrefix: string
+): Promise<{version: string; revision: string} | undefined> {
+  const data = (await getJSON(
+    new URL(
+      'https://googlechromelabs.github.io/chrome-for-testing/latest-patch-versions-per-build.json'
+    )
+  )) as {
+    builds: Record<string, {version: string; revision: string}>;
+  };
+  return data.builds[buildPrefix] as
+    | {version: string; revision: string}
+    | undefined;
+}
+
 export async function resolveBuildId(
-  platform: BrowserPlatform,
-  channel: 'beta' | 'stable' = 'beta'
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const request = httpRequest(
-      new URL(
-        `https://chromiumdash.appspot.com/fetch_releases?platform=${chromiumDashPlatform(
-          platform
-        )}&channel=${channel}`
-      ),
-      'GET',
-      response => {
-        let data = '';
-        if (response.statusCode && response.statusCode >= 400) {
-          return reject(new Error(`Got status code ${response.statusCode}`));
-        }
-        response.on('data', chunk => {
-          data += chunk;
-        });
-        response.on('end', () => {
-          try {
-            const response = JSON.parse(String(data));
-            return resolve(response[0].version);
-          } catch {
-            return reject(new Error('Chrome version not found'));
-          }
-        });
-      },
-      false
-    );
-    request.on('error', err => {
-      reject(err);
-    });
-  });
+  channel: ChromeReleaseChannel
+): Promise<string>;
+export async function resolveBuildId(
+  channel: string
+): Promise<string | undefined>;
+export async function resolveBuildId(
+  channel: ChromeReleaseChannel | string
+): Promise<string | undefined> {
+  if (
+    Object.values(ChromeReleaseChannel).includes(
+      channel as ChromeReleaseChannel
+    )
+  ) {
+    return (
+      await getLastKnownGoodReleaseForChannel(channel as ChromeReleaseChannel)
+    ).version;
+  }
+  if (channel.match(/^\d+$/)) {
+    // Potentially a milestone.
+    return (await getLastKnownGoodReleaseForMilestone(channel))?.version;
+  }
+  if (channel.match(/^\d+\.\d+\.\d+$/)) {
+    // Potentially a build prefix without the patch version.
+    return (await getLastKnownGoodReleaseForBuild(channel))?.version;
+  }
+  return;
 }
 
 export function resolveSystemExecutablePath(

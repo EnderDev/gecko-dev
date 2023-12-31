@@ -57,18 +57,20 @@ class MathMLElement final : public MathMLElementBase, public Link {
 
   static void MapGlobalMathMLAttributesInto(
       mozilla::MappedDeclarationsBuilder&);
+  static void MapMiAttributesInto(mozilla::MappedDeclarationsBuilder&);
   static void MapMTableAttributesInto(mozilla::MappedDeclarationsBuilder&);
 
   void GetEventTargetParent(mozilla::EventChainPreVisitor& aVisitor) override;
   MOZ_CAN_RUN_SCRIPT
   nsresult PostHandleEvent(mozilla::EventChainPostVisitor& aVisitor) override;
   nsresult Clone(mozilla::dom::NodeInfo*, nsINode** aResult) const override;
-  mozilla::dom::ElementState IntrinsicState() const override;
 
   // Set during reflow as necessary. Does a style change notification,
   // aNotify must be true.
   void SetIncrementScriptLevel(bool aIncrementScriptLevel, bool aNotify);
-  bool GetIncrementScriptLevel() const { return mIncrementScriptLevel; }
+  bool GetIncrementScriptLevel() const {
+    return Element::State().HasState(ElementState::INCREMENT_SCRIPT_LEVEL);
+  }
 
   int32_t TabIndexDefault() final;
 
@@ -101,9 +103,6 @@ class MathMLElement final : public MathMLElementBase, public Link {
   void AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
                     const nsAttrValue* aValue, const nsAttrValue* aOldValue,
                     nsIPrincipal* aSubjectPrincipal, bool aNotify) override;
-
- private:
-  bool mIncrementScriptLevel;
 };
 
 }  // namespace dom

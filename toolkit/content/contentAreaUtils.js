@@ -326,7 +326,8 @@ function internalSave(
     };
 
     // Find a URI to use for determining last-downloaded-to directory
-    let relatedURI = aReferrerInfo?.originalReferrer || sourceURI;
+    let relatedURI =
+      aOriginalURL || aReferrerInfo?.originalReferrer || sourceURI;
 
     promiseTargetFile(fpParams, aSkipPrompt, relatedURI)
       .then(aDialogAccepted => {
@@ -728,11 +729,9 @@ function promiseTargetFile(
     // Do not store the last save directory as a pref inside the private browsing mode
     downloadLastDir.setFile(aRelatedURI, fp.file.parent);
 
-    fp.file.leafName = validateFileName(fp.file.leafName);
-
     aFpP.saveAsType = fp.filterIndex;
     aFpP.file = fp.file;
-    aFpP.fileURL = fp.fileURL;
+    aFpP.file.leafName = validateFileName(aFpP.file.leafName);
 
     return true;
   })();

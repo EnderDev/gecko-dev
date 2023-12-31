@@ -167,8 +167,8 @@ FileSystemDataManager::FileSystemDataManager(
       mIOTarget(std::move(aIOTarget)),
       mIOTaskQueue(std::move(aIOTaskQueue)),
       mRegCount(0),
-      mState(State::Initial),
-      mVersion(0) {}
+      mVersion(0),
+      mState(State::Initial) {}
 
 FileSystemDataManager::~FileSystemDataManager() {
   NS_ASSERT_OWNINGTHREAD(FileSystemDataManager);
@@ -320,6 +320,10 @@ void FileSystemDataManager::RegisterActor(
   MOZ_ASSERT(!mBackgroundThreadAccessible.Access()->mActors.Contains(aActor));
 
   mBackgroundThreadAccessible.Access()->mActors.Insert(aActor);
+
+#ifdef DEBUG
+  aActor->SetRegistered(true);
+#endif
 }
 
 void FileSystemDataManager::UnregisterActor(
@@ -327,6 +331,10 @@ void FileSystemDataManager::UnregisterActor(
   MOZ_ASSERT(mBackgroundThreadAccessible.Access()->mActors.Contains(aActor));
 
   mBackgroundThreadAccessible.Access()->mActors.Remove(aActor);
+
+#ifdef DEBUG
+  aActor->SetRegistered(false);
+#endif
 
   if (IsInactive()) {
     BeginClose();
@@ -403,13 +411,13 @@ Result<bool, QMResult> FileSystemDataManager::IsLocked(
 
 Result<FileId, QMResult> FileSystemDataManager::LockExclusive(
     const EntryId& aEntryId) {
-  QM_TRY_INSPECT(const FileId& fileId,
-                 mDatabaseManager->EnsureFileId(aEntryId));
-
   QM_TRY_UNWRAP(const bool isLocked, IsLocked(aEntryId));
   if (isLocked) {
     return Err(QMResult(NS_ERROR_DOM_NO_MODIFICATION_ALLOWED_ERR));
   }
+
+  QM_TRY_INSPECT(const FileId& fileId,
+                 mDatabaseManager->EnsureFileId(aEntryId));
 
   // If the file has been removed, we should get a file not found error.
   // Otherwise, if usage tracking cannot be started because file size is not
@@ -517,26 +525,22 @@ RefPtr<BoolPromise> FileSystemDataManager::BeginOpen() {
 
   mState = State::Opening;
 
-  RefPtr<quota::ClientDirectoryLock> directoryLock =
-      mQuotaManager->CreateDirectoryLock(
-          quota::PERSISTENCE_TYPE_DEFAULT, mOriginMetadata,
-          mozilla::dom::quota::Client::FILESYSTEM,
-          /* aExclusive */ false);
+  mQuotaManager
+      ->OpenClientDirectory(
+          {mOriginMetadata, mozilla::dom::quota::Client::FILESYSTEM})
+      ->Then(
+          GetCurrentSerialEventTarget(), __func__,
+          [self = RefPtr<FileSystemDataManager>(this)](
+              quota::ClientDirectoryLockPromise::ResolveOrRejectValue&& value) {
+            if (value.IsReject()) {
+              return BoolPromise::CreateAndReject(value.RejectValue(),
+                                                  __func__);
+            }
 
-  directoryLock->Acquire()
-      ->Then(GetCurrentSerialEventTarget(), __func__,
-             [self = RefPtr<FileSystemDataManager>(this),
-              directoryLock = directoryLock](
-                 const BoolPromise::ResolveOrRejectValue& value) mutable {
-               if (value.IsReject()) {
-                 return BoolPromise::CreateAndReject(value.RejectValue(),
-                                                     __func__);
-               }
+            self->mDirectoryLock = std::move(value.ResolveValue());
 
-               self->mDirectoryLock = std::move(directoryLock);
-
-               return BoolPromise::CreateAndResolve(true, __func__);
-             })
+            return BoolPromise::CreateAndResolve(true, __func__);
+          })
       ->Then(mQuotaManager->IOThread(), __func__,
              [self = RefPtr<FileSystemDataManager>(this)](
                  const BoolPromise::ResolveOrRejectValue& value) {

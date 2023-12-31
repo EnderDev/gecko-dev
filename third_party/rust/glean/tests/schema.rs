@@ -84,6 +84,7 @@ fn validate_against_schema() {
         app_build: env!("CARGO_PKG_VERSION").to_string(),
         app_display_version: env!("CARGO_PKG_VERSION").to_string(),
         channel: Some("testing".to_string()),
+        locale: Some("xx-XX".to_string()),
     };
 
     glean::initialize(cfg, client_info);
@@ -175,7 +176,7 @@ fn validate_against_schema() {
     text_metric.set("loooooong text".repeat(100));
 
     // Define a new ping and submit it.
-    let custom_ping = glean::private::PingType::new(PING_NAME, true, true, vec![]);
+    let custom_ping = glean::private::PingType::new(PING_NAME, true, true, true, vec![]);
     custom_ping.submit(None);
 
     // Wait for the ping to arrive.

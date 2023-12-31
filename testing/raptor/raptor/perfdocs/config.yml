@@ -119,8 +119,10 @@ suites:
             assorted-dom: "FF, CH, CU"
             jetstream2: "FF, CH, CU"
             matrix-react-bench: "FF, CH, CU"
-            motionmark-animometer: "FF, CH, CU"
-            motionmark-htmlsuite: "FF, CH, CU"
+            motionmark-animometer: "FF, CH, CU, FE, CH-M, GV"
+            motionmark-animometer-ramp: "FF, CH, CU, FE, CH-M, GV"
+            motionmark-htmlsuite: "FF, CH, CU, FE, CH-M, GV"
+            motionmark-htmlsuite-ramp: "FF, CH, CU, FE, CH-M, GV"
             speedometer: "FF, CH, CU, FE, GV, RB, CH-M"
             speedometer3: "FF, CH, CU, FE, GV, RB, CH-M"
             stylebench: "FF, CH, CU"
@@ -165,7 +167,9 @@ suites:
             constant-regression: "Generates a constant value that can be changed to induce a regression."
             upload: "Measures http/2 file upload throughput"
             upload-h3: "Measures http/3 file upload throughput"
+            throttled: "Pageload test using a throttled network environment"
             sample-python-support: "A sample test that uses a python support file to modify the test command."
+            connect: "Verifies that connection time on a pageload is zero when a speculative connection has first been made"
     interactive:
         description: "Browsertime tests that interact with the webpage. Includes responsiveness tests as they make use of this support for navigation. These form of tests allow the specification of browsertime commands through the test manifest."
         tests:

@@ -82,8 +82,9 @@ bool DoTrialInlining(JSContext* cx, BaselineFrame* frame) {
       }
     }
     UniqueChars funName;
-    if (script->function() && script->function()->displayAtom()) {
-      funName = AtomToPrintableString(cx, script->function()->displayAtom());
+    if (script->function() && script->function()->fullDisplayAtom()) {
+      funName =
+          AtomToPrintableString(cx, script->function()->fullDisplayAtom());
     }
 
     JitSpew(
@@ -91,7 +92,8 @@ bool DoTrialInlining(JSContext* cx, BaselineFrame* frame) {
         "Trial inlining for %s script '%s' (%s:%u:%u (%p)) (inliningRoot=%p)",
         (isRecursive ? "inner" : "outer"),
         funName ? funName.get() : "<unnamed>", script->filename(),
-        script->lineno(), script->column(), frame->script(), root);
+        script->lineno(), script->column().zeroOriginValue(), frame->script(),
+        root);
     JitSpewIndent spewIndent(JitSpew_WarpTrialInlining);
   }
 
@@ -114,7 +116,7 @@ bool TrialInliner::replaceICStub(ICEntry& entry, ICFallbackStub* fallback,
                                  CacheIRWriter& writer, CacheKind kind) {
   MOZ_ASSERT(fallback->trialInliningState() == TrialInliningState::Candidate);
 
-  fallback->discardStubs(cx(), &entry);
+  fallback->discardStubs(cx()->zone(), &entry);
 
   // Note: AttachBaselineCacheIRStub never throws an exception.
   ICAttachResult result = AttachBaselineCacheIRStub(
@@ -534,8 +536,8 @@ TrialInliningDecision TrialInliner::getInliningDecision(JSFunction* target,
         target->hasBaseScript() ? target->baseScript() : nullptr;
 
     UniqueChars funName;
-    if (target->displayAtom()) {
-      funName = AtomToPrintableString(cx(), target->displayAtom());
+    if (target->maybePartialDisplayAtom()) {
+      funName = AtomToPrintableString(cx(), target->maybePartialDisplayAtom());
     }
 
     JitSpew(JitSpew_WarpTrialInlining,
@@ -545,7 +547,7 @@ TrialInliningDecision TrialInliner::getInliningDecision(JSFunction* target,
             funName ? funName.get() : "<unnamed>",
             baseScript ? baseScript->filename() : "<not-scripted>",
             baseScript ? baseScript->lineno() : 0,
-            baseScript ? baseScript->column() : 0);
+            baseScript ? baseScript->column().zeroOriginValue() : 0);
     JitSpewIndent spewIndent(JitSpew_WarpTrialInlining);
   }
 #endif
@@ -912,9 +914,19 @@ void InliningRoot::trace(JSTracer* trc) {
   }
 }
 
-void InliningRoot::purgeOptimizedStubs(Zone* zone) {
+bool InliningRoot::traceWeak(JSTracer* trc) {
+  bool allSurvived = true;
   for (auto& inlinedScript : inlinedScripts_) {
-    inlinedScript->purgeOptimizedStubs(zone);
+    if (!inlinedScript->traceWeak(trc)) {
+      allSurvived = false;
+    }
+  }
+  return allSurvived;
+}
+
+void InliningRoot::purgeStubs(Zone* zone) {
+  for (auto& inlinedScript : inlinedScripts_) {
+    inlinedScript->purgeStubs(zone);
   }
 }
 

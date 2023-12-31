@@ -44,9 +44,9 @@
 #ifdef ENABLE_RECORD_TUPLE
 #  include "builtin/TupleObject.h"
 #endif
-#include "frontend/BytecodeCompilation.h"  // CompileGlobalScriptToStencil
-#include "frontend/CompilationStencil.h"   // js::frontend::CompilationStencil
-#include "frontend/FrontendContext.h"      // AutoReportFrontendContext
+#include "frontend/BytecodeCompiler.h"    // CompileGlobalScriptToStencil
+#include "frontend/CompilationStencil.h"  // js::frontend::CompilationStencil
+#include "frontend/FrontendContext.h"     // AutoReportFrontendContext
 #include "jit/AtomicOperations.h"
 #include "jit/InlinableNatives.h"
 #include "js/CompilationAndEvaluation.h"
@@ -75,6 +75,7 @@
 #include "vm/GeneratorObject.h"
 #include "vm/Interpreter.h"
 #include "vm/Iteration.h"
+#include "vm/JSAtomUtils.h"  // Atomize
 #include "vm/JSContext.h"
 #include "vm/JSFunction.h"
 #include "vm/JSObject.h"
@@ -89,7 +90,7 @@
 #include "vm/WrapperObject.h"
 
 #include "vm/Compartment-inl.h"
-#include "vm/JSAtom-inl.h"
+#include "vm/JSAtomUtils-inl.h"  // PrimitiveValueToId
 #include "vm/JSFunction-inl.h"
 #include "vm/JSObject-inl.h"
 #include "vm/NativeObject-inl.h"
@@ -1377,6 +1378,25 @@ static bool intrinsic_RegExpGetSubstitution(JSContext* cx, unsigned argc,
                                namedCaptures, args.rval());
 }
 
+static bool intrinsic_RegExpHasCaptureGroups(JSContext* cx, unsigned argc,
+                                             Value* vp) {
+  CallArgs args = CallArgsFromVp(argc, vp);
+  MOZ_ASSERT(args.length() == 2);
+  MOZ_ASSERT(args[0].isObject());
+  MOZ_ASSERT(args[1].isString());
+
+  Rooted<RegExpObject*> obj(cx, &args[0].toObject().as<RegExpObject>());
+  Rooted<JSString*> string(cx, args[1].toString());
+
+  bool result;
+  if (!RegExpHasCaptureGroups(cx, obj, string, &result)) {
+    return false;
+  }
+
+  args.rval().setBoolean(result);
+  return true;
+}
+
 static bool intrinsic_StringReplaceString(JSContext* cx, unsigned argc,
                                           Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
@@ -1531,7 +1551,7 @@ bool js::ReportIncompatibleSelfHostedMethod(JSContext* cx,
   // in the somethingSelfHosted, not in the sort() call.
 
   static const char* const internalNames[] = {
-      "IsTypedArrayEnsuringArrayBuffer",
+      "EnsureTypedArrayWithArrayBuffer",
       "RegExpSearchSlowPath",
       "RegExpReplaceSlowPath",
       "RegExpMatchSlowPath",
@@ -1573,7 +1593,7 @@ static bool intrinsic_RuntimeDefaultLocale(JSContext* cx, unsigned argc,
   CallArgs args = CallArgsFromVp(argc, vp);
   MOZ_ASSERT(args.length() == 0);
 
-  const char* locale = cx->runtime()->getDefaultLocale();
+  const char* locale = cx->realm()->getLocale();
   if (!locale) {
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
                               JSMSG_DEFAULT_LOCALE_ERROR);
@@ -1602,7 +1622,7 @@ static bool intrinsic_IsRuntimeDefaultLocale(JSContext* cx, unsigned argc,
     return true;
   }
 
-  const char* locale = cx->runtime()->getDefaultLocale();
+  const char* locale = cx->realm()->getLocale();
   if (!locale) {
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
                               JSMSG_DEFAULT_LOCALE_ERROR);
@@ -1788,6 +1808,64 @@ static bool intrinsic_NewAsyncIteratorHelper(JSContext* cx, unsigned argc,
   return true;
 }
 
+static JSObject* NewIteratorRecord(JSContext* cx, HandleObject iterator,
+                                   HandleValue nextMethod) {
+  gc::AllocKind allocKind = gc::GetGCObjectKind(3);
+  Rooted<PlainObject*> obj(
+      cx, NewPlainObjectWithProtoAndAllocKind(cx, nullptr, allocKind));
+  if (!obj) {
+    return nullptr;
+  }
+
+  RootedId propid(cx, NameToId(cx->names().iterator));
+  RootedValue value(cx, ObjectValue(*iterator));
+  if (!NativeDefineDataProperty(cx, obj, propid, value, JSPROP_ENUMERATE)) {
+    return nullptr;
+  }
+
+  propid = NameToId(cx->names().nextMethod);
+  value.set(nextMethod);
+  if (!NativeDefineDataProperty(cx, obj, propid, value, JSPROP_ENUMERATE)) {
+    return nullptr;
+  }
+
+  propid = NameToId(cx->names().done);
+  value.setBoolean(false);
+  if (!NativeDefineDataProperty(cx, obj, propid, value, JSPROP_ENUMERATE)) {
+    return nullptr;
+  }
+
+  return obj;
+}
+
+static bool intrinsic_CreateAsyncFromSyncIterator(JSContext* cx, unsigned argc,
+                                                  Value* vp) {
+  CallArgs args = CallArgsFromVp(argc, vp);
+  MOZ_ASSERT(args.length() == 2);
+
+  RootedObject iterator(cx, &args[0].toObject());
+  RootedObject asyncIterator(
+      cx, CreateAsyncFromSyncIterator(cx, iterator, args[1]));
+  if (!asyncIterator) {
+    return false;
+  }
+
+  RootedValue nextMethod(cx);
+  if (!GetProperty(cx, asyncIterator, asyncIterator, cx->names().next,
+                   &nextMethod)) {
+    return false;
+  }
+
+  RootedObject iteratorRecord(cx,
+                              NewIteratorRecord(cx, asyncIterator, nextMethod));
+  if (!iteratorRecord) {
+    return false;
+  }
+
+  args.rval().setObject(*iteratorRecord);
+  return true;
+}
+
 static bool intrinsic_NoPrivateGetter(JSContext* cx, unsigned argc, Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
   MOZ_ASSERT(args.length() == 0);
@@ -1858,6 +1936,8 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("ConstructorForTypedArray", intrinsic_ConstructorForTypedArray, 1, 0),
     JS_FN("CopyDataPropertiesOrGetOwnKeys",
           intrinsic_CopyDataPropertiesOrGetOwnKeys, 3, 0),
+    JS_FN("CreateAsyncFromSyncIterator", intrinsic_CreateAsyncFromSyncIterator,
+          2, 0),
     JS_FN("CreateMapIterationResultPair",
           intrinsic_CreateMapIterationResultPair, 0, 0),
     JS_FN("CreateSetIterationResult", intrinsic_CreateSetIterationResult, 0, 0),
@@ -2003,13 +2083,18 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_INLINABLE_FN("RegExpExecForTest", intrinsic_RegExpExec<true>, 2, 0,
                     IntrinsicRegExpExecForTest),
     JS_FN("RegExpGetSubstitution", intrinsic_RegExpGetSubstitution, 5, 0),
+    JS_INLINABLE_FN("RegExpHasCaptureGroups", intrinsic_RegExpHasCaptureGroups,
+                    2, 0, RegExpHasCaptureGroups),
     JS_INLINABLE_FN("RegExpInstanceOptimizable", RegExpInstanceOptimizable, 1,
                     0, RegExpInstanceOptimizable),
     JS_INLINABLE_FN("RegExpMatcher", RegExpMatcher, 3, 0, RegExpMatcher),
     JS_INLINABLE_FN("RegExpPrototypeOptimizable", RegExpPrototypeOptimizable, 1,
                     0, RegExpPrototypeOptimizable),
     JS_INLINABLE_FN("RegExpSearcher", RegExpSearcher, 3, 0, RegExpSearcher),
+    JS_INLINABLE_FN("RegExpSearcherLastLimit", RegExpSearcherLastLimit, 0, 0,
+                    RegExpSearcherLastLimit),
     JS_INLINABLE_FN("SameValue", js::obj_is, 2, 0, ObjectIs),
+    JS_FN("SetCopy", SetObject::copy, 1, 0),
     JS_FN("SharedArrayBufferByteLength",
           intrinsic_ArrayBufferByteLength<SharedArrayBufferObject>, 1, 0),
     JS_FN("SharedArrayBufferCopyData",
@@ -2088,7 +2173,7 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("intl_Collator", intl_Collator, 2, 0),
     JS_FN("intl_CompareStrings", intl_CompareStrings, 3, 0),
     JS_FN("intl_ComputeDisplayName", intl_ComputeDisplayName, 6, 0),
-    JS_FN("intl_DateTimeFormat", intl_DateTimeFormat, 2, 0),
+    JS_FN("intl_CreateDateTimeFormat", intl_CreateDateTimeFormat, 4, 0),
     JS_FN("intl_FormatDateTime", intl_FormatDateTime, 2, 0),
     JS_FN("intl_FormatDateTimeRange", intl_FormatDateTimeRange, 4, 0),
     JS_FN("intl_FormatList", intl_FormatList, 3, 0),
@@ -2147,6 +2232,7 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("intl_defaultTimeZone", intl_defaultTimeZone, 0, 0),
     JS_FN("intl_defaultTimeZoneOffset", intl_defaultTimeZoneOffset, 0, 0),
     JS_FN("intl_isDefaultTimeZone", intl_isDefaultTimeZone, 1, 0),
+    JS_FN("intl_isIgnorePunctuation", intl_isIgnorePunctuation, 1, 0),
     JS_FN("intl_isUpperCaseFirst", intl_isUpperCaseFirst, 1, 0),
     JS_FN("intl_numberingSystem", intl_numberingSystem, 1, 0),
     JS_FN("intl_resolveDateTimeFormatComponents",
@@ -2186,7 +2272,9 @@ static const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("std_Reflect_isExtensible", Reflect_isExtensible, 1, 0),
     JS_FN("std_Reflect_ownKeys", Reflect_ownKeys, 1, 0),
     JS_FN("std_Set_add", SetObject::add, 1, 0),
-    JS_FN("std_Set_has", SetObject::has, 1, 0),
+    JS_FN("std_Set_delete", SetObject::delete_, 1, 0),
+    JS_INLINABLE_FN("std_Set_has", SetObject::has, 1, 0, SetHas),
+    JS_INLINABLE_FN("std_Set_size", SetObject::size, 1, 0, SetSize),
     JS_FN("std_Set_values", SetObject::values, 0, 0),
     JS_INLINABLE_FN("std_String_charCodeAt", str_charCodeAt, 1, 0,
                     StringCharCodeAt),
@@ -2325,8 +2413,7 @@ class MOZ_STACK_CLASS AutoPrintSelfHostingFrontendContext
   JSContext* cx_;
 
  public:
-  explicit AutoPrintSelfHostingFrontendContext(JSContext* cx)
-      : FrontendContext(), cx_(cx) {
+  explicit AutoPrintSelfHostingFrontendContext(JSContext* cx) : cx_(cx) {
     setCurrentJSContext(cx_);
   }
   ~AutoPrintSelfHostingFrontendContext() {
@@ -2707,6 +2794,13 @@ static bool GetComputedIntrinsic(JSContext* cx, Handle<PropertyName*> name,
       return false;
     }
     cx->global()->setComputedIntrinsicsHolder(computedIntrinsicsHolder);
+
+    // Disable the interrupt callback while executing the top-level script.
+    // This prevents recursive calls to GetComputedIntrinsic through the
+    // interrupt callback.
+    bool hadInterruptsDisabled = JS_DisableInterruptCallback(cx);
+    auto resetInterrupts = mozilla::MakeScopeExit(
+        [&]() { JS_ResetInterruptCallback(cx, hadInterruptsDisabled); });
 
     // Attempt to execute the top-level script. If they fails to run to
     // successful completion, throw away the holder to avoid a partial

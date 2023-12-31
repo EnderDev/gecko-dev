@@ -6,7 +6,6 @@
 #include "nsAccessibilityService.h"
 
 // NOTE: alphabetically ordered
-#include "AccAttributes.h"
 #include "ApplicationAccessibleWrap.h"
 #include "ARIAGridAccessible.h"
 #include "ARIAMap.h"
@@ -20,9 +19,8 @@
 #include "HTMLListAccessible.h"
 #include "HTMLSelectAccessible.h"
 #include "HTMLTableAccessible.h"
-#include "HyperTextAccessibleWrap.h"
+#include "HyperTextAccessible.h"
 #include "RootAccessible.h"
-#include "StyleInfo.h"
 #include "nsAccUtils.h"
 #include "nsArrayUtils.h"
 #include "nsAttrName.h"
@@ -34,14 +32,13 @@
 #include "nsServiceManagerUtils.h"
 #include "nsTextFormatter.h"
 #include "OuterDocAccessible.h"
-#include "Role.h"
+#include "mozilla/a11y/Role.h"
 #ifdef MOZ_ACCESSIBILITY_ATK
 #  include "RootAccessibleWrap.h"
 #endif
 #include "States.h"
 #include "Statistics.h"
 #include "TextLeafAccessible.h"
-#include "TreeWalker.h"
 #include "xpcAccessibleApplication.h"
 
 #ifdef XP_WIN
@@ -55,12 +52,10 @@
 
 #include "nsExceptionHandler.h"
 #include "nsImageFrame.h"
-#include "nsINamed.h"
 #include "nsIObserverService.h"
 #include "nsMenuPopupFrame.h"
 #include "nsLayoutUtils.h"
 #include "nsTreeBodyFrame.h"
-#include "nsTreeColumns.h"
 #include "nsTreeUtils.h"
 #include "mozilla/a11y/AccTypes.h"
 #include "mozilla/ArrayUtils.h"
@@ -322,7 +317,7 @@ LocalAccessible* CreateMenupopupAccessible(Element* aElement,
 
 static LocalAccessible* New_HyperText(Element* aElement,
                                       LocalAccessible* aContext) {
-  return new HyperTextAccessibleWrap(aElement, aContext->Document());
+  return new HyperTextAccessible(aElement, aContext->Document());
 }
 
 template <typename AccClass>
@@ -402,9 +397,7 @@ xpcAccessibleApplication* nsAccessibilityService::gXPCApplicationAccessible =
 uint32_t nsAccessibilityService::gConsumers = 0;
 
 nsAccessibilityService::nsAccessibilityService()
-    : DocManager(),
-      FocusManager(),
-      mHTMLMarkupMap(ArrayLength(sHTMLMarkupMapList)),
+    : mHTMLMarkupMap(ArrayLength(sHTMLMarkupMapList)),
       mMathMLMarkupMap(ArrayLength(sMathMLMarkupMapList)),
       mXULMarkupMap(ArrayLength(sXULMarkupMapList)) {}
 
@@ -447,21 +440,37 @@ nsAccessibilityService::ListenersChanged(nsIArray* aEventChanges) {
                      content == document->DocumentNode()->GetRootElement())) {
           acc = document;
         }
+        if (!acc && content->IsElement() &&
+            content->AsElement()->IsHTMLElement(nsGkAtoms::area)) {
+          // For area accessibles, we have to recreate the entire image map,
+          // since the image map accessible manages the tree itself. The click
+          // listener change may require us to update the role for the
+          // accessible associated with the area element.
+          LocalAccessible* areaAcc =
+              document->GetAccessibleEvenIfNotInMap(content);
+          if (areaAcc && areaAcc->LocalParent()) {
+            document->RecreateAccessible(areaAcc->LocalParent()->GetContent());
+          }
+        }
         if (!acc && nsCoreUtils::HasClickListener(content)) {
           // Create an accessible for a inaccessible element having click event
           // handler.
           document->ContentInserted(content, content->GetNextSibling());
         } else if (acc) {
-          if (acc->IsHTMLLink() && !acc->AsHTMLLink()->IsLinked()) {
-            // Notify of a LINKED state change if an HTML link gets a click
-            // listener but does not have an href attribute.
-            RefPtr<AccEvent> linkedChangeEvent =
-                new AccStateChangeEvent(acc, states::LINKED);
-            document->FireDelayedEvent(linkedChangeEvent);
+          if ((acc->IsHTMLLink() && !acc->AsHTMLLink()->IsLinked()) ||
+              (content->IsElement() &&
+               content->AsElement()->IsHTMLElement(nsGkAtoms::a) &&
+               !acc->IsHTMLLink())) {
+            // An HTML link without an href attribute should have a generic
+            // role, unless it has a click listener. Since we might have gained
+            // or lost a click listener here, recreate the accessible so that we
+            // can create the correct type of accessible. If it was a link, it
+            // may no longer be one. If it wasn't, it may become one.
+            document->RecreateAccessible(content);
           }
 
           // A click listener change might mean losing or gaining an action.
-          acc->SendCache(CacheDomain::Actions, CacheUpdateType::Update);
+          document->QueueCacheUpdate(acc, CacheDomain::Actions);
         }
       }
     }
@@ -579,7 +588,7 @@ void nsAccessibilityService::NotifyOfResolutionChange(
   if (document && document->IPCDoc()) {
     AutoTArray<mozilla::a11y::CacheData, 1> data;
     RefPtr<AccAttributes> fields = new AccAttributes();
-    fields->SetAttribute(nsGkAtoms::resolution, aResolution);
+    fields->SetAttribute(CacheKey::Resolution, aResolution);
     data.AppendElement(mozilla::a11y::CacheData(0, fields));
     document->IPCDoc()->SendCache(CacheUpdateType::Update, data);
   }
@@ -591,8 +600,7 @@ void nsAccessibilityService::NotifyOfDevPixelRatioChange(
   if (document && document->IPCDoc()) {
     AutoTArray<mozilla::a11y::CacheData, 1> data;
     RefPtr<AccAttributes> fields = new AccAttributes();
-    fields->SetAttribute(nsGkAtoms::_moz_device_pixel_ratio,
-                         aAppUnitsPerDevPixel);
+    fields->SetAttribute(CacheKey::AppUnitsPerDevPixel, aAppUnitsPerDevPixel);
     data.AppendElement(mozilla::a11y::CacheData(0, fields));
     document->IPCDoc()->SendCache(CacheUpdateType::Update, data);
   }
@@ -1118,7 +1126,7 @@ LocalAccessible* nsAccessibilityService::CreateAccessible(
         !roleMapEntry->Is(nsGkAtoms::none);
     if (!newAcc && (hasNonPresentationalARIARole ||
                     AttributesMustBeAccessible(content, document))) {
-      newAcc = new HyperTextAccessibleWrap(content, document);
+      newAcc = new HyperTextAccessible(content, document);
     }
 
     // If there's still no Accessible but we do have an entry in the markup
@@ -1126,7 +1134,7 @@ LocalAccessible* nsAccessibilityService::CreateAccessible(
     // HyperTextAccessible.
     if (!newAcc && markupMap &&
         (!roleMapEntry || hasNonPresentationalARIARole)) {
-      newAcc = new HyperTextAccessibleWrap(content, document);
+      newAcc = new HyperTextAccessible(content, document);
     }
 
     if (newAcc) {
@@ -1226,7 +1234,7 @@ LocalAccessible* nsAccessibilityService::CreateAccessible(
       return nullptr;
     }
 
-    newAcc = new HyperTextAccessibleWrap(content, document);
+    newAcc = new HyperTextAccessible(content, document);
     document->BindToDocument(newAcc, aria::GetRoleMap(content->AsElement()));
     return newAcc;
   }
@@ -1347,7 +1355,7 @@ LocalAccessible* nsAccessibilityService::CreateAccessible(
           newAcc = new EnumRoleAccessible<roles::GRAPHIC>(content, document);
         }
       } else if (content->IsSVGElement(nsGkAtoms::text)) {
-        newAcc = new HyperTextAccessibleWrap(content->AsElement(), document);
+        newAcc = new HyperTextAccessible(content->AsElement(), document);
       } else if (content->IsSVGElement(nsGkAtoms::svg)) {
         // An <svg> element could contain <foreignObject>, which contains HTML
         // but does not normally create its own Accessible. This means that the
@@ -1377,7 +1385,7 @@ LocalAccessible* nsAccessibilityService::CreateAccessible(
                          nsGkAtoms::mpadded_, nsGkAtoms::mphantom_,
                          nsGkAtoms::maligngroup_, nsGkAtoms::malignmark_,
                          nsGkAtoms::mspace_, nsGkAtoms::semantics_)) {
-        newAcc = new HyperTextAccessibleWrap(content, document);
+        newAcc = new HyperTextAccessible(content, document);
       }
     } else if (content->IsGeneratedContentContainerForMarker()) {
       if (aContext->IsHTMLListItem()) {
@@ -1404,7 +1412,7 @@ LocalAccessible* nsAccessibilityService::CreateAccessible(
     if (content->IsHTMLElement() || content->IsMathMLElement()) {
       // Interesting HTML/MathML container which may have selectable text and/or
       // embedded objects
-      newAcc = new HyperTextAccessibleWrap(content, document);
+      newAcc = new HyperTextAccessible(content, document);
     } else {  // XUL, SVG, etc.
       // Interesting generic non-HTML container
       newAcc = new AccessibleWrap(content, document);
@@ -1604,7 +1612,7 @@ nsAccessibilityService::CreateAccessibleByFrameType(nsIFrame* aFrame,
         newAcc = new HTMLLIAccessible(aContent, document);
       } else {
         // Otherwise create a generic text accessible to avoid text jamming.
-        newAcc = new HyperTextAccessibleWrap(aContent, document);
+        newAcc = new HyperTextAccessible(aContent, document);
       }
       break;
     case eHTMLSelectListType:
@@ -1626,7 +1634,7 @@ nsAccessibilityService::CreateAccessibleByFrameType(nsIFrame* aFrame,
     case eHTMLTableCellType:
       // We handle markup and ARIA tables elsewhere. If we reach here, this is
       // a CSS table part. Just create a generic text container.
-      newAcc = new HyperTextAccessibleWrap(aContent, document);
+      newAcc = new HyperTextAccessible(aContent, document);
       break;
     case eHTMLTableRowType:
       // This is a CSS table row. Don't expose it at all.
@@ -1644,7 +1652,7 @@ nsAccessibilityService::CreateAccessibleByFrameType(nsIFrame* aFrame,
       if (!aContent->IsAnyOfHTMLElements(nsGkAtoms::dt, nsGkAtoms::dd,
                                          nsGkAtoms::div, nsGkAtoms::thead,
                                          nsGkAtoms::tfoot, nsGkAtoms::tbody)) {
-        newAcc = new HyperTextAccessibleWrap(aContent, document);
+        newAcc = new HyperTextAccessible(aContent, document);
       }
       break;
     }

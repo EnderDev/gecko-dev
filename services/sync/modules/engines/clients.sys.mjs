@@ -38,19 +38,15 @@ import { CryptoWrapper } from "resource://services-sync/record.sys.mjs";
 import { Resource } from "resource://services-sync/resource.sys.mjs";
 import { Svc, Utils } from "resource://services-sync/util.sys.mjs";
 
-import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-
 const lazy = {};
 
-XPCOMUtils.defineLazyGetter(lazy, "fxAccounts", () => {
+ChromeUtils.defineLazyGetter(lazy, "fxAccounts", () => {
   return ChromeUtils.importESModule(
     "resource://gre/modules/FxAccounts.sys.mjs"
   ).getFxAccountsSingleton();
 });
 
-const { PREF_ACCOUNT_ROOT } = ChromeUtils.import(
-  "resource://gre/modules/FxAccountsCommon.js"
-);
+import { PREF_ACCOUNT_ROOT } from "resource://gre/modules/FxAccountsCommon.sys.mjs";
 
 const CLIENTS_TTL = 15552000; // 180 days
 const CLIENTS_TTL_REFRESH = 604800; // 7 days

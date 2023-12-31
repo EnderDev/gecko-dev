@@ -1794,7 +1794,7 @@ static void SanitizeStyleSheet(const nsAString& aOriginal,
           /* stylesheet = */ nullptr,
           /* load_data = */ nullptr, &style,
           css::SheetParsingMode::eAuthorSheetFeatures, extraData.get(),
-          /* line_number_offset = */ 0, aDocument->GetCompatibilityMode(),
+          aDocument->GetCompatibilityMode(),
           /* reusable_sheets = */ nullptr,
           /* use_counters = */ nullptr, StyleAllowImportRules::Yes,
           aSanitizationKind, &aSanitized)
@@ -2548,7 +2548,7 @@ void nsTreeSanitizer::WithWebSanitizerOptions(
     ErrorResult& aRv) {
   if (StaticPrefs::dom_security_sanitizer_logging()) {
     mLogRemovals = true;
-    if (nsPIDOMWindowInner* win = aGlobal->AsInnerWindow()) {
+    if (nsPIDOMWindowInner* win = aGlobal->GetAsInnerWindow()) {
       mInnerWindowID = win->WindowID();
     }
   }

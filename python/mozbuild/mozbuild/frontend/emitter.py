@@ -172,7 +172,6 @@ class TreeMetadataEmitter(LoggingMixin):
                 yield o
 
     def _emit_libs_derived(self, contexts):
-
         # First aggregate idl sources.
         webidl_attrs = [
             ("GENERATED_EVENTS_WEBIDL_FILES", lambda c: c.generated_events_sources),
@@ -388,6 +387,8 @@ class TreeMetadataEmitter(LoggingMixin):
                     context, obj, variable, self.STDCXXCOMPAT_NAME[obj.KIND]
                 )
             if obj.KIND == "target":
+                if "pure_virtual" in self._libs:
+                    self._link_library(context, obj, variable, "pure_virtual")
                 for lib in context.config.substs.get("STLPORT_LIBS", []):
                     obj.link_system_library(lib)
 
@@ -710,6 +711,13 @@ class TreeMetadataEmitter(LoggingMixin):
 
                     check_unique_binary(program, kind)
                     self._binaries[program] = cls(context, program, cargo_file)
+                    self._linkage.append(
+                        (
+                            context,
+                            self._binaries[program],
+                            kind.replace("RUST_PROGRAMS", "USE_LIBS"),
+                        )
+                    )
                     add_program(self._binaries[program], kind)
 
         for kind, cls in [
@@ -1234,6 +1242,7 @@ class TreeMetadataEmitter(LoggingMixin):
             "RCINCLUDE",
             "WIN32_EXE_LDFLAGS",
             "USE_EXTENSION_MANIFEST",
+            "WASM_LIBS",
         ]
         for v in varlist:
             if v in context and context[v]:
@@ -1459,15 +1468,11 @@ class TreeMetadataEmitter(LoggingMixin):
                 if mozpath.split(base)[0] == "res":
                     has_resources = True
                 for f in files:
-                    if (
-                        var
-                        in (
-                            "FINAL_TARGET_PP_FILES",
-                            "OBJDIR_PP_FILES",
-                            "LOCALIZED_PP_FILES",
-                        )
-                        and not isinstance(f, SourcePath)
-                    ):
+                    if var in (
+                        "FINAL_TARGET_PP_FILES",
+                        "OBJDIR_PP_FILES",
+                        "LOCALIZED_PP_FILES",
+                    ) and not isinstance(f, SourcePath):
                         raise SandboxValidationError(
                             ("Only source directory paths allowed in " + "%s: %s")
                             % (var, f),
@@ -1677,7 +1682,7 @@ class TreeMetadataEmitter(LoggingMixin):
         if not (generated_files or localized_generated_files):
             return
 
-        for (localized, gen) in (
+        for localized, gen in (
             (False, generated_files),
             (True, localized_generated_files),
         ):

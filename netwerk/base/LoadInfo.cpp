@@ -39,7 +39,7 @@
 #include "nsISupportsUtils.h"
 #include "nsIXPConnect.h"
 #include "nsDocShell.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
 #include "nsMixedContentBlocker.h"
 #include "nsQueryObject.h"
 #include "nsRedirectHistoryEntry.h"
@@ -266,9 +266,12 @@ LoadInfo::LoadInfo(
     }
 
     if (nsMixedContentBlocker::IsUpgradableContentType(
-            mInternalContentPolicyType)) {
-      if (mLoadingPrincipal->SchemeIs("https")) {
-        if (StaticPrefs::security_mixed_content_upgrade_display_content()) {
+            mInternalContentPolicyType, /* aConsiderPrefs */ false)) {
+      // Check the load is within a secure context but ignore loopback URLs
+      if (mLoadingPrincipal->GetIsOriginPotentiallyTrustworthy() &&
+          !mLoadingPrincipal->GetIsLoopbackHost()) {
+        if (nsMixedContentBlocker::IsUpgradableContentType(
+                mInternalContentPolicyType, /* aConsiderPrefs */ true)) {
           mBrowserUpgradeInsecureRequests = true;
         } else {
           mBrowserWouldUpgradeInsecureRequests = true;
@@ -304,15 +307,6 @@ LoadInfo::LoadInfo(
         MOZ_ASSERT(mOriginAttributes.mPrivateBrowsingId == 0,
                    "chrome docshell shouldn't have mPrivateBrowsingId set.");
       }
-    }
-  }
-
-  // in case this is a loadinfo for a parser generated script, then we store
-  // that bit of information so CSP strict-dynamic can query it.
-  if (!nsContentUtils::IsPreloadType(mInternalContentPolicyType)) {
-    nsCOMPtr<nsIScriptElement> script = do_QueryInterface(aLoadingContext);
-    if (script && script->GetParserCreated() != mozilla::dom::NOT_FROM_PARSER) {
-      mParserCreatedScript = true;
     }
   }
 }
@@ -583,6 +577,8 @@ LoadInfo::LoadInfo(const LoadInfo& rhs)
       mSecurityFlags(rhs.mSecurityFlags),
       mSandboxFlags(rhs.mSandboxFlags),
       mTriggeringSandboxFlags(rhs.mTriggeringSandboxFlags),
+      mTriggeringWindowId(rhs.mTriggeringWindowId),
+      mTriggeringStorageAccess(rhs.mTriggeringStorageAccess),
       mInternalContentPolicyType(rhs.mInternalContentPolicyType),
       mTainting(rhs.mTainting),
       mBlockAllMixedContent(rhs.mBlockAllMixedContent),
@@ -634,6 +630,11 @@ LoadInfo::LoadInfo(const LoadInfo& rhs)
       mIsInDevToolsContext(rhs.mIsInDevToolsContext),
       mParserCreatedScript(rhs.mParserCreatedScript),
       mStoragePermission(rhs.mStoragePermission),
+      mOverriddenFingerprintingSettings(rhs.mOverriddenFingerprintingSettings),
+#ifdef DEBUG
+      mOverriddenFingerprintingSettingsIsSet(
+          rhs.mOverriddenFingerprintingSettingsIsSet),
+#endif
       mIsMetaRefresh(rhs.mIsMetaRefresh),
       mIsFromProcessingFrameAttributes(rhs.mIsFromProcessingFrameAttributes),
       mIsMediaRequest(rhs.mIsMediaRequest),
@@ -645,7 +646,9 @@ LoadInfo::LoadInfo(const LoadInfo& rhs)
       mUnstrippedURI(rhs.mUnstrippedURI),
       mInterceptionInfo(rhs.mInterceptionInfo),
       mHasInjectedCookieForCookieBannerHandling(
-          rhs.mHasInjectedCookieForCookieBannerHandling) {}
+          rhs.mHasInjectedCookieForCookieBannerHandling),
+      mWasSchemelessInput(rhs.mWasSchemelessInput) {
+}
 
 LoadInfo::LoadInfo(
     nsIPrincipal* aLoadingPrincipal, nsIPrincipal* aTriggeringPrincipal,
@@ -658,7 +661,8 @@ LoadInfo::LoadInfo(
     const Maybe<ClientInfo>& aInitialClientInfo,
     const Maybe<ServiceWorkerDescriptor>& aController,
     nsSecurityFlags aSecurityFlags, uint32_t aSandboxFlags,
-    uint32_t aTriggeringSandboxFlags, nsContentPolicyType aContentPolicyType,
+    uint32_t aTriggeringSandboxFlags, uint64_t aTriggeringWindowId,
+    bool aTriggeringStorageAccess, nsContentPolicyType aContentPolicyType,
     LoadTainting aTainting, bool aBlockAllMixedContent,
     bool aUpgradeInsecureRequests, bool aBrowserUpgradeInsecureRequests,
     bool aBrowserDidUpgradeInsecureRequests,
@@ -683,12 +687,14 @@ LoadInfo::LoadInfo(
     uint32_t aHttpsOnlyStatus, bool aHstsStatus,
     bool aHasValidUserGestureActivation, bool aAllowDeprecatedSystemRequests,
     bool aIsInDevToolsContext, bool aParserCreatedScript,
-    nsILoadInfo::StoragePermissionState aStoragePermission, bool aIsMetaRefresh,
-    uint32_t aRequestBlockingReason, nsINode* aLoadingContext,
+    nsILoadInfo::StoragePermissionState aStoragePermission,
+    const Maybe<RFPTarget>& aOverriddenFingerprintingSettings,
+    bool aIsMetaRefresh, uint32_t aRequestBlockingReason,
+    nsINode* aLoadingContext,
     nsILoadInfo::CrossOriginEmbedderPolicy aLoadingEmbedderPolicy,
     bool aIsOriginTrialCoepCredentiallessEnabledForTopLevel,
     nsIURI* aUnstrippedURI, nsIInterceptionInfo* aInterceptionInfo,
-    bool aHasInjectedCookieForCookieBannerHandling)
+    bool aHasInjectedCookieForCookieBannerHandling, bool aWasSchemelessInput)
     : mLoadingPrincipal(aLoadingPrincipal),
       mTriggeringPrincipal(aTriggeringPrincipal),
       mPrincipalToInherit(aPrincipalToInherit),
@@ -706,6 +712,8 @@ LoadInfo::LoadInfo(
       mSecurityFlags(aSecurityFlags),
       mSandboxFlags(aSandboxFlags),
       mTriggeringSandboxFlags(aTriggeringSandboxFlags),
+      mTriggeringWindowId(aTriggeringWindowId),
+      mTriggeringStorageAccess(aTriggeringStorageAccess),
       mInternalContentPolicyType(aContentPolicyType),
       mTainting(aTainting),
       mBlockAllMixedContent(aBlockAllMixedContent),
@@ -755,6 +763,7 @@ LoadInfo::LoadInfo(
       mIsInDevToolsContext(aIsInDevToolsContext),
       mParserCreatedScript(aParserCreatedScript),
       mStoragePermission(aStoragePermission),
+      mOverriddenFingerprintingSettings(aOverriddenFingerprintingSettings),
       mIsMetaRefresh(aIsMetaRefresh),
       mLoadingEmbedderPolicy(aLoadingEmbedderPolicy),
       mIsOriginTrialCoepCredentiallessEnabledForTopLevel(
@@ -762,7 +771,8 @@ LoadInfo::LoadInfo(
       mUnstrippedURI(aUnstrippedURI),
       mInterceptionInfo(aInterceptionInfo),
       mHasInjectedCookieForCookieBannerHandling(
-          aHasInjectedCookieForCookieBannerHandling) {
+          aHasInjectedCookieForCookieBannerHandling),
+      mWasSchemelessInput(aWasSchemelessInput) {
   // Only top level TYPE_DOCUMENT loads can have a null loadingPrincipal
   MOZ_ASSERT(mLoadingPrincipal ||
              aContentPolicyType == nsIContentPolicy::TYPE_DOCUMENT);
@@ -983,6 +993,30 @@ LoadInfo::SetTriggeringSandboxFlags(uint32_t aFlags) {
 }
 
 NS_IMETHODIMP
+LoadInfo::GetTriggeringWindowId(uint64_t* aResult) {
+  *aResult = mTriggeringWindowId;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+LoadInfo::SetTriggeringWindowId(uint64_t aFlags) {
+  mTriggeringWindowId = aFlags;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+LoadInfo::GetTriggeringStorageAccess(bool* aResult) {
+  *aResult = mTriggeringStorageAccess;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+LoadInfo::SetTriggeringStorageAccess(bool aFlags) {
+  mTriggeringStorageAccess = aFlags;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 LoadInfo::GetSecurityMode(uint32_t* aFlags) {
   *aFlags = (mSecurityFlags &
              (nsILoadInfo::SEC_REQUIRE_SAME_ORIGIN_INHERITS_SEC_CONTEXT |
@@ -1105,6 +1139,25 @@ LoadInfo::SetStoragePermission(
     nsILoadInfo::StoragePermissionState aStoragePermission) {
   mStoragePermission = aStoragePermission;
   return NS_OK;
+}
+
+const Maybe<RFPTarget>& LoadInfo::GetOverriddenFingerprintingSettings() {
+#ifdef DEBUG
+  RefPtr<BrowsingContext> browsingContext;
+  GetTargetBrowsingContext(getter_AddRefs(browsingContext));
+
+  // Exclude this check if the target browsing context is for the parent
+  // process.
+  MOZ_ASSERT_IF(XRE_IsParentProcess() && browsingContext &&
+                    !browsingContext->IsInProcess(),
+                mOverriddenFingerprintingSettingsIsSet);
+#endif
+  return mOverriddenFingerprintingSettings;
+}
+
+void LoadInfo::SetOverriddenFingerprintingSettings(RFPTarget aTargets) {
+  mOverriddenFingerprintingSettings.reset();
+  mOverriddenFingerprintingSettings.emplace(aTargets);
 }
 
 NS_IMETHODIMP
@@ -2295,6 +2348,18 @@ LoadInfo::SetHasInjectedCookieForCookieBannerHandling(
     bool aHasInjectedCookieForCookieBannerHandling) {
   mHasInjectedCookieForCookieBannerHandling =
       aHasInjectedCookieForCookieBannerHandling;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+LoadInfo::GetWasSchemelessInput(bool* aWasSchemelessInput) {
+  *aWasSchemelessInput = mWasSchemelessInput;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+LoadInfo::SetWasSchemelessInput(bool aWasSchemelessInput) {
+  mWasSchemelessInput = aWasSchemelessInput;
   return NS_OK;
 }
 

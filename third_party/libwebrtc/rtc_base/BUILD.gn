@@ -6,7 +6,6 @@
 # in the file PATENTS.  All contributing project authors may
 # be found in the AUTHORS file in the root of the source tree.
 
-import("//third_party/google_benchmark/buildconfig.gni")
 import("../webrtc.gni")
 
 if (is_android) {
@@ -138,8 +137,14 @@ rtc_library("bit_buffer") {
     "bit_buffer.cc",
     "bit_buffer.h",
   ]
-  deps = [ ":checks" ]
-  absl_deps = [ "//third_party/abseil-cpp/absl/numeric:bits" ]
+  deps = [
+    ":checks",
+    "../api/units:data_size",
+  ]
+  absl_deps = [
+    "//third_party/abseil-cpp/absl/numeric:bits",
+    "//third_party/abseil-cpp/absl/strings:strings",
+  ]
 }
 
 rtc_library("byte_buffer") {
@@ -243,7 +248,42 @@ rtc_library("random") {
   ]
 }
 
+rtc_library("bitrate_tracker") {
+  visibility = [ "*" ]
+  sources = [
+    "bitrate_tracker.cc",
+    "bitrate_tracker.h",
+  ]
+  deps = [
+    ":rate_statistics",
+    "../api/units:data_rate",
+    "../api/units:data_size",
+    "../api/units:time_delta",
+    "../api/units:timestamp",
+    "system:rtc_export",
+  ]
+  absl_deps = [ "//third_party/abseil-cpp/absl/types:optional" ]
+}
+
+rtc_library("frequency_tracker") {
+  visibility = [ "*" ]
+  sources = [
+    "frequency_tracker.cc",
+    "frequency_tracker.h",
+  ]
+  deps = [
+    ":rate_statistics",
+    "../api/units:frequency",
+    "../api/units:time_delta",
+    "../api/units:timestamp",
+    "system:rtc_export",
+  ]
+  absl_deps = [ "//third_party/abseil-cpp/absl/types:optional" ]
+}
+
 rtc_library("rate_statistics") {
+  # TODO(bugs.webrtc.org/13756): Restrict visibility to private when all usage
+  # of the RateStatistics is migrated to BitrateTracker and FrequencyTracker.
   visibility = [ "*" ]
   sources = [
     "rate_statistics.cc",
@@ -420,6 +460,12 @@ rtc_library("logging") {
     "//third_party/abseil-cpp/absl/types:optional",
   ]
 
+  # Added to allow including apm_data_dumper.h in rtc_base/logging.cc
+  # for Mozilla controlling aec logging from about:webrtc.
+  if (build_with_mozilla) {
+    configs += [ "../modules/audio_processing:apm_debug_dump" ]
+  }
+
   if (build_with_chromium) {
     # Dependency on chromium's logging (in //base).
     deps += [ "//base" ]
@@ -487,6 +533,7 @@ rtc_library("rate_limiter") {
     ":macromagic",
     ":rate_statistics",
     "../system_wrappers",
+    "../system_wrappers:field_trial",
     "synchronization:mutex",
   ]
   absl_deps = [ "//third_party/abseil-cpp/absl/types:optional" ]
@@ -547,6 +594,7 @@ rtc_library("timeutils") {
     ":stringutils",
     "system:rtc_export",
   ]
+
   if (rtc_exclude_system_time) {
     defines = [ "WEBRTC_EXCLUDE_SYSTEM_TIME" ]
   }
@@ -554,6 +602,7 @@ rtc_library("timeutils") {
   libs = []
   if (is_win) {
     libs += [ "winmm.lib" ]
+    deps += [ ":win32" ]
   }
 }
 
@@ -673,6 +722,7 @@ if (is_mac || is_ios) {
     deps = [
       ":checks",
       ":logging",
+      "../api:location",
       "../api/task_queue",
       "../api/units:time_delta",
       "synchronization:mutex",
@@ -833,10 +883,6 @@ if (!build_with_mozilla) {
     deps += [ "//third_party/jsoncpp" ]
   } else {
     include_dirs = [ "$rtc_jsoncpp_root" ]
-
-    # When defined changes the include path for json.h to where it is
-    # expected to be when building json outside of the standalone build.
-    defines += [ "WEBRTC_EXTERNAL_JSON" ]
   }
   absl_deps = [ "//third_party/abseil-cpp/absl/strings" ]
 }
@@ -858,6 +904,26 @@ rtc_library("net_helpers") {
     ]
   }
   absl_deps = [ "//third_party/abseil-cpp/absl/strings" ]
+}
+
+rtc_library("net_test_helpers") {
+  # TODO(mbonadei): Enable once net_helpers don't depend
+  # on this target  anymore.
+  # testonly = true
+  sources = [
+    "net_test_helpers.cc",
+    "net_test_helpers.h",
+  ]
+  deps = [ "system:rtc_export" ]
+  if (is_android) {
+    deps += [ ":ifaddrs_android" ]
+  }
+  if (is_win) {
+    deps += [
+      ":win32",
+      "win:windows_version",
+    ]
+  }
 }
 
 rtc_library("async_resolver_interface") {
@@ -984,6 +1050,7 @@ rtc_library("threading") {
     ":socket_server",
     ":timeutils",
     "../api:function_view",
+    "../api:location",
     "../api:refcountedbase",
     "../api:scoped_refptr",
     "../api:sequence_checker",
@@ -1069,14 +1136,11 @@ if (is_win) {
     sources = [
       "win32.cc",
       "win32.h",
-      "win32_window.cc",
-      "win32_window.h",
     ]
 
     deps = [
       ":byte_order",
       ":checks",
-      ":logging",
       ":macromagic",
       ":stringutils",
     ]
@@ -1482,6 +1546,7 @@ if (!build_with_mozilla) {
     "../api/task_queue:pending_task_safety_flag",
     "../api/units:time_delta",
     "../system_wrappers:field_trial",
+    "synchronization:mutex",
     "system:rtc_export",
     "task_utils:repeating_task",
     "third_party/base64",
@@ -1771,6 +1836,7 @@ if (rtc_include_tests) {
         ":logging",
         ":macromagic",
         ":net_helpers",
+        ":net_test_helpers",
         ":null_socket_server",
         ":platform_thread",
         ":rtc_base_tests_utils",
@@ -1800,6 +1866,7 @@ if (rtc_include_tests) {
       sources = [
         "base64_unittest.cc",
         "bit_buffer_unittest.cc",
+        "bitrate_tracker_unittest.cc",
         "bitstream_reader_unittest.cc",
         "bounded_inline_vector_unittest.cc",
         "buffer_queue_unittest.cc",
@@ -1811,6 +1878,7 @@ if (rtc_include_tests) {
         "deprecated/recursive_critical_section_unittest.cc",
         "event_tracer_unittest.cc",
         "event_unittest.cc",
+        "frequency_tracker_unittest.cc",
         "logging_unittest.cc",
         "numerics/divide_round_unittest.cc",
         "numerics/histogram_percentile_counter_unittest.cc",
@@ -1844,6 +1912,7 @@ if (rtc_include_tests) {
         ":async_packet_socket",
         ":async_udp_socket",
         ":bit_buffer",
+        ":bitrate_tracker",
         ":bitstream_reader",
         ":bounded_inline_vector",
         ":buffer",
@@ -1855,6 +1924,7 @@ if (rtc_include_tests) {
         ":criticalsection",
         ":divide_round",
         ":event_tracer",
+        ":frequency_tracker",
         ":gunit_helpers",
         ":histogram_percentile_counter",
         ":ip_address",
@@ -1894,8 +1964,13 @@ if (rtc_include_tests) {
         "../api:make_ref_counted",
         "../api:scoped_refptr",
         "../api/numerics",
+        "../api/units:data_rate",
+        "../api/units:data_size",
+        "../api/units:frequency",
         "../api/units:time_delta",
+        "../api/units:timestamp",
         "../system_wrappers",
+        "../test:field_trial",
         "../test:fileutils",
         "../test:test_main",
         "../test:test_support",
@@ -2027,6 +2102,7 @@ if (rtc_include_tests) {
         ":logging",
         ":macromagic",
         ":net_helpers",
+        ":net_test_helpers",
         ":network",
         ":network_route",
         ":null_socket_server",
@@ -2065,14 +2141,11 @@ if (rtc_include_tests) {
         "synchronization:mutex",
         "third_party/sigslot",
       ]
-      if (enable_google_benchmarks) {
+      if (rtc_enable_google_benchmarks) {
         deps += [ "synchronization:synchronization_unittests" ]
       }
       if (is_win) {
-        sources += [
-          "win32_unittest.cc",
-          "win32_window_unittest.cc",
-        ]
+        sources += [ "win32_unittest.cc" ]
         deps += [ ":win32" ]
       }
       if (is_posix || is_fuchsia) {

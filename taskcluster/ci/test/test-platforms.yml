@@ -111,6 +111,12 @@ linux1804-64-clang-trunk-qr/opt:
         - awsy
         - browsertime-clang
 
+linux2204-64-wayland/debug:
+    build-platform: linux64/debug
+    test-sets:
+        - linux2204-wayland-tests
+        - web-platform-tests
+
 linux2204-64-wayland/opt:
     build-platform: linux64/opt
     test-sets:
@@ -188,6 +194,24 @@ windows10-64-ref-hw-2017-qr/opt:
     build-platform: win64-shippable/opt
     test-sets:
         - talos-ref-hw
+
+windows11-64-2009-hw-ref-shippable/opt:
+    build-platform: win64-shippable/opt
+    build-signing-label:
+        by-variant:
+            msix: repackage-signing-msix-win64/opt
+            default: build-signing-win64/opt
+    test-sets:
+        - windows-ref-hw-tests
+
+windows11-64-2009-hw-ref/opt:
+    build-platform: win64/opt
+    build-signing-label:
+        by-variant:
+            msix: repackage-signing-msix-win64/opt
+            default: build-signing-win64/opt
+    test-sets:
+        - windows-ref-hw-tests
 
 windows10-64-shippable-qr/opt:
     build-platform: win64-shippable/opt
@@ -309,6 +333,12 @@ macosx1100-64-qr/debug:
     test-sets:
         - macosx1100-64-jittests
 
+macosx1100-64-aarch64-qr/debug:
+    build-platform: macosx64-aarch64/debug
+    build-signing-label: repackage-macosx64-aarch64/debug
+    test-sets:
+        - macosx1100-aarch64-qr-tests
+
 macosx1100-64-shippable-qr/opt:
     build-platform: macosx64-shippable/opt
     build-signing-label: repackage-macosx64-shippable/opt
@@ -349,6 +379,7 @@ macosx1015-64-qr/opt:
         - macosx1015-64-qr-tests
         - web-platform-tests
         - web-platform-tests-backlog
+        - browsertime
 
 macosx1015-64-qr/debug:
     build-platform: macosx64/debug
@@ -360,6 +391,11 @@ macosx1015-64-ccov-qr/opt:
     build-platform: macosx64-ccov/opt
     test-sets:
         - macosx1015-64-qr-tests
+
+macosx1300-64-shippable-qr/opt:
+    build-platform: macosx64-shippable/opt
+    test-sets:
+        - macosx1300-64-qr-tests
 
 ##
 # Android platforms (matching /android-em.*/)

@@ -1,7 +1,7 @@
 "use strict";
 
-const { AboutWelcomeParent } = ChromeUtils.import(
-  "resource:///actors/AboutWelcomeParent.jsm"
+const { AboutWelcomeParent } = ChromeUtils.importESModule(
+  "resource:///actors/AboutWelcomeParent.sys.mjs"
 );
 
 const { AboutWelcomeTelemetry } = ChromeUtils.import(
@@ -40,13 +40,14 @@ add_setup(async function () {
     set: [
       ["ui.prefersReducedMotion", 1],
       ["browser.aboutwelcome.transitions", false],
+      ["browser.shell.checkDefaultBrowser", true],
     ],
   });
 });
 
-function initSandbox({ pin = true, isDefault = false } = {}) {
+function initSandbox({ needsPin = true, isDefault = false } = {}) {
   const sandbox = sinon.createSandbox();
-  sandbox.stub(AboutWelcomeParent, "doesAppNeedPin").returns(pin);
+  sandbox.stub(AboutWelcomeParent, "doesAppNeedPin").returns(needsPin);
   sandbox.stub(AboutWelcomeParent, "isDefaultBrowser").returns(isDefault);
 
   return sandbox;
@@ -85,19 +86,17 @@ add_task(async function test_aboutwelcome_mr_template_telemetry() {
 });
 
 /**
- * Telemetry Impression with Pin as First Screen
+ * Telemetry Impression with Easy Setup Need Default and Pin as First Screen
  */
-add_task(async function test_aboutwelcome_pin_screen_impression() {
-  await pushPrefs(["browser.shell.checkDefaultBrowser", true]);
-
+add_task(async function test_aboutwelcome_easy_setup_screen_impression() {
   const sandbox = initSandbox();
   sandbox
     .stub(AWScreenUtils, "evaluateScreenTargeting")
-    .resolves(true)
-    .withArgs(
-      "os.windowsBuildNumber >= 15063 && !isDefaultBrowser && !doesAppNeedPin"
-    )
     .resolves(false)
+    .withArgs(
+      "doesAppNeedPin && 'browser.shell.checkDefaultBrowser'|preferenceValue && !isDefaultBrowser"
+    )
+    .resolves(true)
     .withArgs("isDeviceMigration")
     .resolves(false);
 
@@ -136,30 +135,27 @@ add_task(async function test_aboutwelcome_pin_screen_impression() {
 
   Assert.ok(
     impressionCall.args[0].message_id.startsWith(
-      "MR_WELCOME_DEFAULT_0_AW_PIN_FIREFOX_P"
+      "MR_WELCOME_DEFAULT_0_AW_EASY_SETUP_NEEDS_DEFAULT_AND_PIN"
     ),
     "Impression telemetry includes correct message id"
   );
   await cleanup();
   sandbox.restore();
-  await popPrefs();
 });
 
 /**
  * Test MR template content - Browser is not Pinned and not set as default
  */
 add_task(async function test_aboutwelcome_mr_template_content() {
-  await pushPrefs(["browser.shell.checkDefaultBrowser", true]);
-
   const sandbox = initSandbox();
 
   sandbox
     .stub(AWScreenUtils, "evaluateScreenTargeting")
-    .resolves(true)
-    .withArgs(
-      "os.windowsBuildNumber >= 15063 && !isDefaultBrowser && !doesAppNeedPin"
-    )
     .resolves(false)
+    .withArgs(
+      "doesAppNeedPin && 'browser.shell.checkDefaultBrowser'|preferenceValue && !isDefaultBrowser"
+    )
+    .resolves(true)
     .withArgs("isDeviceMigration")
     .resolves(false);
 
@@ -178,45 +174,46 @@ add_task(async function test_aboutwelcome_mr_template_content() {
 
   await test_screen_content(
     browser,
-    "renders pin screen",
+    "renders easy setup needing default and pin screen",
     //Expected selectors:
-    ["main.AW_PIN_FIREFOX"],
+    ["main.AW_EASY_SETUP_NEEDS_DEFAULT_AND_PIN"],
     //Unexpected selectors:
-    ["main.AW_GRATITUDE"]
+    [
+      "main.AW_EASY_SETUP_NEEDS_PIN",
+      "main.AW_EASY_SETUP_NEEDS_DEFAULT",
+      "main.AW_EASY_SETUP_ONLY_IMPORT",
+    ]
   );
 
   await clickVisibleButton(browser, ".action-buttons button.secondary");
 
-  //should render set default
+  //should render gratitude screen
   await test_screen_content(
     browser,
-    "renders set default screen",
+    "renders gratitude screen",
     //Expected selectors:
-    ["main.AW_SET_DEFAULT"],
+    ["main.AW_GRATITUDE"],
     //Unexpected selectors:
-    ["main.AW_CHOOSE_THEME"]
+    ["main.AW_IMPORT_SETTINGS_EMBEDDED"]
   );
 
   await cleanup();
   sandbox.restore();
-  await popPrefs();
 });
 
 /**
  * Test MR template content - Browser has been set as Default, not pinned
  */
-add_task(async function test_aboutwelcome_mr_template_content_pin() {
-  await pushPrefs(["browser.shell.checkDefaultBrowser", true]);
-
+add_task(async function test_aboutwelcome_mr_template_content_needs_pin() {
   const sandbox = initSandbox({ isDefault: true });
 
   sandbox
     .stub(AWScreenUtils, "evaluateScreenTargeting")
-    .resolves(true)
-    .withArgs(
-      "os.windowsBuildNumber >= 15063 && !isDefaultBrowser && !doesAppNeedPin"
-    )
     .resolves(false)
+    .withArgs(
+      "doesAppNeedPin && (!'browser.shell.checkDefaultBrowser'|preferenceValue || isDefaultBrowser)"
+    )
+    .resolves(true)
     .withArgs("isDeviceMigration")
     .resolves(false);
 
@@ -224,11 +221,15 @@ add_task(async function test_aboutwelcome_mr_template_content_pin() {
 
   await test_screen_content(
     browser,
-    "renders pin screen",
+    "renders easy setup needs pin screen",
     //Expected selectors:
-    ["main.AW_PIN_FIREFOX"],
+    ["main.AW_EASY_SETUP_NEEDS_PIN"],
     //Unexpected selectors:
-    ["main.AW_SET_DEFAULT"]
+    [
+      "main.AW_EASY_SETUP_NEEDS_DEFAULT",
+      "main.AW_EASY_SETUP_NEEDS_DEFAULT_AND_PIN",
+      "main.AW_EASY_SETUP_ONLY_IMPORT",
+    ]
   );
 
   await clickVisibleButton(browser, ".action-buttons button.secondary");
@@ -237,81 +238,81 @@ add_task(async function test_aboutwelcome_mr_template_content_pin() {
     browser,
     "renders next screen",
     //Expected selectors:
-    ["main"],
+    ["main.AW_GRATITUDE"],
     //Unexpected selectors:
-    ["main.AW_SET_DEFAULT"]
+    ["main.AW_IMPORT_SETTINGS_EMBEDDED"]
   );
 
   await cleanup();
   sandbox.restore();
-  await popPrefs();
 });
 
 /**
  * Test MR template content - Browser is Pinned, not default
  */
 add_task(async function test_aboutwelcome_mr_template_only_default() {
-  await pushPrefs(["browser.shell.checkDefaultBrowser", true]);
-
-  const sandbox = initSandbox({ pin: false });
+  const sandbox = initSandbox({ needsPin: false });
   sandbox
     .stub(AWScreenUtils, "evaluateScreenTargeting")
-    .resolves(true)
-    .withArgs(
-      "os.windowsBuildNumber >= 15063 && !isDefaultBrowser && !doesAppNeedPin"
-    )
     .resolves(false)
+    .withArgs(
+      "!doesAppNeedPin && 'browser.shell.checkDefaultBrowser'|preferenceValue && !isDefaultBrowser"
+    )
+    .resolves(true)
     .withArgs("isDeviceMigration")
     .resolves(false);
 
   let { browser, cleanup } = await openMRAboutWelcome();
-  //should render set default
+  //should render easy setup needs default screen
   await test_screen_content(
     browser,
-    "renders set default screen",
+    "renders set easy setup needs default screen",
     //Expected selectors:
-    ["main.AW_ONLY_DEFAULT"],
+    ["main.AW_EASY_SETUP_NEEDS_DEFAULT"],
     //Unexpected selectors:
-    ["main.AW_PIN_FIREFOX"]
+    [
+      "main.AW_EASY_SETUP_NEEDS_PIN",
+      "main.AW_EASY_SETUP_NEEDS_DEFAULT_AND_PIN",
+      "main.AW_EASY_SETUP_ONLY_IMPORT",
+    ]
   );
 
   await cleanup();
   sandbox.restore();
-  await popPrefs();
 });
 /**
  * Test MR template content - Browser is Pinned and set as default
  */
-add_task(async function test_aboutwelcome_mr_template_get_started() {
-  await pushPrefs(["browser.shell.checkDefaultBrowser", true]);
-
-  const sandbox = initSandbox({ pin: false, isDefault: true });
-
+add_task(async function test_aboutwelcome_mr_template_only_import() {
+  const sandbox = initSandbox({ needsPin: false, isDefault: true });
   sandbox
     .stub(AWScreenUtils, "evaluateScreenTargeting")
-    .resolves(true)
-    .withArgs(
-      "os.windowsBuildNumber >= 15063 && !isDefaultBrowser && !doesAppNeedPin"
-    )
     .resolves(false)
+    .withArgs(
+      "!doesAppNeedPin && (!'browser.shell.checkDefaultBrowser'|preferenceValue || isDefaultBrowser)"
+    )
+    .resolves(true)
     .withArgs("isDeviceMigration")
     .resolves(false);
 
   let { browser, cleanup } = await openMRAboutWelcome();
 
-  //should render set default
+  //should render easy setup only import screen
   await test_screen_content(
     browser,
     "doesn't render pin and set default screens",
     //Expected selectors:
-    ["main.AW_GET_STARTED"],
+    ["main.AW_EASY_SETUP_ONLY_IMPORT"],
     //Unexpected selectors:
-    ["main.AW_PIN_FIREFOX", "main.AW_ONLY_DEFAULT"]
+    [
+      "main.AW_EASY_SETUP_NEEDS_PIN",
+      "main.AW_EASY_SETUP_NEEDS_DEFAULT_AND_PIN",
+      "main.AW_EASY_SETUP_NEEDS_DEFAULT",
+    ]
   );
 
   await cleanup();
   sandbox.restore();
-  await popPrefs();
 });
 
 add_task(async function test_aboutwelcome_gratitude() {
@@ -516,7 +517,7 @@ add_task(async function test_aboutwelcome_embedded_migration() {
       Assert.ok(true, "Selection page is being shown in the migration wizard.");
 
       // Now let's make sure that the <panel-list> can appear.
-      let panelList = wizard.querySelector("panel-list");
+      let panelList = shadow.querySelector("panel-list");
       Assert.ok(panelList, "Found the <panel-list>.");
 
       // The "shown" event from the panel-list is coming from a lower level
@@ -569,7 +570,7 @@ add_task(async function test_aboutwelcome_embedded_migration() {
         "Panel should be tightly anchored to the bottom of the button shadow node."
       );
 
-      let panelItem = wizard.querySelector(menuitemSelector);
+      let panelItem = shadow.querySelector(menuitemSelector);
       panelItem.click();
 
       let importButton = shadow.querySelector("#import");
@@ -649,4 +650,301 @@ add_task(async function test_aboutwelcome_embedded_migration() {
     InternalTestingProfileMigrator.key
   );
   migrator.flushResourceCache();
+});
+
+add_task(async function test_aboutwelcome_multiselect() {
+  const TEST_SCREENS = [
+    {
+      id: "AW_EASY_SETUP_X",
+      content: {
+        position: "split",
+        split_narrow_bkg_position: "-60px",
+        progress_bar: true,
+        logo: {},
+        title: { string_id: "mr2022-onboarding-set-default-title" },
+        tiles: {
+          type: "multiselect",
+          style: { flexDirection: "column", alignItems: "flex-start" },
+          data: [
+            {
+              id: "radio-1",
+              type: "radio",
+              group: "radios",
+              defaultValue: true,
+              label: {
+                raw: "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+              },
+              action: { type: "OPEN_PROTECTION_REPORT" },
+            },
+            {
+              id: "radio-2",
+              type: "radio",
+              group: "radios",
+              defaultValue: false,
+              label: {
+                raw: "Nulla facilisi nullam vehicula ipsum a arcu cursus vitae.",
+              },
+              action: { type: "OPEN_FIREFOX_VIEW" },
+            },
+            {
+              id: "radio-3",
+              type: "radio",
+              group: "radios",
+              defaultValue: false,
+              label: { raw: "Natoque penatibus et magnis dis." },
+              action: { type: "OPEN_PRIVATE_BROWSER_WINDOW" },
+            },
+          ],
+        },
+        secondary_button: {
+          label: {
+            string_id: "mr2022-onboarding-secondary-skip-button-label",
+          },
+          action: { navigate: true },
+          has_arrow_icon: true,
+        },
+      },
+    },
+    {
+      id: "AW_EASY_SETUP_Y",
+      content: {
+        position: "split",
+        split_narrow_bkg_position: "-60px",
+        progress_bar: true,
+        logo: {},
+        title: { string_id: "mr2022-onboarding-set-default-title" },
+        tiles: {
+          type: "multiselect",
+          style: { flexDirection: "row", gap: "24px" },
+          data: [
+            {
+              id: "checkbox-1",
+              defaultValue: true,
+              label: { raw: "Test1" },
+              action: { type: "OPEN_PROTECTION_REPORT" },
+            },
+            {
+              id: "checkbox-2",
+              defaultValue: true,
+              label: { raw: "Test2" },
+              action: { type: "OPEN_FIREFOX_VIEW" },
+            },
+            {
+              id: "radio-1",
+              type: "radio",
+              group: "radios",
+              defaultValue: true,
+              label: { raw: "Test3" },
+              action: { type: "OPEN_PROTECTION_REPORT" },
+            },
+            {
+              id: "radio-2",
+              type: "radio",
+              group: "radios",
+              defaultValue: false,
+              label: { raw: "Test4" },
+              action: { type: "OPEN_FIREFOX_VIEW" },
+            },
+            {
+              id: "radio-3",
+              type: "radio",
+              group: "radios",
+              defaultValue: false,
+              label: { raw: "Test5" },
+              action: { type: "OPEN_PRIVATE_BROWSER_WINDOW" },
+            },
+          ],
+        },
+        secondary_button: {
+          label: {
+            string_id: "mr2022-onboarding-secondary-skip-button-label",
+          },
+          action: { navigate: true },
+          has_arrow_icon: true,
+        },
+      },
+    },
+    {
+      id: "AW_EASY_SETUP_Z",
+      content: {
+        position: "split",
+        split_narrow_bkg_position: "-60px",
+        progress_bar: true,
+        logo: {},
+        title: { string_id: "mr2022-onboarding-set-default-title" },
+        tiles: {
+          type: "multiselect",
+          style: {
+            flexDirection: "column",
+            flexShrink: 1,
+            justifyContent: "flex-start",
+          },
+          data: [
+            {
+              id: "checkbox-1",
+              defaultValue: true,
+              label: { raw: "Test1" },
+              action: { type: "OPEN_PROTECTION_REPORT" },
+            },
+            {
+              id: "checkbox-2",
+              defaultValue: true,
+              label: { raw: "Test2" },
+              action: { type: "OPEN_FIREFOX_VIEW" },
+            },
+            {
+              id: "radio-1",
+              type: "radio",
+              group: "radios",
+              defaultValue: true,
+              label: { raw: "Test3" },
+              action: { type: "OPEN_PROTECTION_REPORT" },
+            },
+            {
+              id: "radio-2",
+              type: "radio",
+              group: "radios",
+              defaultValue: false,
+              label: { raw: "Test4" },
+              action: { type: "OPEN_FIREFOX_VIEW" },
+            },
+            {
+              id: "radio-3",
+              type: "radio",
+              group: "radios",
+              defaultValue: false,
+              label: { raw: "Test5" },
+              action: { type: "OPEN_PRIVATE_BROWSER_WINDOW" },
+            },
+          ],
+        },
+        secondary_button: {
+          label: {
+            string_id: "mr2022-onboarding-secondary-skip-button-label",
+          },
+          action: { navigate: true },
+          has_arrow_icon: true,
+        },
+      },
+    },
+  ];
+
+  const sandbox = sinon.createSandbox();
+  sandbox.stub(AWScreenUtils, "addScreenImpression").resolves();
+
+  await setAboutWelcomeMultiStage(JSON.stringify(TEST_SCREENS));
+  let { cleanup, browser } = await openMRAboutWelcome();
+
+  await test_screen_content(
+    browser,
+    "renders default screen",
+    ["main.AW_EASY_SETUP_X", "#radio-1:checked"],
+    ["#radio-2:checked", "#radio-3:checked"]
+  );
+
+  await clickVisibleButton(browser, "#radio-3");
+
+  await test_screen_content(
+    browser,
+    "renders radio button selection",
+    ["main.AW_EASY_SETUP_X", "#radio-3:checked"],
+    ["#radio-1:checked", "#radio-2:checked"]
+  );
+
+  await test_element_styles(
+    browser,
+    ".multi-select-container",
+    { flexDirection: "column", alignItems: "flex-start" },
+    {}
+  );
+
+  await clickVisibleButton(browser, ".action-buttons button.secondary");
+
+  await test_screen_content(
+    browser,
+    "renders screen 2",
+    [
+      "main.AW_EASY_SETUP_Y",
+      "#checkbox-1:checked",
+      "#checkbox-2:checked",
+      "#radio-1:checked",
+    ],
+    ["#radio-2:checked", "#radio-3:checked"]
+  );
+
+  await clickVisibleButton(browser, "#checkbox-1");
+  await clickVisibleButton(browser, "#checkbox-2");
+  await clickVisibleButton(browser, "#radio-2");
+
+  await test_screen_content(
+    browser,
+    "renders checkbox and radio button selection",
+    ["main.AW_EASY_SETUP_Y", "#radio-2:checked"],
+    ["#checkbox-1:checked", "#checkbox-2:checked", "#radio-1:checked"]
+  );
+
+  await test_element_styles(
+    browser,
+    ".multi-select-container",
+    { flexDirection: "row", gap: "24px" },
+    {}
+  );
+
+  browser.goBack();
+
+  await test_screen_content(
+    browser,
+    "renders screen 1 and remembers selection",
+    ["main.AW_EASY_SETUP_X", "#radio-3:checked"],
+    ["#radio-1:checked", "#radio-2:checked"]
+  );
+
+  browser.goForward();
+
+  await test_screen_content(
+    browser,
+    "renders screen 2 and remembers selection",
+    ["main.AW_EASY_SETUP_Y", "#radio-2:checked"],
+    ["#checkbox-1:checked", "#checkbox-2:checked", "#radio-1:checked"]
+  );
+
+  await clickVisibleButton(browser, ".action-buttons button.secondary");
+
+  await test_screen_content(
+    browser,
+    "renders screen 3",
+    [
+      "main.AW_EASY_SETUP_Z",
+      "#checkbox-1:checked",
+      "#checkbox-2:checked",
+      "#radio-1:checked",
+    ],
+    ["#radio-2:checked", "#radio-3:checked"]
+  );
+
+  await clickVisibleButton(browser, "#radio-3");
+
+  await test_screen_content(
+    browser,
+    "renders radio button selection without removing checkbox selection",
+    [
+      "main.AW_EASY_SETUP_Z",
+      "#checkbox-1:checked",
+      "#checkbox-2:checked",
+      "#radio-3:checked",
+    ],
+    ["#radio-1:checked", "#radio-2:checked"]
+  );
+
+  await test_element_styles(
+    browser,
+    ".multi-select-container",
+    { flexDirection: "column", flexShrink: 1, justifyContent: "flex-start" },
+    {}
+  );
+
+  await SpecialPowers.popPrefEnv();
+  await cleanup();
+
+  sandbox.restore();
 });

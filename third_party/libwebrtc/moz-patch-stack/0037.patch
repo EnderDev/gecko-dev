@@ -1,52 +1,47 @@
-From: Dan Minor <dminor@mozilla.com>
-Date: Wed, 18 Nov 2020 15:19:00 -0500
-Subject: Bug 1654112 - Fully qualify kIvfHeaderSize. r=ng
+From: "Byron Campen [:bwc]" <docfaraday@gmail.com>
+Date: Thu, 29 Apr 2021 18:25:00 +0000
+Subject: Bug 1654112 - Work around the old (<1.5) libxrandr headers on our
+ build machines. r=mjf,ng
 
-Differential Revision: https://phabricator.services.mozilla.com/D130087
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/9452e226943fea4b0f6ff67e0ee85587d9c23a44
+Differential Revision: https://phabricator.services.mozilla.com/D113830
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/c91f12b557a1d23b468c75c4f2fc00eb0f8d541a
 ---
- modules/video_coding/utility/ivf_file_writer.cc | 10 +++++-----
- 1 file changed, 5 insertions(+), 5 deletions(-)
+ X11/extensions/Xrandr.h | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+ create mode 100644 X11/extensions/Xrandr.h
 
-diff --git a/modules/video_coding/utility/ivf_file_writer.cc b/modules/video_coding/utility/ivf_file_writer.cc
-index 668390a78c..5b27ef3ef7 100644
---- a/modules/video_coding/utility/ivf_file_writer.cc
-+++ b/modules/video_coding/utility/ivf_file_writer.cc
-@@ -39,7 +39,7 @@ IvfFileWriter::IvfFileWriter(FileWrapper file, size_t byte_limit)
-       last_timestamp_(-1),
-       using_capture_timestamps_(false),
-       file_(std::move(file)) {
--  RTC_DCHECK(byte_limit == 0 || kIvfHeaderSize <= byte_limit)
-+  RTC_DCHECK(byte_limit == 0 || webrtc::kIvfHeaderSize <= byte_limit)
-       << "The byte_limit is too low, not even the header will fit.";
- }
- 
-@@ -59,7 +59,7 @@ bool IvfFileWriter::WriteHeader() {
-     return false;
-   }
- 
--  uint8_t ivf_header[kIvfHeaderSize] = {0};
-+  uint8_t ivf_header[webrtc::kIvfHeaderSize] = {0};
-   ivf_header[0] = 'D';
-   ivf_header[1] = 'K';
-   ivf_header[2] = 'I';
-@@ -113,13 +113,13 @@ bool IvfFileWriter::WriteHeader() {
-                                           static_cast<uint32_t>(num_frames_));
-   ByteWriter<uint32_t>::WriteLittleEndian(&ivf_header[28], 0);  // Reserved.
- 
--  if (!file_.Write(ivf_header, kIvfHeaderSize)) {
-+  if (!file_.Write(ivf_header, webrtc::kIvfHeaderSize)) {
-     RTC_LOG(LS_ERROR) << "Unable to write IVF header for ivf output file.";
-     return false;
-   }
- 
--  if (bytes_written_ < kIvfHeaderSize) {
--    bytes_written_ = kIvfHeaderSize;
-+  if (bytes_written_ < webrtc::kIvfHeaderSize) {
-+    bytes_written_ = webrtc::kIvfHeaderSize;
-   }
- 
-   return true;
--- 
-2.34.1
-
+diff --git a/X11/extensions/Xrandr.h b/X11/extensions/Xrandr.h
+new file mode 100644
+index 0000000000..876e8b4c7f
+--- /dev/null
++++ b/X11/extensions/Xrandr.h
+@@ -0,0 +1,29 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++// Hack to compensate for the old (<1.5) Xrandr development headers on
++// Mozilla's build boxes.
++
++#ifndef _XRANDR_H_WRAPPER_HACK_
++#define _XRANDR_H_WRAPPER_HACK_
++
++#include_next <X11/extensions/Xrandr.h>
++
++#if RANDR_MAJOR == 1 && RANDR_MINOR < 5 // defined in randr.h
++typedef struct _XRRMonitorInfo {
++    Atom name;
++    Bool primary;
++    Bool automatic;
++    int noutput;
++    int x;
++    int y;
++    int width;
++    int height;
++    int mwidth;
++    int mheight;
++    RROutput *outputs;
++} XRRMonitorInfo;
++#endif
++
++#endif // _XRANDR_H_WRAPPER_HACK_

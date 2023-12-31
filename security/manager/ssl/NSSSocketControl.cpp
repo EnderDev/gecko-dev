@@ -47,7 +47,8 @@ NSSSocketControl::NSSSocketControl(const nsCString& aHostName, int32_t aPort,
       mSocketCreationTimestamp(TimeStamp::Now()),
       mPlaintextBytesRead(0),
       mClaimed(!(providerFlags & nsISocketProvider::IS_SPECULATIVE_CONNECTION)),
-      mPendingSelectClientAuthCertificate(nullptr) {}
+      mPendingSelectClientAuthCertificate(nullptr),
+      mBrowserId(0) {}
 
 NS_IMETHODIMP
 NSSSocketControl::GetKEAUsed(int16_t* aKea) {
@@ -321,7 +322,7 @@ nsresult NSSSocketControl::ActivateSSL() {
 
   mHandshakePending = true;
 
-  return SetResumptionTokenFromExternalCache();
+  return SetResumptionTokenFromExternalCache(mFd);
 }
 
 nsresult NSSSocketControl::GetFileDescPtr(PRFileDesc** aFilePtr) {
@@ -508,7 +509,6 @@ PRStatus NSSSocketControl::CloseSocketAndDestroy() {
   if (status != PR_SUCCESS) return status;
 
   popped->identity = PR_INVALID_IO_LAYER;
-  NS_RELEASE_THIS();
   popped->dtor(popped);
 
   return PR_SUCCESS;
@@ -624,15 +624,15 @@ NSSSocketControl::GetPeerId(nsACString& aResult) {
   return NS_OK;
 }
 
-nsresult NSSSocketControl::SetResumptionTokenFromExternalCache() {
+nsresult NSSSocketControl::SetResumptionTokenFromExternalCache(PRFileDesc* fd) {
   COMMON_SOCKET_CONTROL_ASSERT_ON_OWNING_THREAD();
-  if (!mFd) {
-    return NS_ERROR_FAILURE;
+  if (!fd) {
+    return NS_ERROR_INVALID_ARG;
   }
 
   // If SSL_NO_CACHE option was set, we must not use the cache
   PRIntn val;
-  if (SSL_OptionGet(mFd, SSL_NO_CACHE, &val) != SECSuccess) {
+  if (SSL_OptionGet(fd, SSL_NO_CACHE, &val) != SECSuccess) {
     return NS_ERROR_FAILURE;
   }
 
@@ -659,7 +659,7 @@ nsresult NSSSocketControl::SetResumptionTokenFromExternalCache() {
     return rv;
   }
 
-  SECStatus srv = SSL_SetResumptionToken(mFd, token.Elements(), token.Length());
+  SECStatus srv = SSL_SetResumptionToken(fd, token.Elements(), token.Length());
   if (srv == SECFailure) {
     PRErrorCode error = PR_GetError();
     mozilla::net::SSLTokensCache::Remove(peerId, tokenId);
@@ -696,5 +696,20 @@ void NSSSocketControl::SetPreliminaryHandshakeInfo(
 NS_IMETHODIMP NSSSocketControl::Claim() {
   COMMON_SOCKET_CONTROL_ASSERT_ON_OWNING_THREAD();
   mClaimed = true;
+  return NS_OK;
+}
+
+NS_IMETHODIMP NSSSocketControl::SetBrowserId(uint64_t browserId) {
+  COMMON_SOCKET_CONTROL_ASSERT_ON_OWNING_THREAD();
+  mBrowserId = browserId;
+  return NS_OK;
+}
+
+NS_IMETHODIMP NSSSocketControl::GetBrowserId(uint64_t* browserId) {
+  COMMON_SOCKET_CONTROL_ASSERT_ON_OWNING_THREAD();
+  if (!browserId) {
+    return NS_ERROR_INVALID_ARG;
+  }
+  *browserId = mBrowserId;
   return NS_OK;
 }

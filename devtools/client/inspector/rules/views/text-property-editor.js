@@ -44,9 +44,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
 });
 
 const HTML_NS = "http://www.w3.org/1999/xhtml";
-const inlineCompatibilityWarningEnabled = Services.prefs.getBoolPref(
-  "devtools.inspector.ruleview.inline-compatibility-warning.enabled"
-);
 
 const SHARED_SWATCH_CLASS = "ruleview-swatch";
 const COLOR_SWATCH_CLASS = "ruleview-colorswatch";
@@ -188,13 +185,21 @@ TextPropertyEditor.prototype = {
    * Create the property editor's DOM.
    */
   _create() {
-    this.element = this.doc.createElementNS(HTML_NS, "li");
+    this.element = this.doc.createElementNS(HTML_NS, "div");
+    this.element.setAttribute("role", "listitem");
     this.element.classList.add("ruleview-property");
     this.element.dataset.declarationId = this.prop.id;
     this.element._textPropertyEditor = this;
 
     this.container = createChild(this.element, "div", {
       class: "ruleview-propertycontainer",
+    });
+
+    const indent =
+      ((this.ruleEditor.rule.domRule.ancestorData.length || 0) + 1) * 2;
+    createChild(this.container, "span", {
+      class: "ruleview-rule-indent clipboard-only",
+      textContent: " ".repeat(indent),
     });
 
     // The enable checkbox will disable or enable the rule.
@@ -258,12 +263,10 @@ TextPropertyEditor.prototype = {
       hidden: "",
     });
 
-    if (inlineCompatibilityWarningEnabled) {
-      this.compatibilityState = createChild(this.container, "div", {
-        class: "ruleview-compatibility-warning",
-        hidden: "",
-      });
-    }
+    this.compatibilityState = createChild(this.container, "div", {
+      class: "ruleview-compatibility-warning",
+      hidden: "",
+    });
 
     // Filter button that filters for the current property name and is
     // displayed when the property is overridden by another rule.
@@ -552,7 +555,8 @@ TextPropertyEditor.prototype = {
       shapeSwatchClass: SHAPE_SWATCH_CLASS,
       // Only ask the parser to convert colors to the default color type specified by the
       // user if the property hasn't been changed yet.
-      defaultColorType: !propDirty,
+      useDefaultColorUnit: !propDirty,
+      defaultColorUnit: this.ruleView.inspector.defaultColorUnit,
       urlClass: "theme-link",
       fontFamilyClass: FONT_FAMILY_CLASS,
       baseURI: this.sheetHref,
@@ -722,7 +726,7 @@ TextPropertyEditor.prototype = {
     );
     if (this.ruleEditor.isEditable) {
       for (const angleSpan of this.angleSwatchSpans) {
-        angleSpan.on("unit-change", this._onSwatchCommit);
+        angleSpan.addEventListener("unit-change", this._onSwatchCommit);
         const title = l10n("rule.angleSwatch.tooltip");
         angleSpan.setAttribute("title", title);
       }
@@ -862,10 +866,7 @@ TextPropertyEditor.prototype = {
     }
 
     this.updatePropertyUsedIndicator();
-
-    if (inlineCompatibilityWarningEnabled) {
-      this.updatePropertyCompatibilityIndicator();
-    }
+    this.updatePropertyCompatibilityIndicator();
   },
 
   updatePropertyUsedIndicator() {
@@ -1164,13 +1165,12 @@ TextPropertyEditor.prototype = {
     if (this._colorSwatchSpans && this._colorSwatchSpans.length) {
       for (const span of this._colorSwatchSpans) {
         this.ruleView.tooltips.getTooltip("colorPicker").removeSwatch(span);
-        span.off("unit-change", this._onSwatchCommit);
       }
     }
 
     if (this.angleSwatchSpans && this.angleSwatchSpans.length) {
       for (const span of this.angleSwatchSpans) {
-        span.off("unit-change", this._onSwatchCommit);
+        span.removeEventListener("unit-change", this._onSwatchCommit);
       }
     }
 

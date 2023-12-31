@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import { DelayedInit } from "resource://gre/modules/DelayedInit.sys.mjs";
 import { GeckoViewUtils } from "resource://gre/modules/GeckoViewUtils.sys.mjs";
 
 const lazy = {};
@@ -13,10 +14,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
 });
 
 const { debug, warn } = GeckoViewUtils.initLogging("Startup");
-
-var { DelayedInit } = ChromeUtils.import(
-  "resource://gre/modules/DelayedInit.jsm"
-);
 
 function InitLater(fn, object, name) {
   return DelayedInit.schedule(fn, object, name, 15000 /* 15s max wait */);
@@ -195,6 +192,8 @@ export class GeckoViewStartup {
               "GeckoView:WebExtension:SetPBAllowed",
               "GeckoView:WebExtension:Uninstall",
               "GeckoView:WebExtension:Update",
+              "GeckoView:WebExtension:EnableProcessSpawning",
+              "GeckoView:WebExtension:DisableProcessSpawning",
             ],
             observers: [
               "devtools-installed-addon",
@@ -205,13 +204,33 @@ export class GeckoViewStartup {
 
           GeckoViewUtils.addLazyGetter(this, "ChildCrashHandler", {
             module: "resource://gre/modules/ChildCrashHandler.sys.mjs",
-            observers: ["ipc:content-shutdown", "compositor:process-aborted"],
+            observers: [
+              "compositor:process-aborted",
+              "ipc:content-created",
+              "ipc:content-shutdown",
+              "process-type-set",
+            ],
           });
 
           lazy.EventDispatcher.instance.registerListener(this, [
             "GeckoView:StorageDelegate:Attached",
           ]);
         }
+
+        GeckoViewUtils.addLazyGetter(this, "GeckoViewTranslationsSettings", {
+          module: "resource://gre/modules/GeckoViewTranslations.sys.mjs",
+          ged: [
+            "GeckoView:Translations:IsTranslationEngineSupported",
+            "GeckoView:Translations:PreferredLanguages",
+            "GeckoView:Translations:ManageModel",
+            "GeckoView:Translations:TranslationInformation",
+            "GeckoView:Translations:ModelInformation",
+            "GeckoView:Translations:GetLanguageSetting",
+            "GeckoView:Translations:GetLanguageSettings",
+            "GeckoView:Translations:SetLanguageSettings",
+          ],
+        });
+
         break;
       }
 
@@ -245,6 +264,7 @@ export class GeckoViewStartup {
           "GeckoView:ResetUserPrefs",
           "GeckoView:SetDefaultPrefs",
           "GeckoView:SetLocale",
+          "GeckoView:InitialForeground",
         ]);
 
         Services.obs.addObserver(this, "browser-idle-startup-tasks-finished");
@@ -283,6 +303,16 @@ export class GeckoViewStartup {
     debug`onEvent ${aEvent}`;
 
     switch (aEvent) {
+      case "GeckoView:InitialForeground": {
+        // ExtensionProcessCrashObserver observes this topic to determine when
+        // the app goes into the foreground for the first time. This could be useful
+        // when the app is initially created in the background because, in this case,
+        // the "application-foreground" topic isn't notified when the application is
+        // moved into the foreground later. That is because "application-foreground"
+        // is only going to be notified when the application was first paused.
+        Services.obs.notifyObservers(null, "geckoview-initial-foreground");
+        break;
+      }
       case "GeckoView:ResetUserPrefs": {
         for (const name of aData.names) {
           Services.prefs.clearUserPref(name);

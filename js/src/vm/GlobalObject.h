@@ -36,6 +36,7 @@
 #include "vm/JSObject.h"
 #include "vm/NativeObject.h"
 #include "vm/Realm.h"
+#include "vm/RegExpShared.h"
 #include "vm/Shape.h"
 #include "vm/StringType.h"
 
@@ -205,7 +206,7 @@ class GlobalObjectData {
   HeapPtr<SharedShape*> boundFunctionShapeWithDefaultProto;
 
   // Global state for regular expressions.
-  UniquePtr<RegExpStatics> regExpStatics;
+  RegExpRealm regExpRealm;
 
   HeapPtr<ArgumentsObject*> mappedArgumentsTemplate;
   HeapPtr<ArgumentsObject*> unmappedArgumentsTemplate;
@@ -238,6 +239,9 @@ class GlobalObjectData {
     static_assert(sizeof(lexicalEnvironment) == sizeof(uintptr_t),
                   "JIT code assumes field is pointer-sized");
     return offsetof(GlobalObjectData, lexicalEnvironment);
+  }
+  static constexpr size_t offsetOfRegExpRealm() {
+    return offsetof(GlobalObjectData, regExpRealm);
   }
 };
 
@@ -462,9 +466,9 @@ class GlobalObject : public NativeObject {
    * complete the minimal initialization to make the returned object safe to
    * touch.
    */
-  static NativeObject* createBlankPrototype(JSContext* cx,
-                                            Handle<GlobalObject*> global,
-                                            const JSClass* clasp);
+  static NativeObject* createBlankPrototype(
+      JSContext* cx, Handle<GlobalObject*> global, const JSClass* clasp,
+      ObjectFlags objFlags = ObjectFlags());
 
   /*
    * Identical to createBlankPrototype, but uses proto as the [[Prototype]]
@@ -481,8 +485,9 @@ class GlobalObject : public NativeObject {
   }
 
   template <typename T>
-  static T* createBlankPrototype(JSContext* cx, Handle<GlobalObject*> global) {
-    NativeObject* res = createBlankPrototype(cx, global, &T::class_);
+  static T* createBlankPrototype(JSContext* cx, Handle<GlobalObject*> global,
+                                 ObjectFlags objFlags = ObjectFlags()) {
+    NativeObject* res = createBlankPrototype(cx, global, &T::class_, objFlags);
     return res ? &res->template as<T>() : nullptr;
   }
 
@@ -740,13 +745,6 @@ class GlobalObject : public NativeObject {
   static NativeObject* getOrCreateArrayIteratorPrototype(
       JSContext* cx, Handle<GlobalObject*> global);
 
-  NativeObject* maybeGetArrayIteratorPrototype() {
-    if (JSObject* obj = maybeBuiltinProto(ProtoKind::ArrayIteratorProto)) {
-      return &obj->as<NativeObject>();
-    }
-    return nullptr;
-  }
-
   static JSObject* getOrCreateStringIteratorPrototype(
       JSContext* cx, Handle<GlobalObject*> global);
 
@@ -946,6 +944,8 @@ class GlobalObject : public NativeObject {
   static JSObject* getOrCreateThrowTypeError(JSContext* cx,
                                              Handle<GlobalObject*> global);
 
+  RegExpRealm& regExpRealm() { return data().regExpRealm; }
+
   // Infallibly test whether the given value is the eval function for this
   // global.
   bool valueIsEval(const Value& val);
@@ -1073,10 +1073,6 @@ class GlobalObject : public NativeObject {
     data().boundFunctionShapeWithDefaultProto = shape;
   }
 
-  PropertyIteratorObject* maybeEmptyIterator() const {
-    return data().emptyIterator;
-  }
-
   static PropertyIteratorObject* getOrCreateEmptyIterator(JSContext* cx);
 
   // Returns an object that represents the realm, used by embedder.
@@ -1131,7 +1127,7 @@ template <JSNative ctor, unsigned length, gc::AllocKind kind,
           const JSJitInfo* jitInfo = nullptr>
 JSObject* GenericCreateConstructor(JSContext* cx, JSProtoKey key) {
   // Note - We duplicate the trick from ClassName() so that we don't need to
-  // include vm/JSAtom-inl.h here.
+  // include vm/JSAtomUtils-inl.h here.
   PropertyName* name = (&cx->names().Null)[key];
   return GlobalObject::createConstructor(cx, ctor, name, length, kind, jitInfo);
 }

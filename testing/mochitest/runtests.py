@@ -151,6 +151,8 @@ class MessageLogger(object):
         [
             "suite_start",
             "suite_end",
+            "group_start",
+            "group_end",
             "test_start",
             "test_end",
             "test_status",
@@ -165,7 +167,8 @@ class MessageLogger(object):
     # package prefixes.
     TEST_PATH_PREFIXES = [
         r"^/tests/",
-        r"^\w+://[\w\.]+(:\d+)?(/\w+)?/(tests?|a11y|chrome|browser)/",
+        r"^\w+://[\w\.]+(:\d+)?(/\w+)?/(tests?|a11y|chrome)/",
+        r"^\w+://[\w\.]+(:\d+)?(/\w+)?/(tests?|browser)/",
     ]
 
     def __init__(self, logger, buffering=True, structured=True):
@@ -364,23 +367,19 @@ class MessageLogger(object):
 
 
 def call(*args, **kwargs):
-    """front-end function to mozprocess.ProcessHandler"""
-    # TODO: upstream -> mozprocess
-    # https://bugzilla.mozilla.org/show_bug.cgi?id=791383
+    """wraps mozprocess.run_and_wait with process output logging"""
     log = get_proxy_logger("mochitest")
 
-    def on_output(line):
+    def on_output(proc, line):
+        cmdline = subprocess.list2cmdline(proc.args)
         log.process_output(
-            process=process.pid,
-            data=line.decode("utf8", "replace"),
-            command=process.commandline,
+            process=proc.pid,
+            data=line,
+            command=cmdline,
         )
 
-    process = mozprocess.ProcessHandlerMixin(
-        *args, processOutputLine=on_output, **kwargs
-    )
-    process.run()
-    return process.wait()
+    process = mozprocess.run_and_wait(*args, output_line_handler=on_output, **kwargs)
+    return process.returncode
 
 
 def killPid(pid, log):
@@ -445,7 +444,6 @@ if mozinfo.isWin:
         finally:
             ctypes.windll.kernel32.CloseHandle(pHandle)
 
-
 else:
     import errno
 
@@ -476,7 +474,6 @@ else:
 
 
 class MochitestServer(object):
-
     "Web server used to serve Mochitests, for closer fidelity to the real web."
 
     instance_count = 0
@@ -546,13 +543,13 @@ class MochitestServer(object):
         args = [
             "-g",
             self._xrePath,
-            "-f",
-            os.path.join(self._httpdPath, "httpd.js"),
             "-e",
             "const _PROFILE_PATH = '%(profile)s'; const _SERVER_PORT = '%(port)s'; "
             "const _SERVER_ADDR = '%(server)s'; const _TEST_PREFIX = %(testPrefix)s; "
-            "const _DISPLAY_RESULTS = %(displayResults)s;"
+            "const _DISPLAY_RESULTS = %(displayResults)s; "
+            "const _HTTPD_PATH = '%(httpdPath)s';"
             % {
+                "httpdPath": self._httpdPath.replace("\\", "\\\\"),
                 "profile": self._profileDir.replace("\\", "\\\\"),
                 "port": self.httpPort,
                 "server": self.webServer,
@@ -567,16 +564,26 @@ class MochitestServer(object):
             self._utilityPath, "xpcshell" + mozinfo.info["bin_suffix"]
         )
         command = [xpcshell] + args
-        server_logfile = None
         if MOCHITEST_SERVER_LOGGING and "MOZ_UPLOAD_DIR" in os.environ:
-            server_logfile = os.path.join(
+            server_logfile_path = os.path.join(
                 os.environ["MOZ_UPLOAD_DIR"],
                 "mochitest-server-%d.txt" % MochitestServer.instance_count,
             )
-        self._process = mozprocess.ProcessHandler(
-            command, cwd=SCRIPT_DIR, env=env, logfile=server_logfile
-        )
-        self._process.run()
+            self.server_logfile = open(server_logfile_path, "w")
+            self._process = subprocess.Popen(
+                command,
+                cwd=SCRIPT_DIR,
+                env=env,
+                stdout=self.server_logfile,
+                stderr=subprocess.STDOUT,
+            )
+        else:
+            self.server_logfile = None
+            self._process = subprocess.Popen(
+                command,
+                cwd=SCRIPT_DIR,
+                env=env,
+            )
         self._log.info("%s : launching %s" % (self.__class__.__name__, command))
         pid = self._process.pid
         self._log.info("runtests.py | Server pid: %d" % pid)
@@ -618,6 +625,8 @@ class MochitestServer(object):
             self._log.info("Failed to stop web server on %s" % self.shutdownURL)
             traceback.print_exc()
         finally:
+            if self.server_logfile is not None:
+                self.server_logfile.close()
             if self._process is not None:
                 # Kill the server immediately to avoid logging intermittent
                 # shutdown crashes, sometimes observed on Windows 10.
@@ -626,7 +635,6 @@ class MochitestServer(object):
 
 
 class WebSocketServer(object):
-
     "Class which encapsulates the mod_pywebsocket server"
 
     def __init__(self, options, scriptdir, logger, debuggerInfo=None):
@@ -666,13 +674,9 @@ class WebSocketServer(object):
         env["PYTHONPATH"] = os.pathsep.join(sys.path)
         # Start the process. Ignore stderr so that exceptions from the server
         # are not treated as failures when parsing the test log.
-        self._process = mozprocess.ProcessHandler(
-            cmd,
-            cwd=SCRIPT_DIR,
-            env=env,
-            processStderrLine=lambda _: None,
+        self._process = subprocess.Popen(
+            cmd, cwd=SCRIPT_DIR, env=env, stderr=subprocess.DEVNULL
         )
-        self._process.run()
         pid = self._process.pid
         self._log.info("runtests.py | Websocket server pid: %d" % pid)
 
@@ -773,12 +777,11 @@ class SSLTunnel:
             self.log.error(
                 "INFO | runtests.py | expected to find ssltunnel at %s" % ssltunnel
             )
-            exit(1)
+            sys.exit(1)
 
         env = test_environment(xrePath=self.xrePath, log=self.log)
         env["LD_LIBRARY_PATH"] = self.xrePath
-        self.process = mozprocess.ProcessHandler([ssltunnel, self.configFile], env=env)
-        self.process.run()
+        self.process = subprocess.Popen([ssltunnel, self.configFile], env=env)
         self.log.info("runtests.py | SSL tunnel pid: %d" % self.process.pid)
 
     def stop(self):
@@ -887,7 +890,7 @@ def findTestMediaDevices(log):
         gst = gst010
     else:
         gst = gst10
-    process = mozprocess.ProcessHandler(
+    process = subprocess.Popen(
         [
             gst,
             "--no-fault",
@@ -899,7 +902,6 @@ def findTestMediaDevices(log):
             "device=%s" % device,
         ]
     )
-    process.run()
     info["video"] = {"name": name, "process": process}
 
     # check if PulseAudio module-null-sink is loaded
@@ -1149,7 +1151,7 @@ class MochitestDesktop(object):
                 self.urlOpts.append("dumpAboutMemoryAfterTest=true")
             if options.dumpDMDAfterTest:
                 self.urlOpts.append("dumpDMDAfterTest=true")
-            if options.debugger:
+            if options.debugger or options.jsdebugger:
                 self.urlOpts.append("interactiveDebugger=true")
             if options.jscov_dir_prefix:
                 self.urlOpts.append("jscovDirPrefix=%s" % options.jscov_dir_prefix)
@@ -1303,7 +1305,7 @@ class MochitestDesktop(object):
             paths.append(test)
 
         # Generate test by schemes
-        for (scheme, grouped_tests) in self.groupTestsByScheme(paths).items():
+        for scheme, grouped_tests in self.groupTestsByScheme(paths).items():
             # Bug 883865 - add this functionality into manifestparser
             with open(
                 os.path.join(SCRIPT_DIR, options.testRunManifestFile), "w"
@@ -1338,8 +1340,7 @@ class MochitestDesktop(object):
             "--port",
             options.websocket_process_bridge_port,
         ]
-        self.websocketProcessBridge = mozprocess.ProcessHandler(command, cwd=SCRIPT_DIR)
-        self.websocketProcessBridge.run()
+        self.websocketProcessBridge = subprocess.Popen(command, cwd=SCRIPT_DIR)
         self.log.info(
             "runtests.py | websocket/process bridge pid: %d"
             % self.websocketProcessBridge.pid
@@ -1347,7 +1348,7 @@ class MochitestDesktop(object):
 
         # ensure the server is up, wait for at most ten seconds
         for i in range(1, 100):
-            if self.websocketProcessBridge.proc.poll() is not None:
+            if self.websocketProcessBridge.poll() is not None:
                 self.log.error(
                     "runtests.py | websocket/process bridge failed "
                     "to launch. Are all the dependencies installed?"
@@ -1831,7 +1832,8 @@ toolbar#nav-bar {
             ):
                 manifest_key = "{}:{}".format(test["ancestor_manifest"], manifest_key)
 
-            self.tests_by_manifest[manifest_key.replace("\\", "/")].append(tp)
+            manifest_key = manifest_key.replace("\\", "/")
+            self.tests_by_manifest[manifest_key].append(tp)
             self.args_by_manifest[manifest_key].add(test.get("args"))
             self.prefs_by_manifest[manifest_key].add(test.get("prefs"))
             self.env_vars_by_manifest[manifest_key].add(test.get("environment"))
@@ -1943,8 +1945,12 @@ toolbar#nav-bar {
             assert manifestFileAbs.startswith(SCRIPT_DIR)
             manifest = TestManifest([manifestFileAbs], strict=False)
         else:
-            masterName = self.normflavor(options.flavor) + ".ini"
+            masterName = self.normflavor(options.flavor) + ".toml"
             masterPath = os.path.join(SCRIPT_DIR, self.testRoot, masterName)
+
+            if not os.path.exists(masterPath):
+                masterName = self.normflavor(options.flavor) + ".ini"
+                masterPath = os.path.join(SCRIPT_DIR, self.testRoot, masterName)
 
             if os.path.exists(masterPath):
                 manifest = TestManifest([masterPath], strict=False)
@@ -1981,13 +1987,13 @@ toolbar#nav-bar {
         d["runFailures"] = False
         if options.runFailures:
             d["runFailures"] = True
-        content = json.dumps(d)
 
         shutil.copy(
             os.path.join(SCRIPT_DIR, "ignorePrefs.json"),
             os.path.join(options.profilePath, "ignorePrefs.json"),
         )
         d["ignorePrefsFile"] = "ignorePrefs.json"
+        content = json.dumps(d)
 
         with open(os.path.join(options.profilePath, "testConfig.js"), "w") as config:
             config.write(content)
@@ -2121,17 +2127,16 @@ toolbar#nav-bar {
                     continue
         else:
 
-            def _psInfo(line):
+            def _psInfo(_, line):
                 if pname in line:
                     self.log.info(line)
 
-            process = mozprocess.ProcessHandler(
-                ["ps", "-f"], processOutputLine=_psInfo, universal_newlines=True
+            mozprocess.run_and_wait(
+                ["ps", "-f"],
+                output_line_handler=_psInfo,
             )
-            process.run()
-            process.wait()
 
-            def _psKill(line):
+            def _psKill(_, line):
                 parts = line.split()
                 if len(parts) == 3 and parts[0].isdigit():
                     pid = int(parts[0])
@@ -2146,13 +2151,10 @@ toolbar#nav-bar {
                                 % (pname, pid)
                             )
 
-            process = mozprocess.ProcessHandler(
+            mozprocess.run_and_wait(
                 ["ps", "-o", "pid,ppid,comm"],
-                processOutputLine=_psKill,
-                universal_newlines=True,
+                output_line_handler=_psKill,
             )
-            process.run()
-            process.wait()
 
     def execute_start_script(self):
         if not self.start_script or not self.marionette:
@@ -2861,6 +2863,7 @@ toolbar#nav-bar {
 
             # create mozrunner instance and start the system under test process
             self.lastTestSeen = self.test_name
+            self.lastManifest = currentManifest
             startTime = datetime.now()
 
             runner_cls = mozrunner.runners.get(
@@ -3289,13 +3292,13 @@ toolbar#nav-bar {
             ]
 
         stepResults = {}
-        for (descr, step) in steps:
+        for descr, step in steps:
             stepResults[descr] = "not run / incomplete"
 
         startTime = datetime.now()
         maxTime = timedelta(seconds=options.verify_max_time)
         finalResult = "PASSED"
-        for (descr, step) in steps:
+        for descr, step in steps:
             if (datetime.now() - startTime) > maxTime:
                 self.log.info("::: Test verification is taking too long: Giving up!")
                 self.log.info(
@@ -3372,6 +3375,9 @@ toolbar#nav-bar {
                         "media.wmf.media-engine.channel-decoder.enabled", False
                     )
                 ),
+                "mda_gpu": self.extraPrefs.get(
+                    "media.hardware-video-decoding.force-enabled", False
+                ),
                 "xorigin": options.xOriginTests,
                 "condprof": options.conditionedProfile,
                 "msix": "WindowsApps" in options.app,
@@ -3417,11 +3423,12 @@ toolbar#nav-bar {
             return result
 
         # code for --run-by-manifest
-        manifests = set(t["manifest"] for t in tests)
+        manifests = set(t["manifest"].replace("\\", "/") for t in tests)
         result = 0
 
         origPrefs = self.extraPrefs.copy()
         for m in sorted(manifests):
+            self.log.group_start(name=m)
             self.log.info("Running manifest: {}".format(m))
 
             args = list(self.args_by_manifest[m])[0]
@@ -3472,6 +3479,7 @@ toolbar#nav-bar {
 
             # Dump the logging buffer
             self.message_logger.dump_buffered()
+            self.log.group_end(name=m)
 
             if res == -1:
                 break
@@ -3641,7 +3649,7 @@ toolbar#nav-bar {
             # then again to actually run mochitest
             if options.timeout:
                 timeout = options.timeout + 30
-            elif options.debugger or not options.autorun:
+            elif options.debugger or options.jsdebugger or not options.autorun:
                 timeout = None
             else:
                 # We generally want the JS harness or marionette to handle
@@ -3680,7 +3688,7 @@ toolbar#nav-bar {
 
             # testsToFilter parameter is used to filter out the test list that
             # is sent to getTestsByScheme
-            for (scheme, tests) in self.getTestsByScheme(
+            for scheme, tests in self.getTestsByScheme(
                 options, testsToFilter, True, manifestToFilter
             ):
                 # read the number of tests here, if we are not going to run any,
@@ -3796,6 +3804,7 @@ toolbar#nav-bar {
                 ignore_missing_leaks=ignoreMissingLeaks,
                 log=self.log,
                 stack_fixer=get_stack_fixer_function(utilityPath, options.symbolsPath),
+                scope=manifestToFilter,
             )
 
         self.log.info("runtests.py | Running tests: end.")
@@ -3811,13 +3820,23 @@ toolbar#nav-bar {
         """handle process output timeout"""
         # TODO: bug 913975 : _processOutput should call self.processOutputLine
         # one more time one timeout (I think)
-        error_message = (
-            "TEST-UNEXPECTED-TIMEOUT | %s | application timed out after "
-            "%d seconds with no output"
-        ) % (self.lastTestSeen, int(timeout))
+        message = {
+            "action": "test_end",
+            "status": "TIMEOUT",
+            "expected": "PASS",
+            "thread": None,
+            "pid": None,
+            "source": "mochitest",
+            "time": int(time.time()) * 1000,
+            "test": self.lastTestSeen,
+            "message": "application timed out after %d seconds with no output"
+            % int(timeout),
+        }
+        # need to send a test_end in order to have mozharness process messages properly
+        # this requires a custom message vs log.error/log.warning/etc.
+        self.message_logger.process_message(message)
         self.message_logger.dump_buffered()
         self.message_logger.buffering = False
-        self.log.info(error_message)
         self.log.warning("Force-terminating active process(es).")
 
         browser_pid = browser_pid or proc.pid
@@ -3920,11 +3939,12 @@ toolbar#nav-bar {
 
             for message in messages:
                 # Passing the message to the handlers
+                msg = message
                 for handler in self.outputHandlers():
-                    message = handler(message)
+                    msg = handler(msg)
 
                 # Processing the message by the logger
-                self.harness.message_logger.process_message(message)
+                self.harness.message_logger.process_message(msg)
 
         __call__ = processOutputLine
 
@@ -3953,7 +3973,21 @@ toolbar#nav-bar {
 
         def finish(self):
             if self.shutdownLeaks:
-                self.harness.countfail += self.shutdownLeaks.process()
+                numFailures, errorMessages = self.shutdownLeaks.process()
+                self.harness.countfail += numFailures
+                for message in errorMessages:
+                    msg = {
+                        "action": "test_end",
+                        "status": "FAIL",
+                        "expected": "PASS",
+                        "thread": None,
+                        "pid": None,
+                        "source": "mochitest",
+                        "time": int(time.time()) * 1000,
+                        "test": message["test"],
+                        "message": message["msg"],
+                    }
+                    self.harness.message_logger.process_message(msg)
 
             if self.lsanLeaks:
                 self.harness.countfail += self.lsanLeaks.process()
@@ -4052,7 +4086,10 @@ toolbar#nav-bar {
                     if message["action"] == "log"
                     else message["data"]
                 )
-                self.lsanLeaks.log(line)
+                if "(finished)" in self.harness.lastTestSeen:
+                    self.lsanLeaks.log(line, self.harness.lastManifest)
+                else:
+                    self.lsanLeaks.log(line, self.harness.lastTestSeen)
             return message
 
         def trackShutdownLeaks(self, message):
@@ -4104,7 +4141,7 @@ def run_test_harness(parser, options):
     )
 
     options.runByManifest = False
-    if options.flavor in ("plain", "browser", "chrome"):
+    if options.flavor in ("plain", "a11y", "browser", "chrome"):
         options.runByManifest = True
 
     if options.verify or options.verify_fission:

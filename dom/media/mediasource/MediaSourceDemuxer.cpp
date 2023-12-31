@@ -17,6 +17,12 @@
 #include <limits>
 #include <stdint.h>
 
+extern mozilla::LogModule* GetMediaSourceLog();
+
+#define MSE_DEBUG(arg, ...)                                              \
+  DDMOZ_LOG(GetMediaSourceLog(), mozilla::LogLevel::Debug, "::%s: " arg, \
+            __func__, ##__VA_ARGS__)
+
 namespace mozilla {
 
 typedef TrackInfo::TrackType TrackType;
@@ -132,6 +138,7 @@ uint32_t MediaSourceDemuxer::GetNumberTracks(TrackType aType) const {
 
 already_AddRefed<MediaTrackDemuxer> MediaSourceDemuxer::GetTrackDemuxer(
     TrackType aType, uint32_t aTrackNumber) {
+  MonitorAutoLock mon(mMonitor);
   RefPtr<TrackBuffersManager> manager = GetManager(aType);
   if (!manager) {
     return nullptr;
@@ -171,21 +178,25 @@ void MediaSourceDemuxer::DoAttachSourceBuffer(
 
 void MediaSourceDemuxer::DetachSourceBuffer(
     RefPtr<TrackBuffersManager>& aSourceBuffer) {
-  nsCOMPtr<nsIRunnable> task = NewRunnableMethod<RefPtr<TrackBuffersManager>&&>(
-      "MediaSourceDemuxer::DoDetachSourceBuffer", this,
-      &MediaSourceDemuxer::DoDetachSourceBuffer, aSourceBuffer);
+  nsCOMPtr<nsIRunnable> task =
+      NS_NewRunnableFunction("MediaSourceDemuxer::DoDetachSourceBuffer",
+                             [self = RefPtr{this}, aSourceBuffer]() {
+                               self->DoDetachSourceBuffer(aSourceBuffer);
+                             });
   nsresult rv = GetTaskQueue()->Dispatch(task.forget());
   MOZ_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv));
   Unused << rv;
 }
 
 void MediaSourceDemuxer::DoDetachSourceBuffer(
-    RefPtr<TrackBuffersManager>&& aSourceBuffer) {
+    const RefPtr<TrackBuffersManager>& aSourceBuffer) {
   MOZ_ASSERT(OnTaskQueue());
   mSourceBuffers.RemoveElementsBy(
       [&aSourceBuffer](const RefPtr<TrackBuffersManager> aLinkedSourceBuffer) {
         return aLinkedSourceBuffer == aSourceBuffer;
       });
+
+  AutoTArray<RefPtr<MediaSourceTrackDemuxer>, 2> matchingDemuxers;
   {
     MonitorAutoLock mon(mMonitor);
     if (aSourceBuffer == mAudioTrack) {
@@ -194,18 +205,24 @@ void MediaSourceDemuxer::DoDetachSourceBuffer(
     if (aSourceBuffer == mVideoTrack) {
       mVideoTrack = nullptr;
     }
+
+    mDemuxers.RemoveElementsBy(
+        [&](RefPtr<MediaSourceTrackDemuxer>& elementRef) {
+          if (!elementRef->HasManager(aSourceBuffer)) {
+            return false;
+          }
+          matchingDemuxers.AppendElement(std::move(elementRef));
+          return true;
+        });
   }
 
-  for (auto& demuxer : mDemuxers) {
-    if (demuxer->HasManager(aSourceBuffer)) {
-      demuxer->DetachManager();
-    }
+  for (MediaSourceTrackDemuxer* demuxer : matchingDemuxers) {
+    demuxer->DetachManager();
   }
   ScanSourceBuffersForContent();
 }
 
 TrackInfo* MediaSourceDemuxer::GetTrackInfo(TrackType aTrack) {
-  MonitorAutoLock mon(mMonitor);
   switch (aTrack) {
     case TrackType::kAudioTrack:
       return &mInfo.mAudio;
@@ -217,7 +234,6 @@ TrackInfo* MediaSourceDemuxer::GetTrackInfo(TrackType aTrack) {
 }
 
 RefPtr<TrackBuffersManager> MediaSourceDemuxer::GetManager(TrackType aTrack) {
-  MonitorAutoLock mon(mMonitor);
   switch (aTrack) {
     case TrackType::kAudioTrack:
       return mAudioTrack;
@@ -279,6 +295,7 @@ MediaSourceTrackDemuxer::MediaSourceTrackDemuxer(MediaSourceDemuxer* aParent,
 }
 
 UniquePtr<TrackInfo> MediaSourceTrackDemuxer::GetInfo() const {
+  MonitorAutoLock mon(mParent->mMonitor);
   return mParent->GetTrackInfo(mType)->Clone();
 }
 
@@ -376,6 +393,12 @@ RefPtr<MediaSourceTrackDemuxer::SeekPromise> MediaSourceTrackDemuxer::DoSeek(
     seekTime = std::max(mManager->HighestStartTime(mType) - mPreRoll,
                         TimeUnit::Zero());
   }
+
+  MSE_DEBUG("DoSeek, original target=%" PRId64 "%s, seekTime=%" PRId64
+            "%s, buffered=%s",
+            aTime.ToMicroseconds(), aTime.ToString().get(),
+            seekTime.ToMicroseconds(), seekTime.ToString().get(),
+            DumpTimeRanges(buffered).get());
   if (!buffered.ContainsWithStrictEnd(seekTime)) {
     if (!buffered.ContainsWithStrictEnd(aTime)) {
       // We don't have the data to seek to.
@@ -389,6 +412,10 @@ RefPtr<MediaSourceTrackDemuxer::SeekPromise> MediaSourceTrackDemuxer::DoSeek(
     // the interval.
     TimeIntervals::IndexType index = buffered.Find(aTime);
     MOZ_ASSERT(index != TimeIntervals::NoIndex);
+    MSE_DEBUG("Can't find seekTime %" PRId64
+              " in the buffer range, use the earliest time %" PRId64,
+              seekTime.ToMicroseconds(),
+              buffered[index].mStart.ToMicroseconds());
     seekTime = buffered[index].mStart;
   }
   seekTime = mManager->Seek(mType, seekTime, MediaSourceDemuxer::EOS_FUZZ);
@@ -518,5 +545,7 @@ void MediaSourceTrackDemuxer::DetachManager() {
   MonitorAutoLock mon(mMonitor);
   mManager = nullptr;
 }
+
+#undef MSE_DEBUG
 
 }  // namespace mozilla

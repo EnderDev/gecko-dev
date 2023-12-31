@@ -1,13 +1,9 @@
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
-const FXA_CONTINUE_EVENT = [
-  ["firefoxview", "entered", "firefoxview", undefined],
-  ["firefoxview", "fxa_continue", "sync", undefined],
-];
+const FXA_CONTINUE_EVENT = [["firefoxview", "fxa_continue", "sync", undefined]];
 
 const FXA_MOBILE_EVENT = [
-  ["firefoxview", "entered", "firefoxview", undefined],
   ["firefoxview", "fxa_mobile", "sync", undefined, { has_devices: "false" }],
 ];
 
@@ -32,11 +28,13 @@ async function setupWithDesktopDevices() {
         name: "This Device",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
       {
         id: 2,
         name: "Other Device",
         type: "desktop",
+        tabs: [],
       },
     ],
   });
@@ -66,19 +64,6 @@ add_setup(async function () {
 });
 
 add_task(async function test_unconfigured_initial_state() {
-  await clearAllParentTelemetryEvents();
-  // test with the pref set to show FEATURE TOUR CALLOUT
-  await SpecialPowers.pushPrefEnv({
-    set: [
-      [
-        "browser.firefox-view.feature-tour",
-        JSON.stringify({
-          screen: `FEATURE_CALLOUT_1`,
-          complete: false,
-        }),
-      ],
-    ],
-  });
   const sandbox = setupMocks({
     state: UIState.STATUS_NOT_CONFIGURED,
     syncEnabled: false,
@@ -92,7 +77,7 @@ add_task(async function test_unconfigured_initial_state() {
       mobilePromo: false,
       mobileConfirmation: false,
     });
-
+    await clearAllParentTelemetryEvents();
     await BrowserTestUtils.synthesizeMouseAtCenter(
       'button[data-action="view1-primary-action"]',
       {},
@@ -105,9 +90,9 @@ add_task(async function test_unconfigured_initial_state() {
           Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
           false
         ).parent;
-        return events && events.length >= 2;
+        return events && events.length >= 1;
       },
-      "Waiting for entered and fxa_continue firefoxview telemetry events.",
+      "Waiting for fxa_continue firefoxview telemetry events.",
       200,
       100
     );
@@ -122,7 +107,6 @@ add_task(async function test_unconfigured_initial_state() {
 });
 
 add_task(async function test_signed_in() {
-  await clearAllParentTelemetryEvents();
   const sandbox = setupMocks({
     state: UIState.STATUS_SIGNED_IN,
     fxaDevices: [
@@ -131,6 +115,7 @@ add_task(async function test_signed_in() {
         name: "This Device",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
     ],
   });
@@ -150,6 +135,8 @@ add_task(async function test_signed_in() {
       mobileConfirmation: false,
     });
 
+    await clearAllParentTelemetryEvents();
+
     await BrowserTestUtils.synthesizeMouseAtCenter(
       'button[data-action="view2-primary-action"]',
       {},
@@ -162,9 +149,9 @@ add_task(async function test_signed_in() {
           Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
           false
         ).parent;
-        return events && events.length >= 2;
+        return events && events.length >= 1;
       },
-      "Waiting for entered and fxa_mobile firefoxview telemetry events.",
+      "Waiting for fxa_mobile firefoxview telemetry events.",
       200,
       100
     );
@@ -188,6 +175,7 @@ add_task(async function test_support_links() {
         name: "This Device",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
     ],
   });
@@ -214,11 +202,13 @@ add_task(async function test_2nd_desktop_connected() {
         name: "This Device",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
       {
         id: 2,
         name: "Other Device",
         type: "desktop",
+        tabs: [],
       },
     ],
   });
@@ -258,11 +248,13 @@ add_task(async function test_mobile_connected() {
         name: "This Device",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
       {
         id: 2,
         name: "Other Device",
         type: "mobile",
+        tabs: [],
       },
     ],
   });
@@ -302,11 +294,13 @@ add_task(async function test_tablet_connected() {
         name: "This Device",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
       {
         id: 2,
         name: "Other Device",
         type: "tablet",
+        tabs: [],
       },
     ],
   });
@@ -346,11 +340,13 @@ add_task(async function test_tab_sync_enabled() {
         name: "This Device",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
       {
         id: 2,
         name: "Other Device",
         type: "mobile",
+        tabs: [],
       },
     ],
   });
@@ -396,7 +392,6 @@ add_task(async function test_tab_sync_enabled() {
       mobilePromo: false,
       mobileConfirmation: false,
     });
-    await waitForElementVisible(browser, ".featureCallout .FEATURE_CALLOUT_1");
     ok(true, "Tab pickup product tour screen renders when sync is enabled");
     ok(
       Services.prefs.getBoolPref("services.sync.engine.tabs", false),
@@ -426,6 +421,7 @@ add_task(async function test_mobile_promo() {
       id: 3,
       name: "Mobile Device",
       type: "mobile",
+      tabs: [],
     });
 
     Services.obs.notifyObservers(null, "fxaccounts:devicelist_updated");
@@ -568,6 +564,7 @@ add_task(async function test_mobile_promo_windows() {
           id: 3,
           name: "Mobile Device",
           type: "mobile",
+          tabs: [],
         });
 
         Services.obs.notifyObservers(null, "fxaccounts:devicelist_updated");
@@ -627,7 +624,10 @@ async function mockFxaDeviceConnected(win) {
   const url = "https://example.org/pair/auth/complete";
   is(win.gBrowser.tabs.length, 3, "Tabs strip should contain three tabs");
 
-  BrowserTestUtils.loadURIString(win.gBrowser.selectedTab.linkedBrowser, url);
+  BrowserTestUtils.startLoadingURIString(
+    win.gBrowser.selectedTab.linkedBrowser,
+    url
+  );
 
   await BrowserTestUtils.browserLoaded(
     win.gBrowser.selectedTab.linkedBrowser,
@@ -724,6 +724,7 @@ add_task(async function test_close_device_connected_tab() {
         name: "This Device",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
     ],
   });

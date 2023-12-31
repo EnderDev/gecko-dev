@@ -46,19 +46,19 @@ class nsContainerFrame : public nsSplittableFrame {
   NS_DECL_QUERYFRAME
 
   // nsIFrame overrides
-  virtual void Init(nsIContent* aContent, nsContainerFrame* aParent,
-                    nsIFrame* aPrevInFlow) override;
-  virtual nsContainerFrame* GetContentInsertionFrame() override { return this; }
+  void Init(nsIContent* aContent, nsContainerFrame* aParent,
+            nsIFrame* aPrevInFlow) override;
+  nsContainerFrame* GetContentInsertionFrame() override { return this; }
 
-  virtual const nsFrameList& GetChildList(ChildListID aList) const override;
-  virtual void GetChildLists(nsTArray<ChildList>* aLists) const override;
-  virtual void DestroyFrom(nsIFrame* aDestructRoot,
-                           PostDestroyData& aPostDestroyData) override;
-  virtual void ChildIsDirty(nsIFrame* aChild) override;
+  const nsFrameList& GetChildList(ChildListID aList) const override;
+  void GetChildLists(nsTArray<ChildList>* aLists) const override;
+  void Destroy(DestroyContext&) override;
 
-  virtual FrameSearchResult PeekOffsetNoAmount(bool aForward,
-                                               int32_t* aOffset) override;
-  virtual FrameSearchResult PeekOffsetCharacter(
+  void ChildIsDirty(nsIFrame* aChild) override;
+
+  FrameSearchResult PeekOffsetNoAmount(bool aForward,
+                                       int32_t* aOffset) override;
+  FrameSearchResult PeekOffsetCharacter(
       bool aForward, int32_t* aOffset,
       PeekOffsetCharacterOptions aOptions =
           PeekOffsetCharacterOptions()) override;
@@ -123,12 +123,9 @@ class nsContainerFrame : public nsSplittableFrame {
    * This method is responsible for removing a frame in the frame
    * list.  The implementation should do something with the removed frame
    * and then generate a reflow command. The implementation is responsible
-   * for destroying aOldFrame (the caller mustn't destroy aOldFrame).
-   *
-   * @param   aListID the child list identifier.
-   * @param   aOldFrame the frame to remove
+   * for destroying the frame (the caller mustn't destroy it).
    */
-  virtual void RemoveFrame(ChildListID aListID, nsIFrame* aOldFrame);
+  virtual void RemoveFrame(DestroyContext&, ChildListID, nsIFrame*);
 
   /**
    * Helper method to create next-in-flows if necessary. If aFrame
@@ -149,7 +146,7 @@ class nsContainerFrame : public nsSplittableFrame {
    * content was complete before aNextInFlow, so aNextInFlow and its
    * next-in-flows no longer map any real content.
    */
-  virtual void DeleteNextInFlowChild(nsIFrame* aNextInFlow,
+  virtual void DeleteNextInFlowChild(DestroyContext&, nsIFrame* aNextInFlow,
                                      bool aDeletingEmptyFrames);
 
   // Positions the frame's view based on the frame's origin
@@ -523,8 +520,7 @@ class nsContainerFrame : public nsSplittableFrame {
    * Derived classes must do that too, if they destroy such frame lists.
    * See nsBlockFrame::DestroyFrom for an example.
    */
-  void DestroyAbsoluteFrames(nsIFrame* aDestructRoot,
-                             PostDestroyData& aPostDestroyData);
+  void DestroyAbsoluteFrames(DestroyContext&);
 
   /**
    * Helper for StealFrame.  Returns true if aChild was removed from its list.
@@ -742,16 +738,6 @@ class nsContainerFrame : public nsSplittableFrame {
   void PushChildrenToOverflow(nsIFrame* aFromChild, nsIFrame* aPrevSibling);
 
   /**
-   * Same as above, except that this pushes frames to the next-in-flow
-   * frame and changes the geometric parent of the pushed frames when
-   * there is a next-in-flow frame.
-   *
-   * Updates the next-in-flow's child count. Does <b>not</b> update the
-   * pusher's child count.
-   */
-  void PushChildren(nsIFrame* aFromChild, nsIFrame* aPrevSibling);
-
-  /**
    * Iterate our children in our principal child list in the normal document
    * order, and append them (or their next-in-flows) to either our overflow list
    * or excess overflow container list according to their presence in
@@ -852,8 +838,7 @@ class nsContainerFrame : public nsSplittableFrame {
    * frame then remove the property and delete the frame list.
    * Nothing happens if the property doesn't exist.
    */
-  void SafelyDestroyFrameListProp(nsIFrame* aDestructRoot,
-                                  PostDestroyData& aPostDestroyData,
+  void SafelyDestroyFrameListProp(DestroyContext&,
                                   mozilla::PresShell* aPresShell,
                                   FrameListPropertyDescriptor aProp);
 

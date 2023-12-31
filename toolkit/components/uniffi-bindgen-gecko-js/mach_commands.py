@@ -11,7 +11,10 @@ from mach.decorators import Command, SubCommand
 # committing to using UniFFI. There are other ways to consume Rust from
 # JavaScript that might fit your use case better.
 UDL_FILES = [
+    "third_party/rust/sync15/src/sync15.udl",
     "third_party/rust/tabs/src/tabs.udl",
+    "third_party/rust/suggest/src/suggest.udl",
+    "third_party/rust/remote_settings/src/remote_settings.udl",
 ]
 
 FIXTURE_UDL_FILES = [

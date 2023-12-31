@@ -30,7 +30,7 @@ namespace InspectorUtils {
   sequence<DOMString> getCSSPropertyNames(optional PropertyNamesOptions options = {});
   sequence<PropertyPref> getCSSPropertyPrefs();
   [Throws] sequence<DOMString> getCSSValuesForProperty(UTF8String property);
-  DOMString rgbToColorName(octet r, octet g, octet b);
+  UTF8String rgbToColorName(octet r, octet g, octet b);
   InspectorRGBATuple? colorToRGBA(UTF8String colorString, optional Document? doc = null);
   boolean isValidCSSColor(UTF8String colorString);
   [Throws] sequence<DOMString> getSubpropertiesForCSSProperty(UTF8String property);
@@ -78,7 +78,14 @@ namespace InspectorUtils {
 
   Element? containingBlockOf(Element element);
 
+  // If the element is styled as display:block, returns an array of numbers giving
+  // the number of lines in each fragment.
+  // Returns null if the element is not a block.
+  [NewObject] sequence<unsigned long>? getBlockLineCounts(Element element);
+
   [NewObject] NodeList getOverflowingChildrenOfElement(Element element);
+  sequence<DOMString> getRegisteredCssHighlights(Document document, optional boolean activeOnly = false);
+  sequence<InspectorCSSPropertyDefinition> getCSSRegisteredProperties(Document document);
 };
 
 dictionary SupportsOptions {
@@ -141,6 +148,14 @@ dictionary InspectorFontFeature {
   required DOMString tag;
   required DOMString script;
   required DOMString languageSystem;
+};
+
+dictionary InspectorCSSPropertyDefinition {
+  required UTF8String name;
+  required UTF8String syntax;
+  required boolean inherits;
+  required UTF8String? initialValue;
+  required boolean fromJS;
 };
 
 [Func="nsContentUtils::IsCallerChromeOrFuzzingEnabled",

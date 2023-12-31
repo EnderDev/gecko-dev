@@ -235,6 +235,8 @@ static_assert(unsigned(SlotsOrElementsKind::Unused) ==
 // Bitmask of options to parameterize MarkingTracerT.
 namespace MarkingOptions {
 enum : uint32_t {
+  None = 0,
+
   // Set the compartment's hasMarkedCells flag for roots.
   MarkRootCompartments = 1,
 
@@ -247,6 +249,8 @@ enum : uint32_t {
 };
 }  // namespace MarkingOptions
 
+// A default set of marking options that works during normal marking and weak
+// marking modes. Used for barriers and testing code.
 constexpr uint32_t NormalMarkingOptions = MarkingOptions::MarkImplicitEdges;
 
 template <uint32_t markingOptions>
@@ -263,8 +267,9 @@ class MarkingTracerT
   GCMarker* getMarker();
 };
 
-using MarkingTracer = MarkingTracerT<NormalMarkingOptions>;
+using MarkingTracer = MarkingTracerT<MarkingOptions::None>;
 using RootMarkingTracer = MarkingTracerT<MarkingOptions::MarkRootCompartments>;
+using WeakMarkingTracer = MarkingTracerT<MarkingOptions::MarkImplicitEdges>;
 using ParallelMarkingTracer = MarkingTracerT<MarkingOptions::ParallelMarking>;
 
 enum ShouldReportMarkTime : bool {
@@ -274,7 +279,7 @@ enum ShouldReportMarkTime : bool {
 
 } /* namespace gc */
 
-class alignas(TypicalCacheLineSize) GCMarker {
+class GCMarker {
   enum MarkingState : uint8_t {
     // Have not yet started marking.
     NotActive,
@@ -369,6 +374,10 @@ class alignas(TypicalCacheLineSize) GCMarker {
   bool markOneColor(SliceBudget& budget);
 
   static void moveWork(GCMarker* dst, GCMarker* src);
+
+  [[nodiscard]] bool initStack();
+  void resetStackCapacity();
+  void freeStack();
 
   size_t sizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
 
@@ -502,7 +511,7 @@ class alignas(TypicalCacheLineSize) GCMarker {
    * state.
    */
   mozilla::Variant<gc::MarkingTracer, gc::RootMarkingTracer,
-                   gc::ParallelMarkingTracer>
+                   gc::WeakMarkingTracer, gc::ParallelMarkingTracer>
       tracer_;
 
   JSRuntime* const runtime_;

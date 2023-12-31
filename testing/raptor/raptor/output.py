@@ -114,7 +114,6 @@ class PerftestOutput(object):
         support_data_by_type = {}
 
         for data_set in self.supporting_data:
-
             data_type = data_set["type"]
             LOG.info("summarizing %s data" % data_type)
 
@@ -730,7 +729,15 @@ class PerftestOutput(object):
                 try:
                     # pylint: disable=W1633
                     replicate = round(
-                        float(page_cycle_results[suite][sub]["frameLength"]["average"]),
+                        float(
+                            page_cycle_results[suite][sub]["complexity"]["bootstrap"][
+                                "median"
+                            ]
+                            if "ramp" in test["name"]
+                            else page_cycle_results[suite][sub]["frameLength"][
+                                "average"
+                            ]
+                        ),
                         3,
                     )
                 except TypeError as e:
@@ -1353,7 +1360,6 @@ class RaptorOutput(PerftestOutput):
                     subtests.append(new_subtest)
 
             elif test["type"] == "benchmark":
-
                 if any(
                     [
                         "youtube-playback" in measurement
@@ -1817,6 +1823,7 @@ class BrowsertimeOutput(PerftestOutput):
                     "subtests": {},
                 },
             )
+
             # Add the alert window settings if needed
             for alert_option, schema_name in (
                 ("min_back_window", "minBackWindow"),
@@ -1826,11 +1833,20 @@ class BrowsertimeOutput(PerftestOutput):
                 if test.get(alert_option, None) is not None:
                     suite[schema_name] = int(test[alert_option])
 
-            # Setting shouldAlert to False whenever self.app is either chrome, chrome-m, chromium, chromium-as-release
-            if self.app in ("chrome", "chrome-m", "chromium", "custom-car"):
+            # Setting shouldAlert to False whenever self.app is any of the chrom* applications
+            if self.app in (
+                "chrome",
+                "chrome-m",
+                "chromium",
+                "custom-car",
+                "cstm-car-m",
+            ):
                 suite["shouldAlert"] = False
             # Check if the test has set optional properties
-            if "alert_change_type" in test and "alertChangeType" not in suite:
+            if (
+                test.get("alert_change_type", None) is not None
+                and "alertChangeType" not in suite
+            ):
                 suite["alertChangeType"] = test["alert_change_type"]
 
             def _process_measurements(measurement_name, replicates):
@@ -1861,7 +1877,13 @@ class BrowsertimeOutput(PerftestOutput):
                             % measurement_name
                         )
                         subtest["shouldAlert"] = True
-                        if self.app in ("chrome", "chrome-m", "chromium", "custom-car"):
+                        if self.app in (
+                            "chrome",
+                            "chrome-m",
+                            "chromium",
+                            "custom-car",
+                            "cstm-car-m",
+                        ):
                             subtest["shouldAlert"] = False
                     else:
                         # Explicitly set `shouldAlert` to False so that the measurement

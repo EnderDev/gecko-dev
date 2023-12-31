@@ -8,17 +8,23 @@
 MARKUPMAP(
     a,
     [](Element* aElement, LocalAccessible* aContext) -> LocalAccessible* {
+      // An anchor element without an href attribute and without a click
+      // listener should be a generic.
+      if (!aElement->HasAttr(nsGkAtoms::href) &&
+          !nsCoreUtils::HasClickListener(aElement)) {
+        return new HyperTextAccessible(aElement, aContext->Document());
+      }
       // Only some roles truly enjoy life as HTMLLinkAccessibles, for
       // details see closed bug 494807.
       const nsRoleMapEntry* roleMapEntry = aria::GetRoleMap(aElement);
       if (roleMapEntry && roleMapEntry->role != roles::NOTHING &&
           roleMapEntry->role != roles::LINK) {
-        return new HyperTextAccessibleWrap(aElement, aContext->Document());
+        return new HyperTextAccessible(aElement, aContext->Document());
       }
 
       return new HTMLLinkAccessible(aElement, aContext->Document());
     },
-    roles::LINK)
+    0)
 
 MARKUPMAP(abbr, New_HyperText, 0)
 
@@ -56,7 +62,7 @@ MARKUPMAP(
 
 MARKUPMAP(code, New_HyperText, roles::CODE)
 
-MARKUPMAP(dd, New_HTMLDtOrDd<HyperTextAccessibleWrap>, roles::DEFINITION)
+MARKUPMAP(dd, New_HTMLDtOrDd<HyperTextAccessible>, roles::DEFINITION)
 
 MARKUPMAP(del, New_HyperText, roles::CONTENT_DELETION)
 
@@ -74,7 +80,7 @@ MARKUPMAP(
       }
       // Always create an accessible if the div has an id.
       if (aElement->HasAttr(nsGkAtoms::id)) {
-        return new HyperTextAccessibleWrap(aElement, aContext->Document());
+        return new HyperTextAccessible(aElement, aContext->Document());
       }
       // Never create an accessible if the div is not display:block; or
       // display:inline-block or the like.
@@ -92,7 +98,7 @@ MARKUPMAP(
       if (prevSibling) {
         nsIFrame* prevSiblingFrame = prevSibling->GetPrimaryFrame();
         if (prevSiblingFrame && prevSiblingFrame->IsInlineOutside()) {
-          return new HyperTextAccessibleWrap(aElement, aContext->Document());
+          return new HyperTextAccessible(aElement, aContext->Document());
         }
       }
       // Now, check the children.
@@ -112,7 +118,7 @@ MARKUPMAP(
         }
         // Check to see if first child has an inline frame.
         if (firstChildFrame && firstChildFrame->IsInlineOutside()) {
-          return new HyperTextAccessibleWrap(aElement, aContext->Document());
+          return new HyperTextAccessible(aElement, aContext->Document());
         }
         nsIContent* lastChild = aElement->GetLastChild();
         MOZ_ASSERT(lastChild);
@@ -130,7 +136,7 @@ MARKUPMAP(
           }
           // Check to see if last child has an inline frame.
           if (lastChildFrame && lastChildFrame->IsInlineOutside()) {
-            return new HyperTextAccessibleWrap(aElement, aContext->Document());
+            return new HyperTextAccessible(aElement, aContext->Document());
           }
         }
       }
@@ -394,6 +400,13 @@ MARKUPMAP(
         // A <tr> within a row isn't valid.
         return nullptr;
       }
+      const nsRoleMapEntry* roleMapEntry = aria::GetRoleMap(aElement);
+      if (roleMapEntry && roleMapEntry->role != roles::NOTHING &&
+          roleMapEntry->role != roles::ROW) {
+        // There is a valid ARIA role which isn't "row". Don't treat this as an
+        // HTML table row.
+        return nullptr;
+      }
       // Check if this <tr> is within a table. We check the grandparent because
       // it might be inside a rowgroup. We don't specifically check for an HTML
       // table because there are cases where there is a <tr> inside a
@@ -419,3 +432,5 @@ MARKUPMAP(
       return new HTMLMeterAccessible(aElement, aContext->Document());
     },
     roles::METER)
+
+MARKUPMAP(search, New_HyperText, roles::LANDMARK)

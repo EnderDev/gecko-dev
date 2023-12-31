@@ -100,10 +100,10 @@ class DebuggerPanel {
     return this;
   }
 
-  _onDebuggerStateChange(state, oldState) {
+  async _onDebuggerStateChange(state, oldState) {
     const { getCurrentThread } = this._selectors;
-
     const currentThreadActorID = getCurrentThread(state);
+
     if (
       currentThreadActorID &&
       currentThreadActorID !== getCurrentThread(oldState)
@@ -112,6 +112,20 @@ class DebuggerPanel {
         this.commands.client.getFrontByID(currentThreadActorID);
       this.toolbox.selectTarget(threadFront?.targetFront.actorID);
     }
+
+    this.toolbox.emit(
+      "show-original-variable-mapping-warnings",
+      this.shouldShowOriginalVariableMappingWarnings()
+    );
+  }
+
+  shouldShowOriginalVariableMappingWarnings() {
+    const { getSelectedSource, isMapScopesEnabled } = this._selectors;
+    if (!this.isPaused() || isMapScopesEnabled(this._getState())) {
+      return false;
+    }
+    const selectedSource = getSelectedSource(this._getState());
+    return selectedSource?.isOriginal && !selectedSource?.isPrettyPrinted;
   }
 
   getVarsForTests() {
@@ -222,8 +236,7 @@ class DebuggerPanel {
   }
 
   selectSourceURL(url, line, column) {
-    const cx = this._selectors.getContext(this._getState());
-    return this._actions.selectSourceURL(cx, url, { line, column });
+    return this._actions.selectSourceURL(url, { line, column });
   }
 
   /**
@@ -291,8 +304,7 @@ class DebuggerPanel {
     // But we might try to load display it early to improve user perception.
     await this.toolbox.selectTool("jsdebugger", reason);
 
-    const cx = this._selectors.getContext(this._getState());
-    await this._actions.selectSpecificLocation(cx, originalLocation);
+    await this._actions.selectSpecificLocation(originalLocation);
 
     // XXX: should this be moved to selectSpecificLocation??
     if (this._selectors.hasLogpoint(this._getState(), originalLocation)) {
@@ -334,8 +346,7 @@ class DebuggerPanel {
       source.id,
       threadActorID
     );
-    const cx = this._selectors.getContext(this._getState());
-    await this._actions.selectSource(cx, source, sourceActor);
+    await this._actions.selectSource(source, sourceActor);
   }
 
   selectThread(threadActorID) {

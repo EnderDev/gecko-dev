@@ -115,6 +115,24 @@ TRRLoadInfo::SetTriggeringSandboxFlags(uint32_t aResult) {
 }
 
 NS_IMETHODIMP
+TRRLoadInfo::GetTriggeringWindowId(uint64_t* aResult) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+NS_IMETHODIMP
+TRRLoadInfo::SetTriggeringWindowId(uint64_t aResult) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::GetTriggeringStorageAccess(bool* aResult) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+NS_IMETHODIMP
+TRRLoadInfo::SetTriggeringStorageAccess(bool aResult) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
 TRRLoadInfo::GetSecurityMode(uint32_t* aFlags) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
@@ -167,6 +185,12 @@ TRRLoadInfo::SetStoragePermission(
     nsILoadInfo::StoragePermissionState aHasStoragePermission) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
+
+const Maybe<RFPTarget>& TRRLoadInfo::GetOverriddenFingerprintingSettings() {
+  return mOverriddenFingerprintingSettings;
+}
+
+void TRRLoadInfo::SetOverriddenFingerprintingSettings(RFPTarget aTargets) {}
 
 NS_IMETHODIMP
 TRRLoadInfo::GetIsMetaRefresh(bool* aResult) {
@@ -824,6 +848,16 @@ TRRLoadInfo::GetHasInjectedCookieForCookieBannerHandling(
 NS_IMETHODIMP
 TRRLoadInfo::SetHasInjectedCookieForCookieBannerHandling(
     bool aHasInjectedCookieForCookieBannerHandling) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::GetWasSchemelessInput(bool* aWasSchemelessInput) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+TRRLoadInfo::SetWasSchemelessInput(bool aWasSchemelessInput) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 

@@ -71,8 +71,8 @@ called. It goes through the commands and issues them into the native command
 buffer. Thanks to isolation, it doesn't track any bind group invalidations or
 index format changes.
 
-[Gdcrbe]: crate::hub::Global::device_create_render_bundle_encoder
-[Grbef]: crate::hub::Global::render_bundle_encoder_finish
+[Gdcrbe]: crate::global::Global::device_create_render_bundle_encoder
+[Grbef]: crate::global::Global::render_bundle_encoder_finish
 [wrpeb]: crate::command::render_ffi::wgpu_render_pass_execute_bundles
 !*/
 
@@ -90,11 +90,14 @@ use crate::{
         RenderPassCompatibilityCheckType, RenderPassContext, SHADER_STAGE_COUNT,
     },
     error::{ErrorFormatter, PrettyError},
-    hub::{GlobalIdentityHandlerFactory, HalApi, Hub, Resource, Storage, Token},
+    hal_api::HalApi,
+    hub::{Hub, Token},
     id,
+    identity::GlobalIdentityHandlerFactory,
     init_tracker::{BufferInitTrackerAction, MemoryInitKind, TextureInitTrackerAction},
     pipeline::{self, PipelineFlags},
-    resource,
+    resource::{self, Resource},
+    storage::Storage,
     track::RenderBundleScope,
     validation::check_buffer_usage,
     Label, LabelHelpers, LifeGuard, Stored,
@@ -634,6 +637,8 @@ impl RenderBundleEncoder {
                 RenderCommand::InsertDebugMarker { color: _, len: _ } => unimplemented!(),
                 RenderCommand::PopDebugGroup => unimplemented!(),
                 RenderCommand::WriteTimestamp { .. } // Must check the TIMESTAMP_QUERY_INSIDE_PASSES feature
+                | RenderCommand::BeginOcclusionQuery { .. }
+                | RenderCommand::EndOcclusionQuery
                 | RenderCommand::BeginPipelineStatisticsQuery { .. }
                 | RenderCommand::EndPipelineStatisticsQuery => unimplemented!(),
                 RenderCommand::ExecuteBundle(_)
@@ -663,6 +668,9 @@ impl RenderBundleEncoder {
             texture_memory_init_actions,
             context: self.context,
             life_guard: LifeGuard::new(desc.label.borrow_or_default()),
+            discard_hal_labels: device
+                .instance_flags
+                .contains(wgt::InstanceFlags::DISCARD_HAL_LABELS),
         })
     }
 
@@ -741,9 +749,24 @@ pub struct RenderBundle<A: HalApi> {
     pub(super) texture_memory_init_actions: Vec<TextureInitTrackerAction>,
     pub(super) context: RenderPassContext,
     pub(crate) life_guard: LifeGuard,
+    discard_hal_labels: bool,
 }
 
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+))]
 unsafe impl<A: HalApi> Send for RenderBundle<A> {}
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+))]
 unsafe impl<A: HalApi> Sync for RenderBundle<A> {}
 
 impl<A: HalApi> RenderBundle<A> {
@@ -769,8 +792,10 @@ impl<A: HalApi> RenderBundle<A> {
     ) -> Result<(), ExecutionError> {
         let mut offsets = self.base.dynamic_offsets.as_slice();
         let mut pipeline_layout_id = None::<id::Valid<id::PipelineLayoutId>>;
-        if let Some(ref label) = self.base.label {
-            unsafe { raw.begin_debug_marker(label) };
+        if !self.discard_hal_labels {
+            if let Some(ref label) = self.base.label {
+                unsafe { raw.begin_debug_marker(label) };
+            }
         }
 
         for command in self.base.commands.iter() {
@@ -933,6 +958,8 @@ impl<A: HalApi> RenderBundle<A> {
                     return Err(ExecutionError::Unimplemented("debug-markers"))
                 }
                 RenderCommand::WriteTimestamp { .. }
+                | RenderCommand::BeginOcclusionQuery { .. }
+                | RenderCommand::EndOcclusionQuery
                 | RenderCommand::BeginPipelineStatisticsQuery { .. }
                 | RenderCommand::EndPipelineStatisticsQuery => {
                     return Err(ExecutionError::Unimplemented("queries"))
@@ -945,8 +972,10 @@ impl<A: HalApi> RenderBundle<A> {
             }
         }
 
-        if let Some(_) = self.base.label {
-            unsafe { raw.end_debug_marker() };
+        if !self.discard_hal_labels {
+            if let Some(_) = self.base.label {
+                unsafe { raw.end_debug_marker() };
+            }
         }
 
         Ok(())

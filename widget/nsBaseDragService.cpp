@@ -57,6 +57,8 @@ using namespace mozilla::dom;
 using namespace mozilla::gfx;
 using namespace mozilla::image;
 
+LazyLogModule sWidgetDragServiceLog("WidgetDragService");
+
 #define DRAGIMAGES_PREF "nglayout.enable_drag_images"
 
 nsBaseDragService::nsBaseDragService()
@@ -421,7 +423,7 @@ nsBaseDragService::InvokeDragSessionWithImage(
       mSourceWindowContext ? mSourceWindowContext->TopWindowContext() : nullptr;
 
   mScreenPosition = aDragEvent->ScreenPoint(CallerType::System);
-  mInputSource = aDragEvent->MozInputSource();
+  mInputSource = aDragEvent->InputSource();
 
   // If dragging within a XUL tree and no custom drag image was
   // set, the region argument to InvokeDragSessionWithImage needs
@@ -470,7 +472,7 @@ nsBaseDragService::InvokeDragSessionWithRemoteImage(
   mSourceTopWindowContext = mDragStartData->GetSourceTopWindowContext();
 
   mScreenPosition = aDragEvent->ScreenPoint(CallerType::System);
-  mInputSource = aDragEvent->MozInputSource();
+  mInputSource = aDragEvent->InputSource();
 
   nsresult rv = InvokeDragSession(
       aDOMNode, aPrincipal, aCsp, aCookieJarSettings, aTransferableArray,
@@ -502,7 +504,7 @@ nsBaseDragService::InvokeDragSessionWithSelection(
 
   mScreenPosition.x = aDragEvent->ScreenX(CallerType::System);
   mScreenPosition.y = aDragEvent->ScreenY(CallerType::System);
-  mInputSource = aDragEvent->MozInputSource();
+  mInputSource = aDragEvent->InputSource();
 
   // just get the focused node from the selection
   // XXXndeakin this should actually be the deepest node that contains both

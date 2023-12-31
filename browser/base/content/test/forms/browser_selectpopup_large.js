@@ -241,12 +241,7 @@ async function performLargePopupTests(win) {
     // might return floating point values. We don't care about sub-pixel
     // accuracy, and only care about the final pixel value, so we add a
     // fuzz-factor of 1.
-    //
-    // FIXME(emilio): In win7 scroll position is off by 20px more, but that's
-    // not reproducible in win10 even with the win7 "native" menus enabled.
-    const fuzzFactor = matchMedia("(-moz-platform: windows-win7)").matches
-      ? 21
-      : 1;
+    const fuzzFactor = 1;
     SimpleTest.isfuzzy(
       selectPopup.children[selectedOption].getBoundingClientRect().bottom,
       selectPopup.getBoundingClientRect().bottom - bpBottom + marginBottom,
@@ -327,7 +322,10 @@ add_task(async function test_large_popup_in_small_window() {
   let browserLoadedPromise = BrowserTestUtils.browserLoaded(
     newWin.gBrowser.selectedBrowser
   );
-  BrowserTestUtils.loadURIString(newWin.gBrowser.selectedBrowser, pageUrl);
+  BrowserTestUtils.startLoadingURIString(
+    newWin.gBrowser.selectedBrowser,
+    pageUrl
+  );
   await browserLoadedPromise;
 
   newWin.gBrowser.selectedBrowser.focus();

@@ -25,9 +25,6 @@ nimbus_events:
       branch:
         type: string
         description: The branch slug/identifier that was randomly chosen
-      enrollment_id:
-        type: string
-        description: A unique identifier generated at enrollment time
       experiment_type:
         type: string
         description: Indicates whether this is an experiemnt or rollout
@@ -88,18 +85,22 @@ nimbus_events:
       branch:
         type: string
         description: The branch slug/identifier that was randomly chosen
-      enrollment_id:
-        type: string
-        description: A unique identifier generated at enrollment time
       reason:
         type: string
         description: The reason for the unenrollment
+      changed_pref:
+        type: string
+        description: >
+          If reason == "changed-pref", then this contains the name of the pref
+          that changed that caused the unenrollment.
     bugs:
       - https://bugzilla.mozilla.org/show_bug.cgi?id=1773563
       - https://bugzilla.mozilla.org/show_bug.cgi?id=1781953
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1843126
     data_reviews:
       - https://bugzilla.mozilla.org/show_bug.cgi?id=1773563
       - https://bugzilla.mozilla.org/show_bug.cgi?id=1781953
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1843126
     data_sensitivity:
       - technical
     notification_emails:

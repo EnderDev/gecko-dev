@@ -117,6 +117,16 @@ function _EU_maybeWrap(o) {
 }
 
 function _EU_maybeUnwrap(o) {
+  var haveWrap = false;
+  try {
+    haveWrap = SpecialPowers.unwrap != undefined;
+  } catch (e) {
+    // Just leave it false.
+  }
+  if (!haveWrap) {
+    // Not much we can do here.
+    return o;
+  }
   var c = Object.getOwnPropertyDescriptor(window, "Components");
   return c && c.value && !c.writable ? o : SpecialPowers.unwrap(o);
 }
@@ -253,10 +263,6 @@ function sendMouseEvent(aEvent, aTarget, aWindow) {
 
   if (typeof aTarget == "string") {
     aTarget = aWindow.document.getElementById(aTarget);
-  }
-
-  if (aEvent.type === "click" && this.AccessibilityUtils) {
-    this.AccessibilityUtils.assertCanBeClicked(aTarget);
   }
 
   var event = aWindow.document.createEvent("MouseEvent");
@@ -452,8 +458,25 @@ function sendChar(aChar, aWindow) {
  * key state on US keyboard layout.
  */
 function sendString(aStr, aWindow) {
-  for (var i = 0; i < aStr.length; ++i) {
-    sendChar(aStr.charAt(i), aWindow);
+  for (let i = 0; i < aStr.length; ++i) {
+    // Do not split a surrogate pair to call synthesizeKey.  Dispatching two
+    // sets of keydown and keyup caused by two calls of synthesizeKey is not
+    // good behavior.  It could happen due to a bug, but a surrogate pair should
+    // be introduced with one key press operation.  Therefore, calling it with
+    // a surrogate pair is the right thing.
+    // Note that TextEventDispatcher will consider whether a surrogate pair
+    // should cause one or two keypress events automatically.  Therefore, we
+    // don't need to check the related prefs here.
+    if (
+      (aStr.charCodeAt(i) & 0xfc00) == 0xd800 &&
+      i + 1 < aStr.length &&
+      (aStr.charCodeAt(i + 1) & 0xfc00) == 0xdc00
+    ) {
+      sendChar(aStr.substring(i, i + 2), aWindow);
+      i++;
+    } else {
+      sendChar(aStr.charAt(i), aWindow);
+    }
   }
 }
 
@@ -516,9 +539,6 @@ function _parseModifiers(aEvent, aWindow = window) {
   if (aEvent.symbolLockKey) {
     mval |= nsIDOMWindowUtils.MODIFIER_SYMBOLLOCK;
   }
-  if (aEvent.osKey) {
-    mval |= nsIDOMWindowUtils.MODIFIER_OS;
-  }
 
   return mval;
 }
@@ -559,6 +579,90 @@ function synthesizeTouch(aTarget, aOffsetX, aOffsetY, aEvent, aWindow) {
   );
 }
 
+/**
+ * Return the drag service.  Note that if we're in the headless mode, this
+ * may return null because the service may be never instantiated (e.g., on
+ * Linux).
+ */
+function getDragService() {
+  try {
+    return _EU_Cc["@mozilla.org/widget/dragservice;1"].getService(
+      _EU_Ci.nsIDragService
+    );
+  } catch (e) {
+    // If we're in the headless mode, the drag service may be never
+    // instantiated.  In this case, an exception is thrown.  Let's ignore
+    // any exceptions since without the drag service, nobody can create a
+    // drag session.
+    return null;
+  }
+}
+
+/**
+ * End drag session if there is.
+ *
+ * TODO: This should synthesize "drop" if necessary.
+ *
+ * @param left          X offset in the viewport
+ * @param top           Y offset in the viewport
+ * @param aEvent        The event data, the modifiers are applied to the
+ *                      "dragend" event.
+ * @param aWindow       The window.
+ * @return              true if handled.  In this case, the caller should not
+ *                      synthesize DOM events basically.
+ */
+function _maybeEndDragSession(left, top, aEvent, aWindow) {
+  const dragService = getDragService();
+  const dragSession = dragService?.getCurrentSession();
+  if (!dragSession) {
+    return false;
+  }
+  // FIXME: If dragSession.dragAction is not
+  // nsIDragService.DRAGDROP_ACTION_NONE nor aEvent.type is not `keydown`, we
+  // need to synthesize a "drop" event or call setDragEndPointForTests here to
+  // set proper left/top to `dragend` event.
+  try {
+    dragService.endDragSession(false, _parseModifiers(aEvent, aWindow));
+  } catch (e) {}
+  return true;
+}
+
+function _maybeSynthesizeDragOver(left, top, aEvent, aWindow) {
+  const dragSession = getDragService()?.getCurrentSession();
+  if (!dragSession) {
+    return false;
+  }
+  const target = aWindow.document.elementFromPoint(left, top);
+  if (target) {
+    sendDragEvent(
+      createDragEventObject(
+        "dragover",
+        target,
+        aWindow,
+        dragSession.dataTransfer,
+        {
+          accelKey: aEvent.accelKey,
+          altKey: aEvent.altKey,
+          altGrKey: aEvent.altGrKey,
+          ctrlKey: aEvent.ctrlKey,
+          metaKey: aEvent.metaKey,
+          shiftKey: aEvent.shiftKey,
+          capsLockKey: aEvent.capsLockKey,
+          fnKey: aEvent.fnKey,
+          fnLockKey: aEvent.fnLockKey,
+          numLockKey: aEvent.numLockKey,
+          scrollLockKey: aEvent.scrollLockKey,
+          symbolKey: aEvent.symbolKey,
+          symbolLockKey: aEvent.symbolLockKey,
+        }
+      ),
+      target,
+      aWindow
+    );
+  }
+  return true;
+}
+
 /*
  * Synthesize a mouse event at a particular point in aWindow.
  *
@@ -573,6 +677,18 @@ function synthesizeTouch(aTarget, aOffsetX, aOffsetY, aEvent, aWindow) {
  * aWindow is optional, and defaults to the current window object.
  */
 function synthesizeMouseAtPoint(left, top, aEvent, aWindow = window) {
+  if (aEvent.allowToHandleDragDrop) {
+    if (aEvent.type == "mouseup" || !aEvent.type) {
+      if (_maybeEndDragSession(left, top, aEvent, aWindow)) {
+        return false;
+      }
+    } else if (aEvent.type == "mousemove") {
+      if (_maybeSynthesizeDragOver(left, top, aEvent, aWindow)) {
+        return false;
+      }
+    }
+  }
+
   var utils = _getDOMWindowUtils(aWindow);
   var defaultPrevented = false;
 
@@ -1373,8 +1489,8 @@ function synthesizeAndWaitNativeMouseMove(
  *
  * @description
  * ``accelKey``, ``altKey``, ``altGraphKey``, ``ctrlKey``, ``capsLockKey``,
- * ``fnKey``, ``fnLockKey``, ``numLockKey``, ``metaKey``, ``osKey``,
- * ``scrollLockKey``, ``shiftKey``, ``symbolKey``, ``symbolLockKey``
+ * ``fnKey``, ``fnLockKey``, ``numLockKey``, ``metaKey``, ``scrollLockKey``,
+ * ``shiftKey``, ``symbolKey``, ``symbolLockKey``
  * Basically, you shouldn't use these attributes.  nsITextInputProcessor
  * manages modifier key state when you synthesize modifier key events.
  * However, if some of these attributes are true, this function activates
@@ -1384,7 +1500,32 @@ function synthesizeAndWaitNativeMouseMove(
  *
  */
 function synthesizeKey(aKey, aEvent = undefined, aWindow = window, aCallback) {
-  var event = aEvent === undefined || aEvent === null ? {} : aEvent;
+  const event = aEvent === undefined || aEvent === null ? {} : aEvent;
+  let dispatchKeydown =
+    !("type" in event) || event.type === "keydown" || !event.type;
+  const dispatchKeyup =
+    !("type" in event) || event.type === "keyup" || !event.type;
+
+  if (dispatchKeydown && aKey == "KEY_Escape") {
+    let eventForKeydown = Object.assign({}, JSON.parse(JSON.stringify(event)));
+    eventForKeydown.type = "keydown";
+    if (
+      _maybeEndDragSession(
+        // TODO: We should set the last dragover point instead
+        0,
+        0,
+        eventForKeydown,
+        aWindow
+      )
+    ) {
+      if (!dispatchKeyup) {
+        return;
+      }
+      // We don't need to dispatch only keydown event because it's consumed by
+      // the drag session.
+      dispatchKeydown = false;
+    }
+  }
 
   var TIP = _getTIP(aWindow, aCallback);
   if (!TIP) {
@@ -1394,10 +1535,6 @@ function synthesizeKey(aKey, aEvent = undefined, aWindow = window, aCallback) {
   var modifiers = _emulateToActivateModifiers(TIP, event, aWindow);
   var keyEventDict = _createKeyboardEventDictionary(aKey, event, TIP, aWindow);
   var keyEvent = new KeyboardEvent("", keyEventDict.dictionary);
-  var dispatchKeydown =
-    !("type" in event) || event.type === "keydown" || !event.type;
-  var dispatchKeyup =
-    !("type" in event) || event.type === "keyup" || !event.type;
 
   try {
     if (dispatchKeydown) {
@@ -1548,102 +1685,132 @@ const KEYBOARD_LAYOUT_ARABIC = {
   Win: 0x00000401,
   hasAltGrOnWin: false,
 };
+_defineConstant("KEYBOARD_LAYOUT_ARABIC", KEYBOARD_LAYOUT_ARABIC);
 const KEYBOARD_LAYOUT_ARABIC_PC = {
   name: "Arabic - PC",
   Mac: 7,
   Win: null,
   hasAltGrOnWin: false,
 };
+_defineConstant("KEYBOARD_LAYOUT_ARABIC_PC", KEYBOARD_LAYOUT_ARABIC_PC);
 const KEYBOARD_LAYOUT_BRAZILIAN_ABNT = {
   name: "Brazilian ABNT",
   Mac: null,
   Win: 0x00000416,
   hasAltGrOnWin: true,
 };
+_defineConstant(
+  "KEYBOARD_LAYOUT_BRAZILIAN_ABNT",
+  KEYBOARD_LAYOUT_BRAZILIAN_ABNT
+);
 const KEYBOARD_LAYOUT_DVORAK_QWERTY = {
   name: "Dvorak-QWERTY",
   Mac: 4,
   Win: null,
   hasAltGrOnWin: false,
 };
+_defineConstant("KEYBOARD_LAYOUT_DVORAK_QWERTY", KEYBOARD_LAYOUT_DVORAK_QWERTY);
 const KEYBOARD_LAYOUT_EN_US = {
   name: "US",
   Mac: 0,
   Win: 0x00000409,
   hasAltGrOnWin: false,
 };
+_defineConstant("KEYBOARD_LAYOUT_EN_US", KEYBOARD_LAYOUT_EN_US);
 const KEYBOARD_LAYOUT_FRENCH = {
   name: "French",
-  Mac: 8,
+  Mac: 8, // Some keys mapped different from PC, e.g., Digit6, Digit8, Equal, Slash and Backslash
   Win: 0x0000040c,
   hasAltGrOnWin: true,
 };
+_defineConstant("KEYBOARD_LAYOUT_FRENCH", KEYBOARD_LAYOUT_FRENCH);
+const KEYBOARD_LAYOUT_FRENCH_PC = {
+  name: "French-PC",
+  Mac: 13, // Compatible with Windows
+  Win: 0x0000040c,
+  hasAltGrOnWin: true,
+};
+_defineConstant("KEYBOARD_LAYOUT_FRENCH_PC", KEYBOARD_LAYOUT_FRENCH_PC);
 const KEYBOARD_LAYOUT_GREEK = {
   name: "Greek",
   Mac: 1,
   Win: 0x00000408,
   hasAltGrOnWin: true,
 };
+_defineConstant("KEYBOARD_LAYOUT_GREEK", KEYBOARD_LAYOUT_GREEK);
 const KEYBOARD_LAYOUT_GERMAN = {
   name: "German",
   Mac: 2,
   Win: 0x00000407,
   hasAltGrOnWin: true,
 };
+_defineConstant("KEYBOARD_LAYOUT_GERMAN", KEYBOARD_LAYOUT_GERMAN);
 const KEYBOARD_LAYOUT_HEBREW = {
   name: "Hebrew",
   Mac: 9,
   Win: 0x0000040d,
   hasAltGrOnWin: true,
 };
+_defineConstant("KEYBOARD_LAYOUT_HEBREW", KEYBOARD_LAYOUT_HEBREW);
 const KEYBOARD_LAYOUT_JAPANESE = {
   name: "Japanese",
   Mac: null,
   Win: 0x00000411,
   hasAltGrOnWin: false,
 };
+_defineConstant("KEYBOARD_LAYOUT_JAPANESE", KEYBOARD_LAYOUT_JAPANESE);
 const KEYBOARD_LAYOUT_KHMER = {
   name: "Khmer",
   Mac: null,
   Win: 0x00000453,
   hasAltGrOnWin: true,
 }; // available on Win7 or later.
+_defineConstant("KEYBOARD_LAYOUT_KHMER", KEYBOARD_LAYOUT_KHMER);
 const KEYBOARD_LAYOUT_LITHUANIAN = {
   name: "Lithuanian",
   Mac: 10,
   Win: 0x00010427,
   hasAltGrOnWin: true,
 };
+_defineConstant("KEYBOARD_LAYOUT_LITHUANIAN", KEYBOARD_LAYOUT_LITHUANIAN);
 const KEYBOARD_LAYOUT_NORWEGIAN = {
   name: "Norwegian",
   Mac: 11,
   Win: 0x00000414,
   hasAltGrOnWin: true,
 };
+_defineConstant("KEYBOARD_LAYOUT_NORWEGIAN", KEYBOARD_LAYOUT_NORWEGIAN);
 const KEYBOARD_LAYOUT_RUSSIAN_MNEMONIC = {
   name: "Russian - Mnemonic",
   Mac: null,
   Win: 0x00020419,
   hasAltGrOnWin: true,
 }; // available on Win8 or later.
+_defineConstant(
+  "KEYBOARD_LAYOUT_RUSSIAN_MNEMONIC",
+  KEYBOARD_LAYOUT_RUSSIAN_MNEMONIC
+);
 const KEYBOARD_LAYOUT_SPANISH = {
   name: "Spanish",
   Mac: 12,
   Win: 0x0000040a,
   hasAltGrOnWin: true,
 };
+_defineConstant("KEYBOARD_LAYOUT_SPANISH", KEYBOARD_LAYOUT_SPANISH);
 const KEYBOARD_LAYOUT_SWEDISH = {
   name: "Swedish",
   Mac: 3,
   Win: 0x0000041d,
   hasAltGrOnWin: true,
 };
+_defineConstant("KEYBOARD_LAYOUT_SWEDISH", KEYBOARD_LAYOUT_SWEDISH);
 const KEYBOARD_LAYOUT_THAI = {
   name: "Thai",
   Mac: 5,
   Win: 0x0002041e,
   hasAltGrOnWin: false,
 };
+_defineConstant("KEYBOARD_LAYOUT_THAI", KEYBOARD_LAYOUT_THAI);
 
 /**
  * synthesizeNativeKey() dispatches native key event on active window.
@@ -2167,7 +2334,6 @@ function _emulateToActivateModifiers(aTIP, aKeyEvent, aWindow = window) {
       { key: "Control", attr: "ctrlKey" },
       { key: "Fn", attr: "fnKey" },
       { key: "Meta", attr: "metaKey" },
-      { key: "OS", attr: "osKey" },
       { key: "Shift", attr: "shiftKey" },
       { key: "Symbol", attr: "symbolKey" },
       { key: _EU_isMac(aWindow) ? "Meta" : "Control", attr: "accelKey" },
@@ -2940,7 +3106,14 @@ function synthesizeDropAfterDragOver(
     );
     sendDragEvent(event, aDestElement, aDestWindow);
   }
+  // Don't run accessibility checks for this click, since we're not actually
+  // clicking. It's just generated as part of the drop.
+  // this.AccessibilityUtils might not be set if this isn't a browser test or
+  // if a browser test has loaded its own copy of EventUtils for some reason.
+  // In the latter case, the test probably shouldn't do that.
+  this.AccessibilityUtils?.suppressClickHandling(true);
   synthesizeMouse(aDestElement, 2, 2, { type: "mouseup" }, aDestWindow);
+  this.AccessibilityUtils?.suppressClickHandling(false);
 
   return effect;
 }

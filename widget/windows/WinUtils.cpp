@@ -28,7 +28,6 @@
 #include "mozilla/RefPtr.h"
 #include "mozilla/SchedulerGroup.h"
 #include "mozilla/WinHeaderOnlyUtils.h"
-#include "mozilla/WindowsVersion.h"
 #include "mozilla/Unused.h"
 #include "nsIContentPolicy.h"
 #include "WindowsUIUtils.h"
@@ -59,6 +58,7 @@
 #include <textstor.h>
 #include "TSFTextStore.h"
 
+#include <shellscalingapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 
@@ -99,7 +99,7 @@ void WinUtils::Initialize() {
   // Dpi-Awareness is not supported with Win32k Lockdown enabled, so we don't
   // initialize DPI-related members and assert later that nothing accidently
   // uses these static members
-  if (IsWin10OrLater() && !IsWin32kLockedDown()) {
+  if (!IsWin32kLockedDown()) {
     HMODULE user32Dll = ::GetModuleHandleW(L"user32");
     if (user32Dll) {
       auto getThreadDpiAwarenessContext =
@@ -128,9 +128,7 @@ void WinUtils::Initialize() {
     }
   }
 
-  if (IsWin8OrLater()) {
-    sHasPackageIdentity = mozilla::HasPackageIdentity();
-  }
+  sHasPackageIdentity = mozilla::HasPackageIdentity();
 }
 
 // static
@@ -237,21 +235,6 @@ float WinUtils::SystemDPI() {
 
 // static
 double WinUtils::SystemScaleFactor() { return SystemDPI() / 96.0; }
-
-#if WINVER < 0x603
-typedef enum {
-  MDT_EFFECTIVE_DPI = 0,
-  MDT_ANGULAR_DPI = 1,
-  MDT_RAW_DPI = 2,
-  MDT_DEFAULT = MDT_EFFECTIVE_DPI
-} MONITOR_DPI_TYPE;
-
-typedef enum {
-  PROCESS_DPI_UNAWARE = 0,
-  PROCESS_SYSTEM_DPI_AWARE = 1,
-  PROCESS_PER_MONITOR_DPI_AWARE = 2
-} PROCESS_DPI_AWARENESS;
-#endif
 
 typedef HRESULT(WINAPI* GETDPIFORMONITORPROC)(HMONITOR, MONITOR_DPI_TYPE, UINT*,
                                               UINT*);
@@ -605,18 +588,6 @@ void WinUtils::SetNSWindowPtr(HWND aWnd, nsWindow* aWindow) {
 nsWindow* WinUtils::GetNSWindowPtr(HWND aWnd) {
   MOZ_ASSERT(NS_IsMainThread());
   return sExtantNSWindows.Get(aWnd);  // or nullptr
-}
-
-static BOOL CALLBACK AddMonitor(HMONITOR, HDC, LPRECT, LPARAM aParam) {
-  (*(int32_t*)aParam)++;
-  return TRUE;
-}
-
-/* static */
-int32_t WinUtils::GetMonitorCount() {
-  int32_t monitorCount = 0;
-  EnumDisplayMonitors(nullptr, nullptr, AddMonitor, (LPARAM)&monitorCount);
-  return monitorCount;
 }
 
 /* static */
@@ -1462,15 +1433,47 @@ bool WinUtils::GetAutoRotationState(AR_STATE* aRotationState) {
   return false;
 }
 
+// static
+void WinUtils::GetClipboardFormatAsString(UINT aFormat, nsAString& aOutput) {
+  wchar_t buf[256] = {};
+  // Get registered format name and ensure the existence of a terminating '\0'
+  // if the registered name is more than 256 characters.
+  if (::GetClipboardFormatNameW(aFormat, buf, ARRAYSIZE(buf) - 1)) {
+    aOutput.Append(buf);
+    return;
+  }
+  // Standard clipboard formats
+  // https://learn.microsoft.com/en-us/windows/win32/dataxchg/standard-clipboard-formats
+  switch (aFormat) {
+    case CF_TEXT:  // 1
+      aOutput.Append(u"CF_TEXT"_ns);
+      break;
+    case CF_BITMAP:  // 2
+      aOutput.Append(u"CF_BITMAP"_ns);
+      break;
+    case CF_DIB:  // 8
+      aOutput.Append(u"CF_DIB"_ns);
+      break;
+    case CF_UNICODETEXT:  // 13
+      aOutput.Append(u"CF_UNICODETEXT"_ns);
+      break;
+    case CF_HDROP:  // 15
+      aOutput.Append(u"CF_HDROP"_ns);
+      break;
+    case CF_DIBV5:  // 17
+      aOutput.Append(u"CF_DIBV5"_ns);
+      break;
+    default:
+      aOutput.AppendPrintf("%u", aFormat);
+      break;
+  }
+}
+
 static bool IsTabletDevice() {
   // Guarantees that:
   // - The device has a touch screen.
   // - It is used as a tablet which means that it has no keyboard connected.
   // On Windows 10 it means that it is verifying with ConvertibleSlateMode.
-
-  if (!IsWin8OrLater()) {
-    return false;
-  }
 
   if (WindowsUIUtils::GetInTabletMode()) {
     return true;
@@ -1541,19 +1544,71 @@ PointerCapabilities WinUtils::GetPrimaryPointerCapabilities() {
   return PointerCapabilities::None;
 }
 
+static bool SystemHasTouchscreen() {
+  int digitizerMetrics = ::GetSystemMetrics(SM_DIGITIZER);
+  return (digitizerMetrics & NID_INTEGRATED_TOUCH) ||
+         (digitizerMetrics & NID_EXTERNAL_TOUCH);
+}
+
+static bool SystemHasPenDigitizer() {
+  int digitizerMetrics = ::GetSystemMetrics(SM_DIGITIZER);
+  return (digitizerMetrics & NID_INTEGRATED_PEN) ||
+         (digitizerMetrics & NID_EXTERNAL_PEN);
+}
+
+static bool SystemHasMouse() {
+  // As per MSDN, this value is rarely false because of virtual mice, and
+  // some machines report the existance of a mouse port as a mouse.
+  //
+  // We probably could try to distinguish if we wanted, but a virtual mouse
+  // might be there for a reason, and maybe we shouldn't assume we know
+  // better.
+  return !!::GetSystemMetrics(SM_MOUSEPRESENT);
+}
+
 /* static */
 PointerCapabilities WinUtils::GetAllPointerCapabilities() {
-  PointerCapabilities result = PointerCapabilities::None;
+  PointerCapabilities pointerCapabilities = PointerCapabilities::None;
 
-  if (IsTabletDevice() || IsTouchDeviceSupportPresent()) {
-    result |= PointerCapabilities::Coarse;
+  if (SystemHasTouchscreen()) {
+    pointerCapabilities |= PointerCapabilities::Coarse;
   }
 
-  if (IsMousePresent()) {
-    result |= PointerCapabilities::Fine | PointerCapabilities::Hover;
+  if (SystemHasPenDigitizer() || SystemHasMouse()) {
+    pointerCapabilities |=
+        PointerCapabilities::Fine | PointerCapabilities::Hover;
   }
 
-  return result;
+  return pointerCapabilities;
+}
+
+void WinUtils::GetPointerExplanation(nsAString* aExplanation) {
+  // To support localization, we will return a comma-separated list of
+  // Fluent IDs
+  *aExplanation = u"pointing-device-none";
+
+  bool first = true;
+  auto append = [&](const char16_t* str) {
+    if (first) {
+      aExplanation->Truncate();
+      first = false;
+    } else {
+      aExplanation->Append(u",");
+    }
+    aExplanation->Append(str);
+  };
+
+  if (SystemHasTouchscreen()) {
+    append(u"pointing-device-touchscreen");
+  }
+
+  if (SystemHasPenDigitizer()) {
+    append(u"pointing-device-pen-digitizer");
+  }
+
+  if (SystemHasMouse()) {
+    append(u"pointing-device-mouse");
+  }
 }
 
 /* static */
@@ -1740,10 +1795,8 @@ const WinUtils::WhitelistVec& WinUtils::GetWhitelistedPaths() {
     if (NS_IsMainThread()) {
       setClearFn();
     } else {
-      SchedulerGroup::Dispatch(
-          TaskCategory::Other,
-          NS_NewRunnableFunction("WinUtils::GetWhitelistedPaths",
-                                 std::move(setClearFn)));
+      SchedulerGroup::Dispatch(NS_NewRunnableFunction(
+          "WinUtils::GetWhitelistedPaths", std::move(setClearFn)));
     }
 
     return BuildWhitelist();
@@ -1991,10 +2044,6 @@ static LONG SetRelativeScaleStep(LUID aAdapterId, int32_t aRelativeScaleStep) {
 }
 
 nsresult WinUtils::SetHiDPIMode(bool aHiDPI) {
-  if (!IsWin10OrLater()) {
-    return NS_ERROR_NOT_AVAILABLE;
-  }
-
   auto config = GetDisplayConfig();
   if (!config) {
     return NS_ERROR_NOT_AVAILABLE;
@@ -2050,10 +2099,6 @@ nsresult WinUtils::SetHiDPIMode(bool aHiDPI) {
 }
 
 nsresult WinUtils::RestoreHiDPIMode() {
-  if (!IsWin10OrLater()) {
-    return NS_ERROR_NOT_AVAILABLE;
-  }
-
   if (sCurRelativeScaleStep == std::numeric_limits<int>::max()) {
     // The DPI setting hasn't been changed.
     return NS_ERROR_UNEXPECTED;

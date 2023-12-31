@@ -57,7 +57,7 @@ add_setup(async function () {
   await SearchTestUtils.installSearchExtension({}, { setAsDefault: true });
 
   await QuickSuggestTestUtils.ensureQuickSuggestInit({
-    remoteSettingsResults: [
+    remoteSettingsRecords: [
       {
         type: "data",
         attachment: REMOTE_SETTINGS_RESULTS,
@@ -360,6 +360,8 @@ add_task(async function previousResultStillVisible() {
           is_clicked: false,
           match_type: "firefox-suggest",
           position: index + 1,
+          suggested_index: -1,
+          suggested_index_relative_to_group: true,
         },
       },
     ]);
@@ -385,11 +387,12 @@ async function doEngagementWithoutAddingResultToView(
   // Set the timeout of the chunk timer to a really high value so that it will
   // not fire. The view updates when the timer fires, which we specifically want
   // to avoid here.
-  let originalChunkDelayMs = UrlbarProvidersManager._chunkResultsDelayMs;
-  UrlbarProvidersManager._chunkResultsDelayMs = 30000;
-  registerCleanupFunction(() => {
-    UrlbarProvidersManager._chunkResultsDelayMs = originalChunkDelayMs;
-  });
+  let originalChunkTimeout = UrlbarProvidersManager.CHUNK_RESULTS_DELAY_MS;
+  UrlbarProvidersManager.CHUNK_RESULTS_DELAY_MS = 30000;
+  const cleanup = () => {
+    UrlbarProvidersManager.CHUNK_RESULTS_DELAY_MS = originalChunkTimeout;
+  };
+  registerCleanupFunction(cleanup);
 
   // Stub `UrlbarProviderQuickSuggest.getPriority()` to return Infinity.
   let sandbox = sinon.createSandbox();
@@ -475,7 +478,7 @@ async function doEngagementWithoutAddingResultToView(
   await loadPromise;
 
   let engagementCalls = onEngagementSpy.getCalls().filter(call => {
-    let state = call.args[1];
+    let state = call.args[0];
     return state == "engagement";
   });
   Assert.equal(engagementCalls.length, 1, "One engagement occurred");
@@ -483,7 +486,7 @@ async function doEngagementWithoutAddingResultToView(
   // Clean up.
   resolveQuery();
   UrlbarProvidersManager.unregisterProvider(provider);
-  UrlbarProvidersManager._chunkResultsDelayMs = originalChunkDelayMs;
+  cleanup();
   sandboxCleanup();
 }
 

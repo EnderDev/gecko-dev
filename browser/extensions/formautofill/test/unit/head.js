@@ -7,8 +7,8 @@
 var { XPCOMUtils } = ChromeUtils.importESModule(
   "resource://gre/modules/XPCOMUtils.sys.mjs"
 );
-var { ObjectUtils } = ChromeUtils.import(
-  "resource://gre/modules/ObjectUtils.jsm"
+var { ObjectUtils } = ChromeUtils.importESModule(
+  "resource://gre/modules/ObjectUtils.sys.mjs"
 );
 var { FormLikeFactory } = ChromeUtils.importESModule(
   "resource://gre/modules/FormLikeFactory.sys.mjs"
@@ -70,6 +70,24 @@ region-name-tw = Taiwan
   );
   L10nRegistry.getInstance().registerSources([mockSource]);
 }
+
+/**
+ * Mock the return value of Services.focus.elementIsFocusable
+ * since a field's focusability can't be tested in a unit test.
+ */
+(function ignoreAFieldsFocusability() {
+  let stub = sinon.stub(Services, "focus").get(() => {
+    return {
+      elementIsFocusable() {
+        return true;
+      },
+    };
+  });
+
+  registerCleanupFunction(() => {
+    stub.restore();
+  });
+})();
 
 do_get_profile();
 

@@ -39,7 +39,6 @@ const VENDORS = [
   "devtools-environment",
   "fuzzaldrin-plus",
   "react-aria-components/src/tabs",
-  "react-transition-group/Transition",
   "Svg",
 ];
 
@@ -190,7 +189,6 @@ module.exports = function (filePath) {
     "proposal-optional-chaining",
     "proposal-class-properties",
     "transform-modules-commonjs",
-    "transform-react-jsx",
     ["transform-mc", { mappings, vendors: VENDORS, filePath }],
   ];
 };

@@ -24,6 +24,7 @@
 #include "imgLoader.h"
 #include "ScrollingMetrics.h"
 #include "mozilla/BasePrincipal.h"
+#include "mozilla/ClipboardReadRequestChild.h"
 #include "mozilla/Components.h"
 #include "mozilla/HangDetails.h"
 #include "mozilla/LoadInfo.h"
@@ -75,7 +76,6 @@
 #include "mozilla/dom/JSProcessActorChild.h"
 #include "mozilla/dom/LSObject.h"
 #include "mozilla/dom/MemoryReportRequest.h"
-#include "mozilla/dom/PLoginReputationChild.h"
 #include "mozilla/dom/PSessionStorageObserverChild.h"
 #include "mozilla/dom/PostMessageEvent.h"
 #include "mozilla/dom/PushNotifier.h"
@@ -131,6 +131,7 @@
 #include "nsIStringBundle.h"
 #include "nsIURIMutator.h"
 #include "nsQueryObject.h"
+#include "nsRefreshDriver.h"
 #include "nsSandboxFlags.h"
 #include "mozmemory.h"
 
@@ -145,8 +146,8 @@
 #    include "mozilla/Sandbox.h"
 #    include "mozilla/SandboxInfo.h"
 #  elif defined(XP_MACOSX)
+#    include <CoreGraphics/CGError.h>
 #    include "mozilla/Sandbox.h"
-#    include "mozilla/gfx/QuartzSupport.h"
 #  elif defined(__OpenBSD__)
 #    include <err.h>
 #    include <sys/stat.h>
@@ -222,6 +223,7 @@
 
 #if defined(MOZ_WIDGET_ANDROID)
 #  include "APKOpen.h"
+#  include <sched.h>
 #endif
 
 #ifdef XP_WIN
@@ -637,9 +639,9 @@ ContentChild::ContentChild()
 
 #ifdef _MSC_VER
 #  pragma warning(push)
-#  pragma warning(                                                      \
-          disable : 4722) /* Silence "destructor never returns" warning \
-                           */
+#  pragma warning(                                                  \
+      disable : 4722) /* Silence "destructor never returns" warning \
+                       */
 #endif
 
 ContentChild::~ContentChild() {
@@ -800,7 +802,6 @@ void ContentChild::Init(mozilla::ipc::UntypedEndpoint&& aEndpoint,
   // NOTE: We have to register the annotator on the main thread, as annotators
   // only affect a single thread.
   SchedulerGroup::Dispatch(
-      TaskCategory::Other,
       NS_NewRunnableFunction("RegisterPendingInputEventHangAnnotator", [] {
         BackgroundHangMonitor::RegisterAnnotator(
             PendingInputEventHangAnnotator::sSingleton);
@@ -1987,6 +1988,12 @@ PRemotePrintJobChild* ContentChild::AllocPRemotePrintJobChild() {
 #endif
 }
 
+already_AddRefed<PClipboardReadRequestChild>
+ContentChild::AllocPClipboardReadRequestChild(
+    const nsTArray<nsCString>& aTypes) {
+  return MakeAndAddRef<ClipboardReadRequestChild>(aTypes);
+}
+
 media::PMediaChild* ContentChild::AllocPMediaChild() {
   return media::AllocPMediaChild();
 }
@@ -2650,10 +2657,13 @@ mozilla::ipc::IPCResult ContentChild::RecvRemoteType(
   } else if (aRemoteType == PRIVILEGEDMOZILLA_REMOTE_TYPE) {
     SetProcessName("Privileged Mozilla"_ns, nullptr, &aProfile);
   } else if (remoteTypePrefix == WITH_COOP_COEP_REMOTE_TYPE) {
+    // The profiler can sanitize out the eTLD+1
+    nsDependentCSubstring etld =
+        Substring(aRemoteType, WITH_COOP_COEP_REMOTE_TYPE.Length() + 1);
 #ifdef NIGHTLY_BUILD
-    SetProcessName("WebCOOP+COEP Content"_ns, nullptr, &aProfile);
+    SetProcessName("WebCOOP+COEP Content"_ns, &etld, &aProfile);
 #else
-    SetProcessName("Isolated Web Content"_ns, nullptr,
+    SetProcessName("Isolated Web Content"_ns, &etld,
                    &aProfile);  // to avoid confusing people
 #endif
   } else if (remoteTypePrefix == FISSION_WEB_REMOTE_TYPE) {
@@ -2715,9 +2725,9 @@ mozilla::ipc::IPCResult ContentChild::RecvInitBlobURLs(
     RefPtr<BlobImpl> blobImpl = IPCBlobUtils::Deserialize(registration.blob());
     MOZ_ASSERT(blobImpl);
 
-    BlobURLProtocolHandler::AddDataEntry(
-        registration.url(), registration.principal(),
-        registration.agentClusterId(), blobImpl);
+    BlobURLProtocolHandler::AddDataEntry(registration.url(),
+                                         registration.principal(),
+                                         registration.partitionKey(), blobImpl);
     // If we have received an already-revoked blobURL, we have to keep it alive
     // for a while (see BlobURLProtocolHandler) in order to support pending
     // operations such as navigation, download and so on.
@@ -2757,15 +2767,6 @@ mozilla::ipc::IPCResult ContentChild::RecvLastPrivateDocShellDestroyed() {
   return IPC_OK();
 }
 
-// Method used for setting QoS levels on background main threads.
-#ifdef XP_MACOSX
-static bool PriorityUsesLowPowerMainThread(
-    const hal::ProcessPriority& aPriority) {
-  return aPriority == hal::PROCESS_PRIORITY_BACKGROUND ||
-         aPriority == hal::PROCESS_PRIORITY_PREALLOC;
-}
-#endif
-
 mozilla::ipc::IPCResult ContentChild::RecvNotifyProcessPriorityChanged(
     const hal::ProcessPriority& aPriority) {
   nsCOMPtr<nsIObserverService> os = services::GetObserverService();
@@ -2787,23 +2788,7 @@ mozilla::ipc::IPCResult ContentChild::RecvNotifyProcessPriorityChanged(
     glean::RecordPowerMetrics();
   }
 
-#ifdef XP_MACOSX
-  // In cases where we have low-power threads enabled (such as on MacOS) we can
-  // go ahead and put the main thread in the background here. If the new
-  // priority is the background priority, we can tell the OS to put the main
-  // thread on low-power cores. Alternately, if we are changing from the
-  // background to a higher priority, we change the main thread back to the
-  // |user-interactive| state, defined in MacOS's QoS documentation as reserved
-  // for main threads.
-  if (StaticPrefs::threads_use_low_power_enabled() &&
-      StaticPrefs::threads_lower_mainthread_priority_in_background_enabled()) {
-    if (PriorityUsesLowPowerMainThread(aPriority)) {
-      pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
-    } else if (PriorityUsesLowPowerMainThread(mProcessPriority)) {
-      pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-    }
-  }
-#endif
+  ConfigureThreadPerformanceHints(aPriority);
 
   mProcessPriority = aPriority;
 
@@ -3315,11 +3300,11 @@ ContentChild::RecvNotifyPushSubscriptionModifiedObservers(
 
 mozilla::ipc::IPCResult ContentChild::RecvBlobURLRegistration(
     const nsCString& aURI, const IPCBlob& aBlob, nsIPrincipal* aPrincipal,
-    const Maybe<nsID>& aAgentClusterId) {
+    const nsCString& aPartitionKey) {
   RefPtr<BlobImpl> blobImpl = IPCBlobUtils::Deserialize(aBlob);
   MOZ_ASSERT(blobImpl);
 
-  BlobURLProtocolHandler::AddDataEntry(aURI, aPrincipal, aAgentClusterId,
+  BlobURLProtocolHandler::AddDataEntry(aURI, aPrincipal, aPartitionKey,
                                        blobImpl);
   return IPC_OK();
 }
@@ -3417,16 +3402,6 @@ PURLClassifierLocalChild* ContentChild::AllocPURLClassifierLocalChild(
 
 bool ContentChild::DeallocPURLClassifierLocalChild(
     PURLClassifierLocalChild* aActor) {
-  MOZ_ASSERT(aActor);
-  delete aActor;
-  return true;
-}
-
-PLoginReputationChild* ContentChild::AllocPLoginReputationChild(nsIURI* aUri) {
-  return new PLoginReputationChild();
-}
-
-bool ContentChild::DeallocPLoginReputationChild(PLoginReputationChild* aActor) {
   MOZ_ASSERT(aActor);
   delete aActor;
   return true;
@@ -4308,14 +4283,10 @@ mozilla::ipc::IPCResult ContentChild::RecvScriptError(
 }
 
 mozilla::ipc::IPCResult ContentChild::RecvReportFrameTimingData(
-    const mozilla::Maybe<LoadInfoArgs>& loadInfoArgs, const nsString& entryName,
+    const LoadInfoArgs& loadInfoArgs, const nsString& entryName,
     const nsString& initiatorType, UniquePtr<PerformanceTimingData>&& aData) {
   if (!aData) {
     return IPC_FAIL(this, "aData should not be null");
-  }
-
-  if (loadInfoArgs.isNothing()) {
-    return IPC_FAIL(this, "loadInfoArgs should not be null");
   }
 
   nsCOMPtr<nsILoadInfo> loadInfo;
@@ -4344,7 +4315,7 @@ mozilla::ipc::IPCResult ContentChild::RecvLoadURI(
   if (aContext.IsNullOrDiscarded()) {
     return IPC_OK();
   }
-  BrowsingContext* context = aContext.get();
+  RefPtr<BrowsingContext> context = aContext.get();
   if (!context->IsInProcess()) {
     // The DocShell has been torn down or the BrowsingContext has changed
     // process in the middle of the load request. There's not much we can do at
@@ -4390,7 +4361,7 @@ mozilla::ipc::IPCResult ContentChild::RecvInternalLoad(
   if (aLoadState->TargetBrowsingContext().IsDiscarded()) {
     return IPC_OK();
   }
-  BrowsingContext* context = aLoadState->TargetBrowsingContext().get();
+  RefPtr<BrowsingContext> context = aLoadState->TargetBrowsingContext().get();
 
   context->InternalLoad(aLoadState);
 
@@ -4420,7 +4391,7 @@ mozilla::ipc::IPCResult ContentChild::RecvDisplayLoadError(
   if (aContext.IsNullOrDiscarded()) {
     return IPC_OK();
   }
-  BrowsingContext* context = aContext.get();
+  RefPtr<BrowsingContext> context = aContext.get();
 
   context->DisplayLoadError(aURI);
 
@@ -4533,7 +4504,7 @@ mozilla::ipc::IPCResult ContentChild::RecvGoBack(
   }
   BrowsingContext* bc = aContext.get();
 
-  if (auto* docShell = nsDocShell::Cast(bc->GetDocShell())) {
+  if (RefPtr<nsDocShell> docShell = nsDocShell::Cast(bc->GetDocShell())) {
     if (aCancelContentJSEpoch) {
       docShell->SetCancelContentJSEpoch(*aCancelContentJSEpoch);
     }
@@ -4556,7 +4527,7 @@ mozilla::ipc::IPCResult ContentChild::RecvGoForward(
   }
   BrowsingContext* bc = aContext.get();
 
-  if (auto* docShell = nsDocShell::Cast(bc->GetDocShell())) {
+  if (RefPtr<nsDocShell> docShell = nsDocShell::Cast(bc->GetDocShell())) {
     if (aCancelContentJSEpoch) {
       docShell->SetCancelContentJSEpoch(*aCancelContentJSEpoch);
     }
@@ -4578,7 +4549,7 @@ mozilla::ipc::IPCResult ContentChild::RecvGoToIndex(
   }
   BrowsingContext* bc = aContext.get();
 
-  if (auto* docShell = nsDocShell::Cast(bc->GetDocShell())) {
+  if (RefPtr<nsDocShell> docShell = nsDocShell::Cast(bc->GetDocShell())) {
     if (aCancelContentJSEpoch) {
       docShell->SetCancelContentJSEpoch(*aCancelContentJSEpoch);
     }
@@ -4600,7 +4571,7 @@ mozilla::ipc::IPCResult ContentChild::RecvReload(
   }
   BrowsingContext* bc = aContext.get();
 
-  if (auto* docShell = nsDocShell::Cast(bc->GetDocShell())) {
+  if (RefPtr<nsDocShell> docShell = nsDocShell::Cast(bc->GetDocShell())) {
     docShell->Reload(aReloadFlags);
   }
 
@@ -4714,6 +4685,96 @@ IPCResult ContentChild::RecvUpdateMediaCodecsSupported(
   RemoteDecoderManagerChild::SetSupported(aLocation, aSupported);
 
   return IPC_OK();
+}
+
+void ContentChild::ConfigureThreadPerformanceHints(
+    const hal::ProcessPriority& aPriority) {
+  if (aPriority >= hal::PROCESS_PRIORITY_FOREGROUND) {
+    static bool canUsePerformanceHintSession = true;
+    if (!mPerformanceHintSession && canUsePerformanceHintSession) {
+      nsTArray<PlatformThreadHandle> threads;
+      Servo_ThreadPool_GetThreadHandles(&threads);
+#ifdef XP_WIN
+      threads.AppendElement(GetCurrentThread());
+#else
+      threads.AppendElement(pthread_self());
+#endif
+
+      mPerformanceHintSession = hal::CreatePerformanceHintSession(
+          threads, GetPerformanceHintTarget(TimeDuration::FromMilliseconds(
+                       nsRefreshDriver::DefaultInterval())));
+
+      // Avoid repeatedly attempting to create a session if it is not
+      // supported.
+      canUsePerformanceHintSession = mPerformanceHintSession != nullptr;
+    }
+
+#ifdef MOZ_WIDGET_ANDROID
+    // On Android if we are unable to use PerformanceHintManager then fall back
+    // to setting the stylo threads' affinities to the performant cores. Android
+    // automatically sets each thread's affinity to all cores when a process is
+    // foregrounded, and to a subset of cores when the process is backgrounded.
+    // We must therefore override this each time the process is foregrounded,
+    // but we don't have to do anything when backgrounded.
+    if (!mPerformanceHintSession) {
+      if (const auto& cpuInfo = hal::GetHeterogeneousCpuInfo()) {
+        // If CPUs are homogeneous there is no point setting affinity.
+        if (cpuInfo->mBigCpus.Count() != cpuInfo->mTotalNumCpus) {
+          BitSet<hal::HeterogeneousCpuInfo::MAX_CPUS> cpus = cpuInfo->mBigCpus;
+          if (cpus.Count() < 2) {
+            // From testing on a variety of devices it appears using only the
+            // big cores gives best performance when there are 2 or more big
+            // cores. If there are fewer than 2 big cores then additionally
+            // using the medium cores performs better.
+            cpus |= cpuInfo->mMediumCpus;
+          }
+
+          static_assert(
+              hal::HeterogeneousCpuInfo::MAX_CPUS <= CPU_SETSIZE,
+              "HeterogeneousCpuInfo::MAX_CPUS is too large for CPU_SETSIZE");
+
+          cpu_set_t cpuset;
+          CPU_ZERO(&cpuset);
+          for (size_t i = 0; i < cpuInfo->mTotalNumCpus; i++) {
+            if (cpus.Test(i)) {
+              CPU_SET(i, &cpuset);
+            }
+          }
+
+          // Only set the affinity for the stylo threads, not the main thread.
+          // Testing showed no difference in performance between the two
+          // options, and as newly spawned threads automatically inherit their
+          // parent's affinity mask there may be unintended consequences to
+          // setting the main thread affinity.
+          nsTArray<PlatformThreadHandle> threads;
+          Servo_ThreadPool_GetThreadHandles(&threads);
+          for (pthread_t thread : threads) {
+            int ret = sched_setaffinity(pthread_gettid_np(thread),
+                                        sizeof(cpu_set_t), &cpuset);
+            // Occasionally sched_setaffinity fails, presumably due to a race
+            // between us receiving the process foreground signal and whatever
+            // is responsible for restricting which processes can use certain
+            // cores. Trying again in a runnable seems to do the trick, but if
+            // that still fails it's not the end of the world.
+            if (ret < 0) {
+              NS_DispatchToCurrentThread(NS_NewRunnableFunction(
+                  "ContentChild::ConfigureThreadPerformanceHints",
+                  [threads = std::move(threads), cpuset] {
+                    for (pthread_t thread : threads) {
+                      sched_setaffinity(pthread_gettid_np(thread),
+                                        sizeof(cpu_set_t), &cpuset);
+                    }
+                  }));
+              break;
+            }
+          }
+        }
+      }
+    }
+#endif
+  } else {
+    mPerformanceHintSession = nullptr;
+  }
 }
 
 }  // namespace dom

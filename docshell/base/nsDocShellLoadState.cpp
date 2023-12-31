@@ -7,11 +7,13 @@
 #include "nsDocShellLoadState.h"
 #include "nsIDocShell.h"
 #include "nsDocShell.h"
+#include "nsIProtocolHandler.h"
 #include "nsISHEntry.h"
 #include "nsIURIFixup.h"
 #include "nsIWebNavigation.h"
 #include "nsIChannel.h"
 #include "nsIURLQueryStringStripper.h"
+#include "nsIXULRuntime.h"
 #include "nsNetUtil.h"
 #include "nsQueryObject.h"
 #include "ReferrerInfo.h"
@@ -60,7 +62,7 @@ nsDocShellLoadState::nsDocShellLoadState(
   mInheritPrincipal = aLoadState.InheritPrincipal();
   mPrincipalIsExplicit = aLoadState.PrincipalIsExplicit();
   mForceAllowDataURI = aLoadState.ForceAllowDataURI();
-  mIsExemptFromHTTPSOnlyMode = aLoadState.IsExemptFromHTTPSOnlyMode();
+  mIsExemptFromHTTPSFirstMode = aLoadState.IsExemptFromHTTPSFirstMode();
   mOriginalFrameSrc = aLoadState.OriginalFrameSrc();
   mIsFormSubmission = aLoadState.IsFormSubmission();
   mLoadType = aLoadState.LoadType();
@@ -84,7 +86,10 @@ nsDocShellLoadState::nsDocShellLoadState(
   mPrincipalToInherit = aLoadState.PrincipalToInherit();
   mPartitionedPrincipalToInherit = aLoadState.PartitionedPrincipalToInherit();
   mTriggeringSandboxFlags = aLoadState.TriggeringSandboxFlags();
+  mTriggeringWindowId = aLoadState.TriggeringWindowId();
+  mTriggeringStorageAccess = aLoadState.TriggeringStorageAccess();
   mTriggeringRemoteType = aLoadState.TriggeringRemoteType();
+  mWasSchemelessInput = aLoadState.WasSchemelessInput();
   mCsp = aLoadState.Csp();
   mOriginalURIString = aLoadState.OriginalURIString();
   mCancelContentJSEpoch = aLoadState.CancelContentJSEpoch();
@@ -148,6 +153,8 @@ nsDocShellLoadState::nsDocShellLoadState(const nsDocShellLoadState& aOther)
       mResultPrincipalURIIsSome(aOther.mResultPrincipalURIIsSome),
       mTriggeringPrincipal(aOther.mTriggeringPrincipal),
       mTriggeringSandboxFlags(aOther.mTriggeringSandboxFlags),
+      mTriggeringWindowId(aOther.mTriggeringWindowId),
+      mTriggeringStorageAccess(aOther.mTriggeringStorageAccess),
       mCsp(aOther.mCsp),
       mKeepResultPrincipalURIIfSet(aOther.mKeepResultPrincipalURIIfSet),
       mLoadReplace(aOther.mLoadReplace),
@@ -157,7 +164,7 @@ nsDocShellLoadState::nsDocShellLoadState(const nsDocShellLoadState& aOther)
       mPrincipalToInherit(aOther.mPrincipalToInherit),
       mPartitionedPrincipalToInherit(aOther.mPartitionedPrincipalToInherit),
       mForceAllowDataURI(aOther.mForceAllowDataURI),
-      mIsExemptFromHTTPSOnlyMode(aOther.mIsExemptFromHTTPSOnlyMode),
+      mIsExemptFromHTTPSFirstMode(aOther.mIsExemptFromHTTPSFirstMode),
       mOriginalFrameSrc(aOther.mOriginalFrameSrc),
       mIsFormSubmission(aOther.mIsFormSubmission),
       mLoadType(aOther.mLoadType),
@@ -186,7 +193,8 @@ nsDocShellLoadState::nsDocShellLoadState(const nsDocShellLoadState& aOther)
       mWasCreatedRemotely(aOther.mWasCreatedRemotely),
       mUnstrippedURI(aOther.mUnstrippedURI),
       mRemoteTypeOverride(aOther.mRemoteTypeOverride),
-      mTriggeringRemoteType(aOther.mTriggeringRemoteType) {
+      mTriggeringRemoteType(aOther.mTriggeringRemoteType),
+      mWasSchemelessInput(aOther.mWasSchemelessInput) {
   MOZ_DIAGNOSTIC_ASSERT(
       XRE_IsParentProcess(),
       "Cloning a nsDocShellLoadState with the same load identifier is only "
@@ -202,17 +210,18 @@ nsDocShellLoadState::nsDocShellLoadState(nsIURI* aURI, uint64_t aLoadIdentifier)
     : mURI(aURI),
       mResultPrincipalURIIsSome(false),
       mTriggeringSandboxFlags(0),
+      mTriggeringWindowId(0),
+      mTriggeringStorageAccess(false),
       mKeepResultPrincipalURIIfSet(false),
       mLoadReplace(false),
       mInheritPrincipal(false),
       mPrincipalIsExplicit(false),
       mNotifiedBeforeUnloadListeners(false),
       mForceAllowDataURI(false),
-      mIsExemptFromHTTPSOnlyMode(false),
+      mIsExemptFromHTTPSFirstMode(false),
       mOriginalFrameSrc(false),
       mIsFormSubmission(false),
       mLoadType(LOAD_NORMAL),
-      mTarget(),
       mSrcdocData(VoidString()),
       mLoadFlags(0),
       mInternalLoadFlags(0),
@@ -228,7 +237,8 @@ nsDocShellLoadState::nsDocShellLoadState(nsIURI* aURI, uint64_t aLoadIdentifier)
       mWasCreatedRemotely(false),
       mTriggeringRemoteType(XRE_IsContentProcess()
                                 ? ContentChild::GetSingleton()->GetRemoteType()
-                                : NOT_REMOTE_TYPE) {
+                                : NOT_REMOTE_TYPE),
+      mWasSchemelessInput(false) {
   MOZ_ASSERT(aURI, "Cannot create a LoadState with a null URI!");
 }
 
@@ -441,6 +451,9 @@ nsresult nsDocShellLoadState::CreateFromLoadURIOptions(
   loadState->SetHasValidUserGestureActivation(
       aLoadURIOptions.mHasValidUserGestureActivation);
   loadState->SetTriggeringSandboxFlags(aLoadURIOptions.mTriggeringSandboxFlags);
+  loadState->SetTriggeringWindowId(aLoadURIOptions.mTriggeringWindowId);
+  loadState->SetTriggeringStorageAccess(
+      aLoadURIOptions.mTriggeringStorageAccess);
   loadState->SetPostDataStream(postData);
   loadState->SetHeadersStream(aLoadURIOptions.mHeaders);
   loadState->SetBaseURI(aLoadURIOptions.mBaseURI);
@@ -466,6 +479,8 @@ nsresult nsDocShellLoadState::CreateFromLoadURIOptions(
     loadState->SetRemoteTypeOverride(
         aLoadURIOptions.mRemoteTypeOverride.Value());
   }
+
+  loadState->SetWasSchemelessInput(aLoadURIOptions.mWasSchemelessInput);
 
   loadState.forget(aResult);
   return NS_OK;
@@ -560,6 +575,23 @@ uint32_t nsDocShellLoadState::TriggeringSandboxFlags() const {
   return mTriggeringSandboxFlags;
 }
 
+void nsDocShellLoadState::SetTriggeringWindowId(uint64_t aTriggeringWindowId) {
+  mTriggeringWindowId = aTriggeringWindowId;
+}
+
+uint64_t nsDocShellLoadState::TriggeringWindowId() const {
+  return mTriggeringWindowId;
+}
+
+void nsDocShellLoadState::SetTriggeringStorageAccess(
+    bool aTriggeringStorageAccess) {
+  mTriggeringStorageAccess = aTriggeringStorageAccess;
+}
+
+bool nsDocShellLoadState::TriggeringStorageAccess() const {
+  return mTriggeringStorageAccess;
+}
+
 bool nsDocShellLoadState::InheritPrincipal() const { return mInheritPrincipal; }
 
 void nsDocShellLoadState::SetInheritPrincipal(bool aInheritPrincipal) {
@@ -591,13 +623,13 @@ void nsDocShellLoadState::SetForceAllowDataURI(bool aForceAllowDataURI) {
   mForceAllowDataURI = aForceAllowDataURI;
 }
 
-bool nsDocShellLoadState::IsExemptFromHTTPSOnlyMode() const {
-  return mIsExemptFromHTTPSOnlyMode;
+bool nsDocShellLoadState::IsExemptFromHTTPSFirstMode() const {
+  return mIsExemptFromHTTPSFirstMode;
 }
 
-void nsDocShellLoadState::SetIsExemptFromHTTPSOnlyMode(
-    bool aIsExemptFromHTTPSOnlyMode) {
-  mIsExemptFromHTTPSOnlyMode = aIsExemptFromHTTPSOnlyMode;
+void nsDocShellLoadState::SetIsExemptFromHTTPSFirstMode(
+    bool aIsExemptFromHTTPSFirstMode) {
+  mIsExemptFromHTTPSFirstMode = aIsExemptFromHTTPSFirstMode;
 }
 
 bool nsDocShellLoadState::OriginalFrameSrc() const { return mOriginalFrameSrc; }
@@ -886,6 +918,30 @@ void nsDocShellLoadState::SetTriggeringRemoteType(
   MOZ_DIAGNOSTIC_ASSERT(XRE_IsParentProcess(), "only settable in parent");
   mTriggeringRemoteType = aTriggeringRemoteType;
 }
+
+#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
+void nsDocShellLoadState::AssertProcessCouldTriggerLoadIfSystem() {
+  // Early check to see if we're trying to start a file URI load with a system
+  // principal within a web content process.
+  // If this assertion fails, the load will fail later during
+  // nsContentSecurityManager checks, however this assertion should happen
+  // closer to whichever caller is triggering the system-principal load.
+  if (mozilla::SessionHistoryInParent() &&
+      TriggeringPrincipal()->IsSystemPrincipal() &&
+      mozilla::dom::IsWebRemoteType(GetEffectiveTriggeringRemoteType())) {
+    bool localFile = false;
+    if (NS_SUCCEEDED(NS_URIChainHasFlags(
+            URI(), nsIProtocolHandler::URI_IS_LOCAL_FILE, &localFile)) &&
+        localFile) {
+      NS_WARNING(nsPrintfCString("Unexpected system load of file URI (%s) from "
+                                 "web content process",
+                                 URI()->GetSpecOrDefault().get())
+                     .get());
+      MOZ_CRASH("Unexpected system load of file URI from web content process");
+    }
+  }
+}
+#endif
 
 nsresult nsDocShellLoadState::SetupInheritingPrincipal(
     BrowsingContext::Type aType,
@@ -1204,7 +1260,7 @@ DocShellLoadStateInit nsDocShellLoadState::Serialize(
   loadState.InheritPrincipal() = mInheritPrincipal;
   loadState.PrincipalIsExplicit() = mPrincipalIsExplicit;
   loadState.ForceAllowDataURI() = mForceAllowDataURI;
-  loadState.IsExemptFromHTTPSOnlyMode() = mIsExemptFromHTTPSOnlyMode;
+  loadState.IsExemptFromHTTPSFirstMode() = mIsExemptFromHTTPSFirstMode;
   loadState.OriginalFrameSrc() = mOriginalFrameSrc;
   loadState.IsFormSubmission() = mIsFormSubmission;
   loadState.LoadType() = mLoadType;
@@ -1227,7 +1283,10 @@ DocShellLoadStateInit nsDocShellLoadState::Serialize(
   loadState.PrincipalToInherit() = mPrincipalToInherit;
   loadState.PartitionedPrincipalToInherit() = mPartitionedPrincipalToInherit;
   loadState.TriggeringSandboxFlags() = mTriggeringSandboxFlags;
+  loadState.TriggeringWindowId() = mTriggeringWindowId;
+  loadState.TriggeringStorageAccess() = mTriggeringStorageAccess;
   loadState.TriggeringRemoteType() = mTriggeringRemoteType;
+  loadState.WasSchemelessInput() = mWasSchemelessInput;
   loadState.Csp() = mCsp;
   loadState.OriginalURIString() = mOriginalURIString;
   loadState.CancelContentJSEpoch() = mCancelContentJSEpoch;

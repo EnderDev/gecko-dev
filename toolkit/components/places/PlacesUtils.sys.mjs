@@ -18,11 +18,11 @@ ChromeUtils.defineESModuleGetters(lazy, {
   Sqlite: "resource://gre/modules/Sqlite.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "MOZ_ACTION_REGEX", () => {
+ChromeUtils.defineLazyGetter(lazy, "MOZ_ACTION_REGEX", () => {
   return /^moz-action:([^,]+),(.*)$/;
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "gCryptoHash", () => {
+ChromeUtils.defineLazyGetter(lazy, "gCryptoHash", () => {
   return Cc["@mozilla.org/security/hash;1"].createInstance(Ci.nsICryptoHash);
 });
 
@@ -1671,7 +1671,15 @@ export var PlacesUtils = {
                 descendants.guid, b2.position, b2.title, b2.dateAdded,
                 b2.lastModified
          FROM moz_bookmarks b2
-         JOIN descendants ON b2.parent = descendants.id AND b2.id <> :tags_folder)
+         JOIN descendants ON b2.parent = descendants.id AND b2.id <> :tags_folder),
+       tagged(place_id, tags) AS (
+         SELECT b.fk, group_concat(p.title)
+         FROM moz_bookmarks b
+         JOIN moz_bookmarks p ON p.id = b.parent
+         JOIN moz_bookmarks g ON g.id = p.parent
+         WHERE g.guid = '${PlacesUtils.bookmarks.tagsGuid}'
+         GROUP BY b.fk
+       )
        SELECT d.level, d.id, d.guid, d.parent, d.parentGuid, d.type,
               d.position AS [index], IFNULL(d.title, '') AS title, d.dateAdded,
               d.lastModified, h.url, (SELECT icon_url FROM moz_icons i
@@ -1679,11 +1687,7 @@ export var PlacesUtils = {
                       JOIN moz_pages_w_icons pi ON page_id = pi.id
                       WHERE pi.page_url_hash = hash(h.url) AND pi.page_url = h.url
                       ORDER BY width DESC LIMIT 1) AS iconUri,
-              (SELECT GROUP_CONCAT(t.title, ',')
-               FROM moz_bookmarks b2
-               JOIN moz_bookmarks t ON t.id = +b2.parent AND t.parent = :tags_folder
-               WHERE b2.fk = h.id
-              ) AS tags,
+              (SELECT tags FROM tagged WHERE place_id = h.id) AS tags,
               (SELECT a.content FROM moz_annos a
                JOIN moz_anno_attributes n ON a.anno_attribute_id = n.id
                WHERE place_id = h.id AND n.name = :charset_anno
@@ -1876,7 +1880,6 @@ export var PlacesUtils = {
         frecency: url.protocol == "place:" ? 0 : -1,
       }
     );
-    await db.executeCached("DELETE FROM moz_updateoriginsinsert_temp");
   },
 
   /**
@@ -1906,7 +1909,6 @@ export var PlacesUtils = {
         maybeguid: this.history.makeGuid(),
       }))
     );
-    await db.executeCached("DELETE FROM moz_updateoriginsinsert_temp");
   },
 
   /**
@@ -1948,7 +1950,7 @@ export var PlacesUtils = {
   },
 };
 
-XPCOMUtils.defineLazyGetter(PlacesUtils, "history", function () {
+ChromeUtils.defineLazyGetter(PlacesUtils, "history", function () {
   let hs = Cc["@mozilla.org/browser/nav-history-service;1"].getService(
     Ci.nsINavHistoryService
   );
@@ -1994,7 +1996,7 @@ XPCOMUtils.defineLazyServiceGetter(
   "@mozilla.org/browser/nav-bookmarks-service;1",
   "nsINavBookmarksService"
 );
-XPCOMUtils.defineLazyGetter(PlacesUtils, "bookmarks", () => {
+ChromeUtils.defineLazyGetter(PlacesUtils, "bookmarks", () => {
   return Object.freeze(
     new Proxy(lazy.Bookmarks, {
       get: (target, name) =>
@@ -2012,13 +2014,13 @@ XPCOMUtils.defineLazyServiceGetter(
   "nsITaggingService"
 );
 
-XPCOMUtils.defineLazyGetter(lazy, "bundle", function () {
+ChromeUtils.defineLazyGetter(lazy, "bundle", function () {
   const PLACES_STRING_BUNDLE_URI = "chrome://places/locale/places.properties";
   return Services.strings.createBundle(PLACES_STRING_BUNDLE_URI);
 });
 
 // This is just used as a reasonably-random value for copy & paste / drag operations.
-XPCOMUtils.defineLazyGetter(PlacesUtils, "instanceId", () => {
+ChromeUtils.defineLazyGetter(PlacesUtils, "instanceId", () => {
   return PlacesUtils.history.makeGuid();
 });
 
@@ -2079,7 +2081,7 @@ function setupDbForShutdown(conn, name) {
   }
 }
 
-XPCOMUtils.defineLazyGetter(lazy, "gAsyncDBConnPromised", () =>
+ChromeUtils.defineLazyGetter(lazy, "gAsyncDBConnPromised", () =>
   lazy.Sqlite.cloneStorageConnection({
     connection: PlacesUtils.history.DBConnection,
     readOnly: true,
@@ -2091,7 +2093,7 @@ XPCOMUtils.defineLazyGetter(lazy, "gAsyncDBConnPromised", () =>
     .catch(console.error)
 );
 
-XPCOMUtils.defineLazyGetter(lazy, "gAsyncDBWrapperPromised", () =>
+ChromeUtils.defineLazyGetter(lazy, "gAsyncDBWrapperPromised", () =>
   lazy.Sqlite.wrapStorageConnection({
     connection: PlacesUtils.history.DBConnection,
   })
@@ -2103,7 +2105,7 @@ XPCOMUtils.defineLazyGetter(lazy, "gAsyncDBWrapperPromised", () =>
 );
 
 var gAsyncDBLargeCacheConnDeferred = PromiseUtils.defer();
-XPCOMUtils.defineLazyGetter(lazy, "gAsyncDBLargeCacheConnPromised", () =>
+ChromeUtils.defineLazyGetter(lazy, "gAsyncDBLargeCacheConnPromised", () =>
   lazy.Sqlite.cloneStorageConnection({
     connection: PlacesUtils.history.DBConnection,
     readOnly: true,
@@ -2183,7 +2185,19 @@ PlacesUtils.metadata = {
    */
   set(key, value) {
     return PlacesUtils.withConnectionWrapper("PlacesUtils.metadata.set", db =>
-      this.setWithConnection(db, key, value)
+      this.setWithConnection(db, new Map([[key, value]]))
+    );
+  },
+
+  /**
+   * Sets the value for multiple keys.
+   *
+   * @param {Map} pairs
+   *        The metadata keys to update, with their value.
+   */
+  setMany(pairs) {
+    return PlacesUtils.withConnectionWrapper("PlacesUtils.metadata.set", db =>
+      this.setWithConnection(db, pairs)
     );
   },
 
@@ -2248,28 +2262,45 @@ PlacesUtils.metadata = {
     return value;
   },
 
-  async setWithConnection(db, key, value) {
-    if (value === null) {
-      await this.deleteWithConnection(db, key);
-      return;
+  async setWithConnection(db, pairs) {
+    let entriesToSet = [];
+    let keysToDelete = Array.from(pairs.entries())
+      .filter(([key, value]) => {
+        if (value !== null) {
+          entriesToSet.push({ key: this.canonicalizeKey(key), value });
+          return false;
+        }
+        return true;
+      })
+      .map(([key, value]) => key);
+    if (keysToDelete.length) {
+      await this.deleteWithConnection(db, ...keysToDelete);
+      if (keysToDelete.length == pairs.size) {
+        return;
+      }
     }
 
-    let cacheValue = value;
-    if (
-      typeof value == "object" &&
-      ChromeUtils.getClassName(value) != "Uint8Array"
-    ) {
-      value = this.jsonPrefix + this._base64Encode(JSON.stringify(value));
-    }
-
-    key = this.canonicalizeKey(key);
+    // Generate key{i}, value{i} pairs for the SQL bindings.
+    let params = entriesToSet.reduce((accumulator, { key, value }, i) => {
+      accumulator[`key${i}`] = key;
+      // Convert Objects to base64 JSON urls.
+      accumulator[`value${i}`] =
+        typeof value == "object" &&
+        ChromeUtils.getClassName(value) != "Uint8Array"
+          ? this.jsonPrefix + this._base64Encode(JSON.stringify(value))
+          : value;
+      return accumulator;
+    }, {});
     await db.executeCached(
-      `
-      REPLACE INTO moz_meta (key, value)
-      VALUES (:key, :value)`,
-      { key, value }
+      "REPLACE INTO moz_meta (key, value) VALUES " +
+        entriesToSet.map((e, i) => `(:key${i}, :value${i})`).join(),
+      params
     );
-    this.cache.set(key, cacheValue);
+
+    // Update the cache.
+    entriesToSet.forEach(({ key, value }) => {
+      this.cache.set(key, value);
+    });
   },
 
   async deleteWithConnection(db, ...keys) {

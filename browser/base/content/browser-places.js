@@ -55,6 +55,7 @@ var StarUI = {
     delete this.panel;
     this._createPanelIfNeeded();
     var element = this._element("editBookmarkPanel");
+    window.ensureCustomElements("moz-button-group");
     // initially the panel is hidden
     // to avoid impacting startup / new window performance
     element.hidden = false;
@@ -552,17 +553,19 @@ var PlacesCommandHook = {
   },
 
   async searchBookmarks() {
-    let win = BrowserWindowTracker.getTopWindow();
-    if (!win) {
-      win = await BrowserUIUtils.openNewBrowserWindow();
-    }
+    let win =
+      BrowserWindowTracker.getTopWindow() ??
+      (await BrowserWindowTracker.promiseOpenWindow());
     win.gURLBar.search(UrlbarTokenizer.RESTRICT.BOOKMARK, {
       searchModeEntry: "bookmarkmenu",
     });
   },
 
-  searchHistory() {
-    gURLBar.search(UrlbarTokenizer.RESTRICT.HISTORY, {
+  async searchHistory() {
+    let win =
+      BrowserWindowTracker.getTopWindow() ??
+      (await BrowserWindowTracker.promiseOpenWindow());
+    win.gURLBar.search(UrlbarTokenizer.RESTRICT.HISTORY, {
       searchModeEntry: "historymenu",
     });
   },
@@ -590,15 +593,6 @@ class HistoryMenu extends PlacesMenu {
     }
   }
 
-  _getClosedTabCount() {
-    try {
-      return SessionStore.getClosedTabCountForWindow(window);
-    } catch (ex) {
-      // SessionStore doesn't track the hidden window, so just return zero then.
-      return 0;
-    }
-  }
-
   toggleHiddenTabs() {
     const isShown =
       window.gBrowser && gBrowser.visibleTabs.length < gBrowser.tabs.length;
@@ -608,7 +602,7 @@ class HistoryMenu extends PlacesMenu {
   toggleRecentlyClosedTabs() {
     // enable/disable the Recently Closed Tabs sub menu
     // no restorable tabs, so disable menu
-    if (this._getClosedTabCount() == 0) {
+    if (SessionStore.getClosedTabCount() == 0) {
       this.undoTabMenu.setAttribute("disabled", true);
     } else {
       this.undoTabMenu.removeAttribute("disabled");
@@ -627,7 +621,7 @@ class HistoryMenu extends PlacesMenu {
     }
 
     // no restorable tabs, so make sure menu is disabled, and return
-    if (this._getClosedTabCount() == 0) {
+    if (SessionStore.getClosedTabCount() == 0) {
       this.undoTabMenu.setAttribute("disabled", true);
       return;
     }
@@ -812,6 +806,8 @@ var BookmarksEventHandler = {
       // Call onCommand in the cases where it's not called automatically:
       // Middle-clicks outside of menus.
       this.onCommand(aEvent);
+      aEvent.preventDefault();
+      aEvent.stopPropagation();
     }
   },
 
@@ -1412,7 +1408,10 @@ var BookmarkingUI = {
     );
   },
 
-  isOnNewTabPage({ currentURI }) {
+  isOnNewTabPage(uri) {
+    if (!uri) {
+      return false;
+    }
     // Prevent loading AboutNewTab.sys.mjs during startup path if it
     // is only the newTabURL getter we are interested in.
     let newTabURL = Cu.isESModuleLoaded(
@@ -1427,12 +1426,28 @@ var BookmarkingUI = {
     if (newTabURL == "about:blank") {
       newTabURL = "about:newtab";
     }
-    let newTabURLs = [newTabURL, "about:home"];
+    let newTabURLs = [
+      newTabURL,
+      "about:home",
+      "chrome://browser/content/blanktab.html",
+    ];
     if (PrivateBrowsingUtils.isWindowPrivate(window)) {
       newTabURLs.push("about:privatebrowsing");
     }
-    return newTabURLs.some(uri => currentURI?.spec.startsWith(uri));
+    return newTabURLs.some(newTabUriString =>
+      this._newTabURI(newTabUriString)?.equalsExceptRef(uri)
+    );
   },
+
+  _newTabURI(uriString) {
+    let uri = this._newTabURICache.get(uriString);
+    if (uri === undefined) {
+      uri = Services.io.newURI(uriString);
+      this._newTabURICache.set(uriString, uri);
+    }
+    return uri;
+  },
+  _newTabURICache: new Map(),
 
   buildBookmarksToolbarSubmenu(toolbar) {
     let alwaysShowMenuItem = document.createXULElement("menuitem");

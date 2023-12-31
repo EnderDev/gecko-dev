@@ -185,6 +185,8 @@ class HTMLSelectElement final : public nsGenericHTMLFormControlElementWithState,
   // via bindings.
   void SetCustomValidity(const nsAString& aError);
 
+  void ShowPicker(ErrorResult& aRv);
+
   using nsINode::Remove;
 
   // nsINode
@@ -213,8 +215,6 @@ class HTMLSelectElement final : public nsGenericHTMLFormControlElementWithState,
   NS_IMETHOD SubmitNamesValues(FormData* aFormData) override;
 
   void FieldSetDisabledChanged(bool aNotify) override;
-
-  ElementState IntrinsicState() const override;
 
   /**
    * To be called when stuff is added under a child of the select--but *before*
@@ -300,6 +300,7 @@ class HTMLSelectElement final : public nsGenericHTMLFormControlElementWithState,
                                 ValidityStateType aType) override;
 
   void UpdateValueMissingValidityState();
+  void UpdateValidityElementStates(bool aNotify) final;
   /**
    * Insert aElement before the node given by aBefore
    */

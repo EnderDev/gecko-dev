@@ -16,70 +16,181 @@
 
 import {Protocol} from 'devtools-protocol';
 
-import type {Browser, IsPageTargetCallback} from '../api/Browser.js';
+import type {Browser} from '../api/Browser.js';
 import type {BrowserContext} from '../api/BrowserContext.js';
 import {Page, PageEmittedEvents} from '../api/Page.js';
+import {Target, TargetType} from '../api/Target.js';
+import {Deferred} from '../util/Deferred.js';
 
-import {CDPSession} from './Connection.js';
+import {CDPSession, CDPSessionImpl} from './Connection.js';
 import {CDPPage} from './Page.js';
 import {Viewport} from './PuppeteerViewport.js';
 import {TargetManager} from './TargetManager.js';
 import {TaskQueue} from './TaskQueue.js';
+import {debugError} from './util.js';
 import {WebWorker} from './WebWorker.js';
 
 /**
- * Target represents a
- * {@link https://chromedevtools.github.io/devtools-protocol/tot/Target/ | CDP target}.
- * In CDP a target is something that can be debugged such a frame, a page or a
- * worker.
- *
- * @public
+ * @internal
  */
-export class Target {
-  #browserContext: BrowserContext;
+export enum InitializationStatus {
+  SUCCESS = 'success',
+  ABORTED = 'aborted',
+}
+
+/**
+ * @internal
+ */
+export class CDPTarget extends Target {
+  #browserContext?: BrowserContext;
   #session?: CDPSession;
   #targetInfo: Protocol.Target.TargetInfo;
-  #sessionFactory: (isAutoAttachEmulated: boolean) => Promise<CDPSession>;
-  #ignoreHTTPSErrors: boolean;
-  #defaultViewport?: Viewport;
-  #pagePromise?: Promise<Page>;
-  #workerPromise?: Promise<WebWorker>;
-  #screenshotTaskQueue: TaskQueue;
+  #targetManager?: TargetManager;
+  #sessionFactory:
+    | ((isAutoAttachEmulated: boolean) => Promise<CDPSession>)
+    | undefined;
 
-  /**
-   * @internal
-   */
-  _initializedPromise: Promise<boolean>;
-  /**
-   * @internal
-   */
-  _initializedCallback!: (x: boolean) => void;
-  /**
-   * @internal
-   */
-  _isClosedPromise: Promise<void>;
-  /**
-   * @internal
-   */
-  _closedCallback!: () => void;
-  /**
-   * @internal
-   */
-  _isInitialized: boolean;
-  /**
-   * @internal
-   */
+  _initializedDeferred = Deferred.create<InitializationStatus>();
+  _isClosedDeferred = Deferred.create<void>();
   _targetId: string;
-  /**
-   * @internal
-   */
-  _isPageTargetCallback: IsPageTargetCallback;
-
-  #targetManager: TargetManager;
 
   /**
+   * To initialize the target for use, call initialize.
+   *
    * @internal
    */
+  constructor(
+    targetInfo: Protocol.Target.TargetInfo,
+    session: CDPSession | undefined,
+    browserContext: BrowserContext | undefined,
+    targetManager: TargetManager | undefined,
+    sessionFactory:
+      | ((isAutoAttachEmulated: boolean) => Promise<CDPSession>)
+      | undefined
+  ) {
+    super();
+    this.#session = session;
+    this.#targetManager = targetManager;
+    this.#targetInfo = targetInfo;
+    this.#browserContext = browserContext;
+    this._targetId = targetInfo.targetId;
+    this.#sessionFactory = sessionFactory;
+    if (this.#session && this.#session instanceof CDPSessionImpl) {
+      this.#session._setTarget(this);
+    }
+  }
+
+  _subtype(): string | undefined {
+    return this.#targetInfo.subtype;
+  }
+
+  _session(): CDPSession | undefined {
+    return this.#session;
+  }
+
+  protected _sessionFactory(): (
+    isAutoAttachEmulated: boolean
+  ) => Promise<CDPSession> {
+    if (!this.#sessionFactory) {
+      throw new Error('sessionFactory is not initialized');
+    }
+    return this.#sessionFactory;
+  }
+
+  override createCDPSession(): Promise<CDPSession> {
+    if (!this.#sessionFactory) {
+      throw new Error('sessionFactory is not initialized');
+    }
+    return this.#sessionFactory(false).then(session => {
+      (session as CDPSessionImpl)._setTarget(this);
+      return session;
+    });
+  }
+
+  override url(): string {
+    return this.#targetInfo.url;
+  }
+
+  override type(): TargetType {
+    const type = this.#targetInfo.type;
+    switch (type) {
+      case 'page':
+        return TargetType.PAGE;
+      case 'background_page':
+        return TargetType.BACKGROUND_PAGE;
+      case 'service_worker':
+        return TargetType.SERVICE_WORKER;
+      case 'shared_worker':
+        return TargetType.SHARED_WORKER;
+      case 'browser':
+        return TargetType.BROWSER;
+      case 'webview':
+        return TargetType.WEBVIEW;
+      case 'tab':
+        return TargetType.TAB;
+      default:
+        return TargetType.OTHER;
+    }
+  }
+
+  _targetManager(): TargetManager {
+    if (!this.#targetManager) {
+      throw new Error('targetManager is not initialized');
+    }
+    return this.#targetManager;
+  }
+
+  _getTargetInfo(): Protocol.Target.TargetInfo {
+    return this.#targetInfo;
+  }
+
+  override browser(): Browser {
+    if (!this.#browserContext) {
+      throw new Error('browserContext is not initialised');
+    }
+    return this.#browserContext.browser();
+  }
+
+  override browserContext(): BrowserContext {
+    if (!this.#browserContext) {
+      throw new Error('browserContext is not initialised');
+    }
+    return this.#browserContext;
+  }
+
+  override opener(): Target | undefined {
+    const {openerId} = this.#targetInfo;
+    if (!openerId) {
+      return;
+    }
+    return this.browser()._targets.get(openerId);
+  }
+
+  _targetInfoChanged(targetInfo: Protocol.Target.TargetInfo): void {
+    this.#targetInfo = targetInfo;
+    this._checkIfInitialized();
+  }
+
+  _initialize(): void {
+    this._initializedDeferred.resolve(InitializationStatus.SUCCESS);
+  }
+
+  protected _checkIfInitialized(): void {
+    if (!this._initializedDeferred.resolved()) {
+      this._initializedDeferred.resolve(InitializationStatus.SUCCESS);
+    }
+  }
+}
+
+/**
+ * @internal
+ */
+export class PageTarget extends CDPTarget {
+  #defaultViewport?: Viewport;
+  protected pagePromise?: Promise<Page>;
+  #screenshotTaskQueue: TaskQueue;
+  #ignoreHTTPSErrors: boolean;
+
   constructor(
     targetInfo: Protocol.Target.TargetInfo,
     session: CDPSession | undefined,
@@ -88,85 +199,47 @@ export class Target {
     sessionFactory: (isAutoAttachEmulated: boolean) => Promise<CDPSession>,
     ignoreHTTPSErrors: boolean,
     defaultViewport: Viewport | null,
-    screenshotTaskQueue: TaskQueue,
-    isPageTargetCallback: IsPageTargetCallback
+    screenshotTaskQueue: TaskQueue
   ) {
-    this.#session = session;
-    this.#targetManager = targetManager;
-    this.#targetInfo = targetInfo;
-    this.#browserContext = browserContext;
-    this._targetId = targetInfo.targetId;
-    this.#sessionFactory = sessionFactory;
+    super(targetInfo, session, browserContext, targetManager, sessionFactory);
     this.#ignoreHTTPSErrors = ignoreHTTPSErrors;
     this.#defaultViewport = defaultViewport ?? undefined;
     this.#screenshotTaskQueue = screenshotTaskQueue;
-    this._isPageTargetCallback = isPageTargetCallback;
-    this._initializedPromise = new Promise<boolean>(fulfill => {
-      return (this._initializedCallback = fulfill);
-    }).then(async success => {
-      if (!success) {
-        return false;
-      }
-      const opener = this.opener();
-      if (!opener || !opener.#pagePromise || this.type() !== 'page') {
+  }
+
+  override _initialize(): void {
+    this._initializedDeferred
+      .valueOrThrow()
+      .then(async result => {
+        if (result === InitializationStatus.ABORTED) {
+          return;
+        }
+        const opener = this.opener();
+        if (!(opener instanceof PageTarget)) {
+          return;
+        }
+        if (!opener || !opener.pagePromise || this.type() !== 'page') {
+          return true;
+        }
+        const openerPage = await opener.pagePromise;
+        if (!openerPage.listenerCount(PageEmittedEvents.Popup)) {
+          return true;
+        }
+        const popupPage = await this.page();
+        openerPage.emit(PageEmittedEvents.Popup, popupPage);
         return true;
-      }
-      const openerPage = await opener.#pagePromise;
-      if (!openerPage.listenerCount(PageEmittedEvents.Popup)) {
-        return true;
-      }
-      const popupPage = await this.page();
-      openerPage.emit(PageEmittedEvents.Popup, popupPage);
-      return true;
-    });
-    this._isClosedPromise = new Promise<void>(fulfill => {
-      return (this._closedCallback = fulfill);
-    });
-    this._isInitialized =
-      !this._isPageTargetCallback(this.#targetInfo) ||
-      this.#targetInfo.url !== '';
-    if (this._isInitialized) {
-      this._initializedCallback(true);
-    }
+      })
+      .catch(debugError);
+    this._checkIfInitialized();
   }
 
-  /**
-   * @internal
-   */
-  _session(): CDPSession | undefined {
-    return this.#session;
-  }
-
-  /**
-   * Creates a Chrome Devtools Protocol session attached to the target.
-   */
-  createCDPSession(): Promise<CDPSession> {
-    return this.#sessionFactory(false);
-  }
-
-  /**
-   * @internal
-   */
-  _targetManager(): TargetManager {
-    return this.#targetManager;
-  }
-
-  /**
-   * @internal
-   */
-  _getTargetInfo(): Protocol.Target.TargetInfo {
-    return this.#targetInfo;
-  }
-
-  /**
-   * If the target is not of type `"page"` or `"background_page"`, returns `null`.
-   */
-  async page(): Promise<Page | null> {
-    if (this._isPageTargetCallback(this.#targetInfo) && !this.#pagePromise) {
-      this.#pagePromise = (
-        this.#session
-          ? Promise.resolve(this.#session)
-          : this.#sessionFactory(true)
+  override async page(): Promise<Page | null> {
+    if (!this.pagePromise) {
+      const session = this._session();
+      this.pagePromise = (
+        session
+          ? Promise.resolve(session)
+          : this._sessionFactory()(/* isAutoAttachEmulated=*/ false)
       ).then(client => {
         return CDPPage._create(
           client,
@@ -177,109 +250,52 @@ export class Target {
         );
       });
     }
-    return (await this.#pagePromise) ?? null;
+    return (await this.pagePromise) ?? null;
   }
 
-  /**
-   * If the target is not of type `"service_worker"` or `"shared_worker"`, returns `null`.
-   */
-  async worker(): Promise<WebWorker | null> {
-    if (
-      this.#targetInfo.type !== 'service_worker' &&
-      this.#targetInfo.type !== 'shared_worker'
-    ) {
-      return null;
+  override _checkIfInitialized(): void {
+    if (this._initializedDeferred.resolved()) {
+      return;
     }
+    if (this._getTargetInfo().url !== '') {
+      this._initializedDeferred.resolve(InitializationStatus.SUCCESS);
+    }
+  }
+}
+
+/**
+ * @internal
+ */
+export class DevToolsTarget extends PageTarget {}
+
+/**
+ * @internal
+ */
+export class WorkerTarget extends CDPTarget {
+  #workerPromise?: Promise<WebWorker>;
+
+  override async worker(): Promise<WebWorker | null> {
     if (!this.#workerPromise) {
+      const session = this._session();
       // TODO(einbinder): Make workers send their console logs.
       this.#workerPromise = (
-        this.#session
-          ? Promise.resolve(this.#session)
-          : this.#sessionFactory(false)
+        session
+          ? Promise.resolve(session)
+          : this._sessionFactory()(/* isAutoAttachEmulated=*/ false)
       ).then(client => {
         return new WebWorker(
           client,
-          this.#targetInfo.url,
+          this._getTargetInfo().url,
           () => {} /* consoleAPICalled */,
           () => {} /* exceptionThrown */
         );
       });
     }
-    return this.#workerPromise;
-  }
-
-  url(): string {
-    return this.#targetInfo.url;
-  }
-
-  /**
-   * Identifies what kind of target this is.
-   *
-   * @remarks
-   *
-   * See {@link https://developer.chrome.com/extensions/background_pages | docs} for more info about background pages.
-   */
-  type():
-    | 'page'
-    | 'background_page'
-    | 'service_worker'
-    | 'shared_worker'
-    | 'other'
-    | 'browser'
-    | 'webview' {
-    const type = this.#targetInfo.type;
-    if (
-      type === 'page' ||
-      type === 'background_page' ||
-      type === 'service_worker' ||
-      type === 'shared_worker' ||
-      type === 'browser' ||
-      type === 'webview'
-    ) {
-      return type;
-    }
-    return 'other';
-  }
-
-  /**
-   * Get the browser the target belongs to.
-   */
-  browser(): Browser {
-    return this.#browserContext.browser();
-  }
-
-  /**
-   * Get the browser context the target belongs to.
-   */
-  browserContext(): BrowserContext {
-    return this.#browserContext;
-  }
-
-  /**
-   * Get the target that opened this target. Top-level targets return `null`.
-   */
-  opener(): Target | undefined {
-    const {openerId} = this.#targetInfo;
-    if (!openerId) {
-      return;
-    }
-    return this.browser()._targets.get(openerId);
-  }
-
-  /**
-   * @internal
-   */
-  _targetInfoChanged(targetInfo: Protocol.Target.TargetInfo): void {
-    this.#targetInfo = targetInfo;
-
-    if (
-      !this._isInitialized &&
-      (!this._isPageTargetCallback(this.#targetInfo) ||
-        this.#targetInfo.url !== '')
-    ) {
-      this._isInitialized = true;
-      this._initializedCallback(true);
-      return;
-    }
+    return await this.#workerPromise;
   }
 }
+
+/**
+ * @internal
+ */
+export class OtherTarget extends CDPTarget {}

@@ -10,7 +10,7 @@ import { clearTimeout, setTimeout } from "resource://gre/modules/Timer.sys.mjs";
 
 import { FxAccountsStorageManager } from "resource://gre/modules/FxAccountsStorage.sys.mjs";
 
-const {
+import {
   ERRNO_INVALID_AUTH_TOKEN,
   ERROR_AUTH_ERROR,
   ERROR_INVALID_PARAMETER,
@@ -35,7 +35,7 @@ const {
   log,
   logPII,
   logManager,
-} = ChromeUtils.import("resource://gre/modules/FxAccountsCommon.js");
+} from "resource://gre/modules/FxAccountsCommon.sys.mjs";
 
 const lazy = {};
 
@@ -49,12 +49,12 @@ ChromeUtils.defineESModuleGetters(lazy, {
   FxAccountsTelemetry: "resource://gre/modules/FxAccountsTelemetry.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "mpLocked", () => {
+ChromeUtils.defineLazyGetter(lazy, "mpLocked", () => {
   return ChromeUtils.importESModule("resource://services-sync/util.sys.mjs")
     .Utils.mpLocked;
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "ensureMPUnlocked", () => {
+ChromeUtils.defineLazyGetter(lazy, "ensureMPUnlocked", () => {
   return ChromeUtils.importESModule("resource://services-sync/util.sys.mjs")
     .Utils.ensureMPUnlocked;
 });
@@ -706,7 +706,7 @@ FxAccountsInternal.prototype = {
   // All significant initialization should be done in this initialize() method
   // to help with our mocking story.
   initialize() {
-    XPCOMUtils.defineLazyGetter(this, "fxaPushService", function () {
+    ChromeUtils.defineLazyGetter(this, "fxaPushService", function () {
       return Cc["@mozilla.org/fxaccounts/push;1"].getService(
         Ci.nsISupports
       ).wrappedJSObject;
@@ -972,7 +972,7 @@ FxAccountsInternal.prototype = {
       "updateUserAccountData called with fields",
       Object.keys(credentials)
     );
-    if (logPII) {
+    if (logPII()) {
       log.debug("updateUserAccountData called with data", credentials);
     }
     let currentAccountState = this.currentAccountState;
@@ -1135,7 +1135,7 @@ FxAccountsInternal.prototype = {
 
   startVerifiedCheck(data) {
     log.debug("startVerifiedCheck", data && data.verified);
-    if (logPII) {
+    if (logPII()) {
       log.debug("startVerifiedCheck with user data", data);
     }
 

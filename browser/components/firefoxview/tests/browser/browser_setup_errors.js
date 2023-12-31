@@ -14,17 +14,25 @@ async function setupWithDesktopDevices(state = UIState.STATUS_SIGNED_IN) {
         name: "This Device",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
       {
         id: 2,
         name: "Other Device",
         type: "desktop",
+        tabs: [],
       },
     ],
   });
   return sandbox;
 }
 
+function promiseSyncReady() {
+  let service = Cc["@mozilla.org/weave/service;1"].getService(
+    Ci.nsISupports
+  ).wrappedJSObject;
+  return service.whenLoaded();
+}
 async function tearDown(sandbox) {
   sandbox?.restore();
   Services.prefs.clearUserPref("services.sync.lastTabFetch");

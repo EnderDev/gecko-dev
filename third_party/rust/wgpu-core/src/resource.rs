@@ -1,7 +1,10 @@
 use crate::{
     device::{DeviceError, HostMap, MissingDownlevelFlags, MissingFeatures},
-    hub::{Global, GlobalIdentityHandlerFactory, HalApi, Resource, Token},
+    global::Global,
+    hal_api::HalApi,
+    hub::Token,
     id::{AdapterId, DeviceId, SurfaceId, TextureId, Valid},
+    identity::GlobalIdentityHandlerFactory,
     init_tracker::{BufferInitTracker, TextureInitTracker},
     track::TextureSelector,
     validation::MissingBufferUsageError,
@@ -12,6 +15,17 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use std::{borrow::Borrow, ops::Range, ptr::NonNull};
+
+pub trait Resource {
+    const TYPE: &'static str;
+    fn life_guard(&self) -> &LifeGuard;
+    fn label(&self) -> &str {
+        #[cfg(debug_assertions)]
+        return &self.life_guard().label;
+        #[cfg(not(debug_assertions))]
+        return "";
+    }
+}
 
 /// The status code provided to the buffer mapping callback.
 ///
@@ -65,7 +79,21 @@ pub(crate) enum BufferMapState<A: hal::Api> {
     Idle,
 }
 
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+))]
 unsafe impl<A: hal::Api> Send for BufferMapState<A> {}
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+))]
 unsafe impl<A: hal::Api> Sync for BufferMapState<A> {}
 
 #[repr(C)]
@@ -74,6 +102,13 @@ pub struct BufferMapCallbackC {
     pub user_data: *mut u8,
 }
 
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+))]
 unsafe impl Send for BufferMapCallbackC {}
 
 pub struct BufferMapCallback {
@@ -82,17 +117,30 @@ pub struct BufferMapCallback {
     inner: Option<BufferMapCallbackInner>,
 }
 
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+))]
+type BufferMapCallbackCallback = Box<dyn FnOnce(BufferAccessResult) + Send + 'static>;
+#[cfg(not(any(
+    not(target_arch = "wasm32"),
+    all(
+        feature = "fragile-send-sync-non-atomic-wasm",
+        not(target_feature = "atomics")
+    )
+)))]
+type BufferMapCallbackCallback = Box<dyn FnOnce(BufferAccessResult) + 'static>;
+
 enum BufferMapCallbackInner {
-    Rust {
-        callback: Box<dyn FnOnce(BufferAccessResult) + Send + 'static>,
-    },
-    C {
-        inner: BufferMapCallbackC,
-    },
+    Rust { callback: BufferMapCallbackCallback },
+    C { inner: BufferMapCallbackC },
 }
 
 impl BufferMapCallback {
-    pub fn from_rust(callback: Box<dyn FnOnce(BufferAccessResult) + Send + 'static>) -> Self {
+    pub fn from_rust(callback: BufferMapCallbackCallback) -> Self {
         Self {
             inner: Some(BufferMapCallbackInner::Rust { callback }),
         }
@@ -336,6 +384,18 @@ pub enum TextureClearMode<A: hal::Api> {
     None,
 }
 
+impl<A: hal::Api> TextureClearMode<A> {
+    pub(crate) fn destroy_clear_views(self, device: &A::Device) {
+        if let TextureClearMode::RenderPass { clear_views, .. } = self {
+            for clear_view in clear_views {
+                unsafe {
+                    hal::Device::destroy_texture_view(device, clear_view);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Texture<A: hal::Api> {
     pub(crate) inner: TextureInner<A>,
@@ -519,8 +579,8 @@ pub enum CreateTextureError {
     InvalidMultisampledStorageBinding,
     #[error("Format {0:?} does not support multisampling")]
     InvalidMultisampledFormat(wgt::TextureFormat),
-    #[error("Sample count {0} is not supported by format {1:?} on this device. It may be supported by your adapter through the TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES feature.")]
-    InvalidSampleCount(u32, wgt::TextureFormat),
+    #[error("Sample count {0} is not supported by format {1:?} on this device. The WebGPU spec guarentees {2:?} samples are supported by this format. With the TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES feature your device supports {3:?}.")]
+    InvalidSampleCount(u32, wgt::TextureFormat, Vec<u32>, Vec<u32>),
     #[error("Multisampled textures must have RENDER_ATTACHMENT usage")]
     MultisampledNotRenderAttachment,
     #[error("Texture format {0:?} can't be used due to missing features")]

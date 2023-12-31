@@ -9,7 +9,9 @@
 #include <cstdint>
 
 #include "ErrorList.h"
+#include "TypedArray.h"
 #include "js/ArrayBuffer.h"
+#include "js/ColumnNumber.h"  // JS::ColumnNumberOneOrigin
 #include "js/JSON.h"
 #include "js/Utility.h"
 #include "js/experimental/TypedData.h"
@@ -28,6 +30,7 @@
 #include "mozilla/Span.h"
 #include "mozilla/StaticPtr.h"
 #include "mozilla/TextUtils.h"
+#include "mozilla/Try.h"
 #include "mozilla/Unused.h"
 #include "mozilla/Utf8.h"
 #include "mozilla/dom/BindingUtils.h"
@@ -289,8 +292,8 @@ static bool AssertParentProcessWithCallerLocationImpl(GlobalObject& aGlobal,
   JSContext* cx = jsapi.cx();
 
   JS::AutoFilename scriptFilename;
-  unsigned lineNo = 0;
-  unsigned colNo = 0;
+  uint32_t lineNo = 0;
+  JS::ColumnNumberOneOrigin colNo;
 
   NS_ENSURE_TRUE(
       JS::DescribeScriptedCaller(cx, &scriptFilename, &lineNo, &colNo), false);
@@ -298,7 +301,7 @@ static bool AssertParentProcessWithCallerLocationImpl(GlobalObject& aGlobal,
   NS_ENSURE_TRUE(scriptFilename.get(), false);
 
   reason.AppendPrintf(" Called from %s:%d:%d.", scriptFilename.get(), lineNo,
-                      colNo);
+                      colNo.zeroOriginValue());
   return false;
 }
 
@@ -525,9 +528,7 @@ already_AddRefed<Promise> IOUtils::Write(GlobalObject& aGlobal,
         nsCOMPtr<nsIFile> file = new nsLocalFile();
         REJECT_IF_INIT_PATH_FAILED(file, aPath, promise);
 
-        aData.ComputeState();
-        auto buf =
-            Buffer<uint8_t>::CopyFrom(Span(aData.Data(), aData.Length()));
+        Maybe<Buffer<uint8_t>> buf = aData.CreateFromData<Buffer<uint8_t>>();
         if (buf.isNothing()) {
           promise->MaybeRejectWithOperationError(
               "Out of memory: Could not allocate buffer while writing to file");
@@ -542,7 +543,7 @@ already_AddRefed<Promise> IOUtils::Write(GlobalObject& aGlobal,
 
         DispatchAndResolve<uint32_t>(
             state->mEventQueue, promise,
-            [file = std::move(file), buf = std::move(*buf),
+            [file = std::move(file), buf = buf.extract(),
              opts = opts.unwrap()]() { return WriteSync(file, buf, opts); });
       });
 }
@@ -1032,10 +1033,9 @@ already_AddRefed<Promise> IOUtils::SetMacXAttr(GlobalObject& aGlobal,
         nsCOMPtr<nsIFile> file = new nsLocalFile();
         REJECT_IF_INIT_PATH_FAILED(file, aPath, promise);
 
-        aValue.ComputeState();
         nsTArray<uint8_t> value;
 
-        if (!value.AppendElements(aValue.Data(), aValue.Length(), fallible)) {
+        if (!aValue.AppendDataTo(value)) {
           RejectJSPromise(
               promise,
               IOError(NS_ERROR_OUT_OF_MEMORY)
@@ -2708,20 +2708,15 @@ JSObject* IOUtils::JsBuffer::IntoUint8Array(JSContext* aCx, JsBuffer aBuffer) {
     return JS_NewUint8Array(aCx, 0);
   }
 
-  char* rawBuffer = aBuffer.mBuffer.release();
-  MOZ_RELEASE_ASSERT(rawBuffer);
+  MOZ_RELEASE_ASSERT(aBuffer.mBuffer);
   JS::Rooted<JSObject*> arrayBuffer(
       aCx, JS::NewArrayBufferWithContents(aCx, aBuffer.mLength,
-                                          reinterpret_cast<void*>(rawBuffer)));
+                                          std::move(aBuffer.mBuffer)));
 
   if (!arrayBuffer) {
-    // The array buffer does not take ownership of the data pointer unless
-    // creation succeeds. We are still on the hook to free it.
-    //
     // aBuffer will be destructed at end of scope, but its destructor does not
     // take into account |mCapacity| or |mLength|, so it is OK for them to be
     // non-zero here with a null |mBuffer|.
-    js_free(rawBuffer);
     return nullptr;
   }
 
@@ -2781,51 +2776,51 @@ void SyncReadFile::ReadBytesInto(const Uint8Array& aDestArray,
     return aRv.ThrowOperationError("SyncReadFile is closed");
   }
 
-  aDestArray.ComputeState();
-
-  auto rangeEnd = CheckedInt64(aOffset) + aDestArray.Length();
-  if (!rangeEnd.isValid()) {
-    return aRv.ThrowOperationError("Requested range overflows i64");
-  }
-
-  if (rangeEnd.value() > mSize) {
-    return aRv.ThrowOperationError(
-        "Requested range overflows SyncReadFile size");
-  }
-
-  uint32_t readLen{aDestArray.Length()};
-  if (readLen == 0) {
-    return;
-  }
-
-  if (nsresult rv = mStream->Seek(PR_SEEK_SET, aOffset); NS_FAILED(rv)) {
-    return aRv.ThrowOperationError(
-        FormatErrorMessage(rv, "Could not seek to position %lld", aOffset));
-  }
-
-  Span<char> toRead(reinterpret_cast<char*>(aDestArray.Data()), readLen);
-
-  uint32_t totalRead = 0;
-  while (totalRead != readLen) {
-    // Read no more than INT32_MAX on each call to mStream->Read, otherwise it
-    // returns an error.
-    uint32_t bytesToReadThisChunk =
-        std::min<uint32_t>(readLen - totalRead, INT32_MAX);
-
-    uint32_t bytesRead = 0;
-    if (nsresult rv =
-            mStream->Read(toRead.Elements(), bytesToReadThisChunk, &bytesRead);
-        NS_FAILED(rv)) {
-      return aRv.ThrowOperationError(FormatErrorMessage(
-          rv, "Encountered an unexpected error while reading file stream"));
+  aDestArray.ProcessFixedData([&](const Span<uint8_t>& aData) {
+    auto rangeEnd = CheckedInt64(aOffset) + aData.Length();
+    if (!rangeEnd.isValid()) {
+      return aRv.ThrowOperationError("Requested range overflows i64");
     }
-    if (bytesRead == 0) {
+
+    if (rangeEnd.value() > mSize) {
       return aRv.ThrowOperationError(
-          "Reading stopped before the entire array was filled");
+          "Requested range overflows SyncReadFile size");
     }
-    totalRead += bytesRead;
-    toRead = toRead.From(bytesRead);
-  }
+
+    size_t readLen{aData.Length()};
+    if (readLen == 0) {
+      return;
+    }
+
+    if (nsresult rv = mStream->Seek(PR_SEEK_SET, aOffset); NS_FAILED(rv)) {
+      return aRv.ThrowOperationError(
+          FormatErrorMessage(rv, "Could not seek to position %lld", aOffset));
+    }
+
+    Span<char> toRead = AsWritableChars(aData);
+
+    size_t totalRead = 0;
+    while (totalRead != readLen) {
+      // Read no more than INT32_MAX on each call to mStream->Read,
+      // otherwise it returns an error.
+      uint32_t bytesToReadThisChunk =
+          std::min(readLen - totalRead, size_t(INT32_MAX));
+
+      uint32_t bytesRead = 0;
+      if (nsresult rv = mStream->Read(toRead.Elements(), bytesToReadThisChunk,
+                                      &bytesRead);
+          NS_FAILED(rv)) {
+        return aRv.ThrowOperationError(FormatErrorMessage(
+            rv, "Encountered an unexpected error while reading file stream"));
+      }
+      if (bytesRead == 0) {
+        return aRv.ThrowOperationError(
+            "Reading stopped before the entire array was filled");
+      }
+      totalRead += bytesRead;
+      toRead = toRead.From(bytesRead);
+    }
+  });
 }
 
 void SyncReadFile::Close() { mStream = nullptr; }
@@ -2838,10 +2833,9 @@ static nsCString FromUnixString(const IOUtils::UnixString& aString) {
     return aString.GetAsUTF8String();
   }
   if (aString.IsUint8Array()) {
-    const auto& u8a = aString.GetAsUint8Array();
-    u8a.ComputeState();
-    // Cast to deal with char signedness
-    return nsCString(reinterpret_cast<const char*>(u8a.Data()), u8a.Length());
+    nsCString data;
+    Unused << aString.GetAsUint8Array().AppendDataTo(data);
+    return data;
   }
   MOZ_CRASH("unreachable");
 }

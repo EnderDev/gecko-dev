@@ -2051,7 +2051,7 @@ void Animation::UpdatePendingAnimationTracker(AnimationTimeline* aOldTimeline,
 class AsyncFinishNotification : public MicroTaskRunnable {
  public:
   explicit AsyncFinishNotification(Animation* aAnimation)
-      : MicroTaskRunnable(), mAnimation(aAnimation) {}
+      : mAnimation(aAnimation) {}
 
   virtual void Run(AutoSlowOperation& aAso) override {
     mAnimation->DoFinishNotificationImmediately(this);
@@ -2122,7 +2122,6 @@ void Animation::QueuePlaybackEvent(const nsAString& aName,
   }
 
   AnimationPlaybackEventInit init;
-
   if (aName.EqualsLiteral("finish") || aName.EqualsLiteral("remove")) {
     init.mCurrentTime = GetCurrentTimeAsDouble();
   }
@@ -2135,7 +2134,7 @@ void Animation::QueuePlaybackEvent(const nsAString& aName,
   event->SetTrusted(true);
 
   presContext->AnimationEventDispatcher()->QueueEvent(AnimationEventInfo(
-      aName, std::move(event), std::move(aScheduledEventTime), this));
+      std::move(event), std::move(aScheduledEventTime), this));
 }
 
 bool Animation::IsRunningOnCompositor() const {

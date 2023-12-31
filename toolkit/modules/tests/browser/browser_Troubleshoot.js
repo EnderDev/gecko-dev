@@ -379,6 +379,10 @@ const SNAPSHOT_SCHEMA = {
         diskAvailableBytes: {
           type: "number",
         },
+        pointingDevices: {
+          required: false,
+          type: "array",
+        },
       },
     },
     crashes: {
@@ -519,6 +523,38 @@ const SNAPSHOT_SCHEMA = {
           type: "boolean",
         },
         "fission.autostart.session": {
+          required: false,
+          type: "boolean",
+        },
+        "media.utility-process.enabled": {
+          required: false,
+          type: "boolean",
+        },
+        "media.utility-ffmpeg.enabled": {
+          required: false,
+          type: "boolean",
+        },
+        "media.utility-ffvpx.enabled": {
+          required: false,
+          type: "boolean",
+        },
+        "media.utility-wmf.enabled": {
+          required: false,
+          type: "boolean",
+        },
+        "media.utility-applemedia.enabled": {
+          required: false,
+          type: "boolean",
+        },
+        "media.utility-vorbis.enabled": {
+          required: false,
+          type: "boolean",
+        },
+        "media.utility-wav.enabled": {
+          required: false,
+          type: "boolean",
+        },
+        "media.utility-opus.enabled": {
           required: false,
           type: "boolean",
         },
@@ -1045,11 +1081,11 @@ const SNAPSHOT_SCHEMA = {
           type: "number",
         },
         contentWin32kLockdownState: {
-          required: AppConstants.MOZ_SANDBOX,
+          required: AppConstants.MOZ_SANDBOX && AppConstants.platform == "win",
           type: "string",
         },
         supportSandboxGpuLevel: {
-          required: AppConstants.MOZ_SANDBOX,
+          required: AppConstants.MOZ_SANDBOX && AppConstants.platform == "win",
           type: "number",
         },
         syscallLog: {
@@ -1233,6 +1269,19 @@ const SNAPSHOT_SCHEMA = {
               slug: { type: "string", required: true },
             },
           },
+        },
+      },
+    },
+    legacyUserStylesheets: {
+      type: "object",
+      properties: {
+        active: {
+          required: true,
+          type: "boolean",
+        },
+        types: {
+          required: true,
+          type: "array",
         },
       },
     },

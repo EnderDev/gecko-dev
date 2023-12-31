@@ -10,6 +10,7 @@
 #include "HttpChannelParent.h"
 #include "MainThreadUtils.h"
 #include "NeckoCommon.h"
+#include "gfxPlatform.h"
 #include "mozilla/CORSMode.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/nsCSPContext.h"
@@ -209,14 +210,18 @@ void EarlyHintPreloader::MaybeCreateAndInsertPreload(
   ASDestination destination = static_cast<ASDestination>(as.GetEnumValue());
   CollectResourcesTypeTelemetry(destination);
 
-  if (!StaticPrefs::network_early_hints_enabled() ||
-      !StaticPrefs::network_preload()) {
+  if (!StaticPrefs::network_early_hints_enabled()) {
     return;
   }
 
   if (destination == ASDestination::DESTINATION_INVALID && !aIsModulepreload) {
     // return early when it's definitly not an asset type we preload
     // would be caught later as well, e.g. when creating the PreloadHashKey
+    return;
+  }
+
+  if (destination == ASDestination::DESTINATION_FONT &&
+      !gfxPlatform::GetPlatform()->DownloadableFontsEnabled()) {
     return;
   }
 
@@ -284,10 +289,6 @@ void EarlyHintPreloader::MaybeCreateAndInsertPreload(
       new dom::ReferrerInfo(aBaseURI, finalReferrerPolicy);
 
   RefPtr<EarlyHintPreloader> earlyHintPreloader = new EarlyHintPreloader();
-
-  DebugOnly<bool> result =
-      aOngoingEarlyHints->Add(*hashKey, earlyHintPreloader);
-  MOZ_ASSERT(result);
 
   // Security flags for modulepreload's request mode are computed here directly
   // until full support for worker destinations can be added.
@@ -381,6 +382,10 @@ void EarlyHintPreloader::MaybeCreateAndInsertPreload(
       aCookieJarSettings, aBrowsingContextID, aCallbacks));
 
   earlyHintPreloader->SetLinkHeader(aLinkHeader);
+
+  DebugOnly<bool> result =
+      aOngoingEarlyHints->Add(*hashKey, earlyHintPreloader);
+  MOZ_ASSERT(result);
 }
 
 nsresult EarlyHintPreloader::OpenChannel(
@@ -429,7 +434,10 @@ nsresult EarlyHintPreloader::OpenChannel(
   PriorizeAsPreload();
 
   rv = mChannel->AsyncOpen(mParentListener);
-  NS_ENSURE_SUCCESS(rv, rv);
+  if (NS_FAILED(rv)) {
+    mParentListener = nullptr;
+    return rv;
+  }
 
   SetState(ePreloaderOpened);
 

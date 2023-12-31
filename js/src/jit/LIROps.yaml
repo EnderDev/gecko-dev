@@ -299,28 +299,28 @@
 
 - name: WasmTrapIfNull
   operands:
-    object: WordSized
+    ref: WordSized
   mir_op: true
 
-- name: WasmGcObjectIsSubtypeOfConcrete
+- name: WasmRefIsSubtypeOfConcrete
   mir_op: true
   operands:
-    object: WordSized
-    superSuperTypeVector: WordSized
+    ref: WordSized
+    superSTV: WordSized
   result_type: WordSized
   num_temps: 2
 
-- name: WasmGcObjectIsSubtypeOfAbstract
+- name: WasmRefIsSubtypeOfAbstract
   mir_op: true
   operands:
-    object: WordSized
+    ref: WordSized
   result_type: WordSized
   num_temps: 1
 
-- name: WasmGcObjectIsSubtypeOfConcreteAndBranch
+- name: WasmRefIsSubtypeOfConcreteAndBranch
   gen_boilerplate: false
 
-- name: WasmGcObjectIsSubtypeOfAbstractAndBranch
+- name: WasmRefIsSubtypeOfAbstractAndBranch
   gen_boilerplate: false
 
 - name: WasmReinterpret
@@ -681,6 +681,16 @@
     input: WordSized
   arguments:
     constant: JSLinearString*
+  mir_op: Compare
+
+- name: CompareSSingle
+  result_type: WordSized
+  operands:
+    input: WordSized
+  arguments:
+    jsop: JSOp
+    constant: JSLinearString*
+  num_temps: 1
   mir_op: Compare
 
 - name: CompareBigInt
@@ -1494,6 +1504,11 @@
   call_instruction: true
   mir_op: true
 
+- name: RegExpSearcherLastLimit
+  result_type: WordSized
+  operands:
+  num_temps: 1
+
 - name: RegExpExecMatch
   result_type: BoxedValue
   operands:
@@ -1510,6 +1525,13 @@
     string: WordSized
   call_instruction: true
   num_temps: 0
+  mir_op: true
+
+- name: RegExpHasCaptureGroups
+  result_type: WordSized
+  operands:
+    regexp: WordSized
+    input: WordSized
   mir_op: true
 
 - name: RegExpPrototypeOptimizable
@@ -1964,6 +1986,29 @@
   num_temps: 1
   mir_op: ClampToUint8
 
+- name: LoadScriptedProxyHandler
+  result_type: BoxedValue
+  operands:
+    object: WordSized
+  mir_op: true
+
+#ifdef JS_PUNBOX64
+- name: CheckScriptedProxyGetResult
+  operands:
+    target: BoxedValue
+    id: BoxedValue
+    value: BoxedValue
+  num_temps: 2
+  mir_op: true
+#endif
+
+- name: IdToStringOrSymbol
+  result_type: BoxedValue
+  operands:
+    id: BoxedValue
+  num_temps: 1
+  mir_op: true
+
 # Load a boxed value from an object's fixed slot.
 - name: LoadFixedSlotV
   result_type: BoxedValue
@@ -2327,6 +2372,13 @@
   num_temps: 1
   mir_op: true
 
+- name: OptimizeGetIteratorCache
+  result_type: WordSized
+  operands:
+    value: BoxedValue
+  num_temps: 1
+  mir_op: true
+
 # Read the number of actual arguments.
 - name: ArgumentsLength
   result_type: WordSized
@@ -2684,6 +2736,11 @@
     object: WordSized
   num_temps: 1
 
+- name: GuardHasProxyHandler
+  operands:
+    object: WordSized
+  mir_op: true
+
 - name: GuardNoDenseElements
   operands:
     in: WordSized
@@ -2853,6 +2910,15 @@
 - name: WasmBoundsCheck64
   gen_boilerplate: false
 
+- name: WasmBoundsCheckRange32
+  result_type: WordSized
+  operands:
+    index: WordSized
+    length: WordSized
+    limit: WordSized
+  mir_op: true
+  num_temps: 1
+
 - name: WasmExtendU32Index
   result_type: WordSized
   operands:
@@ -2887,10 +2953,8 @@
     instance: WordSized
   mir_op: WasmLoadInstance
 
-- name: WasmHeapBase
+- name: WasmHeapReg
   result_type: WordSized
-  operands:
-    instance: WordSized
   mir_op: true
 
 - name: WasmLoad
@@ -3565,15 +3629,33 @@
 - name: IonToWasmCallI64
   gen_boilerplate: false
 
-- name: WasmBoxValue
+- name: WasmAnyRefFromJSValue
   result_type: WordSized
   operands:
     input: BoxedValue
+  num_temps: 1
 
 - name: WasmAnyRefFromJSObject
   result_type: WordSized
   operands:
     input: WordSized
+
+- name: WasmAnyRefFromJSString
+  result_type: WordSized
+  operands:
+    input: WordSized
+
+- name: WasmNewI31Ref
+  mir_op: true
+  result_type: WordSized
+  operands:
+    value: WordSized
+
+- name: WasmI31RefGet
+  mir_op: true
+  result_type: WordSized
+  operands:
+    value: WordSized
 
 # Constant Simd128
 - name: Simd128

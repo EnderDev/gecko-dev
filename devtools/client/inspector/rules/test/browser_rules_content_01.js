@@ -35,7 +35,6 @@ const TEST_URI = `
 `;
 
 add_task(async function () {
-  await pushPref("layout.css.nesting.enabled", true);
   await addTab("data:text/html;charset=utf-8," + encodeURIComponent(TEST_URI));
   const { inspector, view } = await openRuleView();
 
@@ -61,7 +60,7 @@ add_task(async function () {
   const mediaText = getRuleViewAncestorRulesDataTextByIndex(view, 1);
   is(
     mediaText,
-    "@media screen and (min-width: 10px)",
+    "@media screen and (min-width: 10px) {",
     "media text at index 1 has expected content"
   );
 
@@ -124,9 +123,7 @@ function assertSelectors(view, ruleIndex, expectedSelectors) {
   const ruleSelectors = getRuleViewRuleEditor(
     view,
     ruleIndex
-  ).selectorText.querySelectorAll(
-    ".ruleview-selector-matched, .ruleview-selector-unmatched"
-  );
+  ).selectorText.querySelectorAll(".ruleview-selector");
 
   is(
     ruleSelectors.length,
@@ -141,10 +138,9 @@ function assertSelectors(view, ruleIndex, expectedSelectors) {
       `Got expected text for the selector element #${i} on rule #${ruleIndex}`
     );
     is(
-      [...ruleSelectors[i].classList].join(),
-      expectedSelectors[i].matches
-        ? "ruleview-selector-matched"
-        : "ruleview-selector-unmatched",
+      [...ruleSelectors[i].classList].join(","),
+      "ruleview-selector," +
+        (expectedSelectors[i].matches ? "matched" : "unmatched"),
       `Got expected css class on the selector element #${i} ("${ruleSelectors[i].textContent}") on rule #${ruleIndex}`
     );
   }

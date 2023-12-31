@@ -35,7 +35,7 @@ treechildren::-moz-tree-row(multicol, odd) {
   background-color: -moz-oddtreerow;
 }
 
-@media (-moz-windows-default-theme) {
+@media not (prefers-contrast) {
   treechildren::-moz-tree-row(hover) {
     background-color: hsla(0,0%,50%,.15);
   }
@@ -271,32 +271,8 @@ html|input.tree-input {
       color: -moz-ButtonActiveText;
     }
   }
-
-  @media (-moz-windows-classic) {
-    treecol,
-    .tree-columnpicker-button {
-      border: 1px solid;
-      border-top-color: ThreeDHighlight;
-      border-inline-end-color: ThreeDShadow;
-      border-bottom-color: ThreeDShadow;
-      border-inline-start-color: ThreeDHighlight;
-      box-shadow: none;
-      background-color: -moz-Dialog;
-    }
-
-    treecol:where(:hover:active),
-    .tree-columnpicker-button:where(:hover:active) {
-      border-top-color: ThreeDShadow;
-      border-inline-end-color: ThreeDHighlight;
-      border-bottom-color: ThreeDHighlight;
-      border-inline-start-color: ThreeDShadow;
-    }
-  }
 }
 
-/* Stylelint doesn't cope with the Level 4 media query here.
- * Filed as https://github.com/stylelint/stylelint/issues/6834 */
-/* stylelint-disable-next-line media-feature-name-no-unknown */
 @media (-moz-platform: macos) and (not (prefers-contrast)) {
     /* We show a `SelectedItem` background on selected rows, so we do not need the
        dotted outline in that case. For users who have Full Keyboard Access

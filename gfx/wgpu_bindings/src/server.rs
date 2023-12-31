@@ -3,106 +3,99 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use crate::{
-    identity::IdentityRecyclerFactory, wgpu_string, AdapterInformation, ByteBuf,
-    CommandEncoderAction, DeviceAction, DropAction, QueueWriteAction, TextureAction,
+    error::{ErrMsg, ErrorBuffer, ErrorBufferType},
+    identity::IdentityRecyclerFactory,
+    wgpu_string, AdapterInformation, ByteBuf, CommandEncoderAction, DeviceAction, DropAction,
+    QueueWriteAction, SwapChainId, TextureAction,
 };
 
 use nsstring::{nsACString, nsCString, nsString};
 
-use wgc::pipeline::CreateShaderModuleError;
 use wgc::{gfx_select, id};
+use wgc::{pipeline::CreateShaderModuleError, resource::BufferAccessError};
+#[allow(unused_imports)]
+use wgh::Instance;
 
 use std::borrow::Cow;
+#[allow(unused_imports)]
+use std::mem;
+use std::os::raw::c_void;
+use std::slice;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::{error::Error, os::raw::c_char, ptr, slice};
+
+use std::ffi::{c_long, c_ulong};
+#[cfg(target_os = "windows")]
+use winapi::shared::dxgi;
+#[cfg(target_os = "windows")]
+use winapi::um::d3d12 as d3d12_ty;
+#[cfg(target_os = "windows")]
+use winapi::Interface;
+
+// The seemingly redundant u64 suffixes help cbindgen with generating the right C++ code.
+// See https://github.com/mozilla/cbindgen/issues/849.
 
 /// We limit the size of buffer allocations for stability reason.
 /// We can reconsider this limit in the future. Note that some drivers (mesa for example),
 /// have issues when the size of a buffer, mapping or copy command does not fit into a
 /// signed 32 bits integer, so beyond a certain size, large allocations will need some form
 /// of driver allow/blocklist.
-const MAX_BUFFER_SIZE: wgt::BufferAddress = 1 << 30;
+pub const MAX_BUFFER_SIZE: wgt::BufferAddress = 1u64 << 30u64;
+const MAX_BUFFER_SIZE_U32: u32 = MAX_BUFFER_SIZE as u32;
+
 // Mesa has issues with height/depth that don't fit in a 16 bits signed integers.
 const MAX_TEXTURE_EXTENT: u32 = std::i16::MAX as u32;
 
-/// A fixed-capacity, null-terminated error buffer owned by C++.
-///
-/// This type points to space owned by a C++ `mozilla::webgpu::ErrorBuffer`
-/// object, owned by our callers in `WebGPUParent.cpp`. If we catch a
-/// `Result::Err` here, we convert the error to a string, copy as much of that
-/// string as fits into this buffer, and null-terminate it. The caller
-/// determines whether a error occurred by simply checking if there's any text
-/// before the first null byte.
-///
-/// C++ callers of Rust functions that expect one of these structs can create a
-/// `mozilla::webgpu::ErrorBuffer` object, and call its `ToFFI` method to
-/// construct a value of this type, available to C++ as
-/// `mozilla::webgpu::ffi::WGPUErrorBuffer`.
-#[repr(C)]
-pub struct ErrorBuffer {
-    string: *mut c_char,
-    capacity: usize,
-}
-
-impl ErrorBuffer {
-    /// Fill this buffer with the textual representation of `error`.
-    ///
-    /// If the error message is too long, truncate it as needed. In either case,
-    /// the error message is always terminated by a zero byte.
-    ///
-    /// Note that there is no explicit indication of the message's length, only
-    /// the terminating zero byte. If the textual form of `error` itself
-    /// includes a zero byte (as Rust strings can), then the C++ code receiving
-    /// this error message has no way to distinguish that from the terminating
-    /// zero byte, and will see the message as shorter than it is.
-    fn init(&mut self, error: impl Error) {
-        use std::fmt::Write;
-
-        let mut string = format!("{}", error);
-        let mut e = error.source();
-        while let Some(source) = e {
-            write!(string, ", caused by: {}", source).unwrap();
-            e = source.source();
-        }
-
-        self.init_str(&string);
-    }
-
-    fn init_str(&mut self, message: &str) {
-        assert_ne!(self.capacity, 0);
-        let length = if message.len() >= self.capacity {
-            log::warn!(
-                "Error length {} reached capacity {}",
-                message.len(),
-                self.capacity
-            );
-            self.capacity - 1
-        } else {
-            message.len()
-        };
-        unsafe {
-            ptr::copy_nonoverlapping(message.as_ptr(), self.string as *mut u8, length);
-            *self.string.add(length) = 0;
-        }
+fn restrict_limits(limits: wgt::Limits) -> wgt::Limits {
+    wgt::Limits {
+        max_buffer_size: limits.max_buffer_size.min(MAX_BUFFER_SIZE),
+        max_texture_dimension_1d: limits.max_texture_dimension_1d.min(MAX_TEXTURE_EXTENT),
+        max_texture_dimension_2d: limits.max_texture_dimension_2d.min(MAX_TEXTURE_EXTENT),
+        max_texture_dimension_3d: limits.max_texture_dimension_3d.min(MAX_TEXTURE_EXTENT),
+        max_sampled_textures_per_shader_stage: limits.max_sampled_textures_per_shader_stage.min(256),
+        max_samplers_per_shader_stage: limits.max_samplers_per_shader_stage.min(256),
+        max_storage_textures_per_shader_stage: limits
+            .max_storage_textures_per_shader_stage
+            .min(256),
+        max_uniform_buffers_per_shader_stage: limits.max_uniform_buffers_per_shader_stage.min(256),
+        max_uniform_buffer_binding_size: limits
+            .max_uniform_buffer_binding_size
+            .min(MAX_BUFFER_SIZE_U32),
+        max_storage_buffer_binding_size: limits
+            .max_storage_buffer_binding_size
+            .min(MAX_BUFFER_SIZE_U32),
+        max_non_sampler_bindings: 10_000,
+        ..limits
     }
 }
 
 // hide wgc's global in private
-pub struct Global(wgc::hub::Global<IdentityRecyclerFactory>);
+pub struct Global {
+    global: wgc::global::Global<IdentityRecyclerFactory>,
+    #[allow(dead_code)]
+    owner: *mut c_void,
+}
 
 impl std::ops::Deref for Global {
-    type Target = wgc::hub::Global<IdentityRecyclerFactory>;
+    type Target = wgc::global::Global<IdentityRecyclerFactory>;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.global
     }
 }
 
 #[no_mangle]
-pub extern "C" fn wgpu_server_new(factory: IdentityRecyclerFactory) -> *mut Global {
+pub extern "C" fn wgpu_server_new(
+    factory: IdentityRecyclerFactory,
+    owner: *mut c_void,
+) -> *mut Global {
     log::info!("Initializing WGPU server");
     let backends_pref = static_prefs::pref!("dom.webgpu.wgpu-backend").to_string();
     let backends = if backends_pref.is_empty() {
-        wgt::Backends::PRIMARY
+        #[cfg(windows)] {
+            wgt::Backends::DX12
+        }
+        #[cfg(not(windows))] {
+            wgt::Backends::PRIMARY
+        }
     } else {
         log::info!(
             "Selecting backends based on dom.webgpu.wgpu-backend pref: {:?}",
@@ -110,14 +103,23 @@ pub extern "C" fn wgpu_server_new(factory: IdentityRecyclerFactory) -> *mut Glob
         );
         wgc::instance::parse_backends_from_comma_list(&backends_pref)
     };
-    let global = Global(wgc::hub::Global::new(
+
+    let mut instance_flags = wgt::InstanceFlags::from_build_config().with_env();
+    if !static_prefs::pref!("dom.webgpu.hal-labels") {
+        instance_flags.insert(wgt::InstanceFlags::DISCARD_HAL_LABELS);
+    }
+
+    let global = wgc::global::Global::new(
         "wgpu",
         factory,
         wgt::InstanceDescriptor {
             backends,
+            flags: instance_flags,
             dx12_shader_compiler: wgt::Dx12Compiler::Fxc,
+            gles_minor_version: wgt::Gles3MinorVersion::Automatic,
         },
-    ));
+    );
+    let global = Global { global, owner };
     Box::into_raw(Box::new(global))
 }
 
@@ -137,6 +139,13 @@ pub extern "C" fn wgpu_server_poll_all_devices(global: &Global, force_wait: bool
     global.poll_all_devices(force_wait).unwrap();
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct FfiLUID {
+    low_part: c_ulong,
+    high_part: c_long,
+}
+
 /// Request an adapter according to the specified options.
 /// Provide the list of IDs to pick from.
 ///
@@ -146,15 +155,49 @@ pub extern "C" fn wgpu_server_poll_all_devices(global: &Global, force_wait: bool
 ///
 /// This function is unsafe as there is no guarantee that the given pointer is
 /// valid for `id_length` elements.
+#[allow(unused_variables)]
 #[no_mangle]
 pub unsafe extern "C" fn wgpu_server_instance_request_adapter(
     global: &Global,
     desc: &wgc::instance::RequestAdapterOptions,
     ids: *const id::AdapterId,
     id_length: usize,
+    adapter_luid: Option<&FfiLUID>,
     mut error_buf: ErrorBuffer,
 ) -> i8 {
     let ids = slice::from_raw_parts(ids, id_length);
+
+    // Prefer to use the dx12 backend, if one exists, and use the same DXGI adapter as WebRender.
+    // If wgpu uses a different adapter than WebRender, textures created by
+    // webgpu::ExternalTexture do not work with wgpu.
+    #[cfg(target_os = "windows")]
+    if global.global.instance.dx12.is_some() && adapter_luid.is_some() {
+        let hal = global.global.instance_as_hal::<wgc::api::Dx12>().unwrap();
+        for adapter in hal.enumerate_adapters() {
+            let raw_adapter = adapter.adapter.raw_adapter();
+            let mut desc: dxgi::DXGI_ADAPTER_DESC = unsafe { mem::zeroed() };
+            unsafe {
+                raw_adapter.GetDesc(&mut desc);
+            }
+            let id = ids
+                .iter()
+                .find_map(|id| (id.backend() == wgt::Backend::Dx12).then_some(id));
+            if id.is_some()
+                && desc.AdapterLuid.LowPart == adapter_luid.unwrap().low_part
+                && desc.AdapterLuid.HighPart == adapter_luid.unwrap().high_part
+            {
+                let adapter_id =
+                    global.create_adapter_from_hal::<wgh::api::Dx12>(adapter, id.unwrap().clone());
+                return ids.iter().position(|&i| i == adapter_id).unwrap() as i8;
+            }
+        }
+        error_buf.init(ErrMsg {
+            message: "Failed to create adapter for dx12",
+            r#type: ErrorBufferType::Internal,
+        });
+        return -1;
+    }
+
     match global.request_adapter(
         desc,
         wgc::instance::AdapterInputs::IdSet(ids, |i| i.backend()),
@@ -186,9 +229,17 @@ pub unsafe extern "C" fn wgpu_server_adapter_pack_info(
                 backend,
             } = gfx_select!(id => global.adapter_get_info(id)).unwrap();
 
+            if static_prefs::pref!("dom.webgpu.testing.assert-hardware-adapter") {
+                let is_hardware = match device_type {
+                    wgt::DeviceType::IntegratedGpu | wgt::DeviceType::DiscreteGpu => true,
+                    _ => false,
+                };
+                assert!(is_hardware, "Expected a hardware gpu adapter, got {:?}", device_type);
+            }
+
             let info = AdapterInformation {
                 id,
-                limits: gfx_select!(id => global.adapter_limits(id)).unwrap(),
+                limits: restrict_limits(gfx_select!(id => global.adapter_limits(id)).unwrap()),
                 features: gfx_select!(id => global.adapter_features(id)).unwrap(),
                 name,
                 vendor,
@@ -241,6 +292,11 @@ pub unsafe extern "C" fn wgpu_server_adapter_request_device(
 #[no_mangle]
 pub extern "C" fn wgpu_server_adapter_drop(global: &Global, adapter_id: id::AdapterId) {
     gfx_select!(adapter_id => global.adapter_drop(adapter_id))
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_server_device_destroy(global: &Global, self_id: id::DeviceId) {
+    gfx_select!(self_id => global.device_destroy(self_id))
 }
 
 #[no_mangle]
@@ -339,6 +395,7 @@ pub extern "C" fn wgpu_server_device_create_buffer(
     size: wgt::BufferAddress,
     usage: u32,
     mapped_at_creation: bool,
+    shm_allocation_failed: bool,
     mut error_buf: ErrorBuffer,
 ) {
     let utf8_label = label.map(|utf16| utf16.to_string());
@@ -346,8 +403,11 @@ pub extern "C" fn wgpu_server_device_create_buffer(
     let usage = wgt::BufferUsages::from_bits_retain(usage);
 
     // Don't trust the graphics driver with buffer sizes larger than our conservative max texture size.
-    if size > MAX_BUFFER_SIZE {
-        error_buf.init_str("Out of memory");
+    if shm_allocation_failed || size > MAX_BUFFER_SIZE {
+        error_buf.init(ErrMsg {
+            message: "Out of memory",
+            r#type: ErrorBufferType::OutOfMemory,
+        });
         gfx_select!(self_id => global.create_buffer_error(buffer_id, label));
         return;
     }
@@ -382,7 +442,7 @@ pub unsafe extern "C" fn wgpu_server_buffer_map(
         callback,
     };
     // All errors are also exposed to the mapping callback, so we handle them there and ignore
-    // the the returned value of buffer_map_async.
+    // the returned value of buffer_map_async.
     let _ = gfx_select!(buffer_id => global.buffer_map_async(
         buffer_id,
         start .. start + size,
@@ -430,7 +490,14 @@ pub extern "C" fn wgpu_server_buffer_unmap(
     mut error_buf: ErrorBuffer,
 ) {
     if let Err(e) = gfx_select!(buffer_id => global.buffer_unmap(buffer_id)) {
-        error_buf.init(e);
+        match e {
+            // NOTE: This is presumed by CTS test cases, and was even formally specified in the
+            // WebGPU spec. previously, but this doesn't seem formally specified now. :confused:
+            //
+            // TODO: upstream this; see <https://bugzilla.mozilla.org/show_bug.cgi?id=1842297>.
+            BufferAccessError::Invalid => (),
+            other => error_buf.init(other),
+        }
     }
 }
 
@@ -447,24 +514,142 @@ pub extern "C" fn wgpu_server_buffer_drop(global: &Global, self_id: id::BufferId
     gfx_select!(self_id => global.buffer_drop(self_id, false));
 }
 
+extern "C" {
+    #[allow(dead_code)]
+    fn wgpu_server_use_external_texture_for_swap_chain(
+        param: *mut c_void,
+        swap_chain_id: SwapChainId,
+    ) -> bool;
+    #[allow(dead_code)]
+    fn wgpu_server_ensure_external_texture_for_swap_chain(
+        param: *mut c_void,
+        swap_chain_id: SwapChainId,
+        device_id: id::DeviceId,
+        texture_id: id::TextureId,
+        width: u32,
+        height: u32,
+        format: wgt::TextureFormat,
+        usage: wgt::TextureUsages,
+    ) -> bool;
+    #[allow(dead_code)]
+    fn wgpu_server_get_external_texture_handle(
+        param: *mut c_void,
+        id: id::TextureId,
+    ) -> *mut c_void;
+}
+
 impl Global {
-    fn device_action<A: wgc::hub::HalApi>(
+    fn device_action<A: wgc::hal_api::HalApi>(
         &self,
         self_id: id::DeviceId,
         action: DeviceAction,
         mut error_buf: ErrorBuffer,
     ) {
         match action {
-            DeviceAction::CreateTexture(id, desc) => {
+            #[allow(unused_variables)]
+            DeviceAction::CreateTexture(id, desc, swap_chain_id) => {
                 let max = MAX_TEXTURE_EXTENT;
                 if desc.size.width > max
                     || desc.size.height > max
                     || desc.size.depth_or_array_layers > max
                 {
                     gfx_select!(self_id => self.create_texture_error(id, desc.label));
-                    error_buf.init_str("Out of memory");
+                    error_buf.init(ErrMsg {
+                        message: "Out of memory",
+                        r#type: ErrorBufferType::OutOfMemory,
+                    });
                     return;
                 }
+
+                #[cfg(target_os = "windows")]
+                {
+                    let use_external_texture = if swap_chain_id.is_some() {
+                        unsafe {
+                            wgpu_server_use_external_texture_for_swap_chain(
+                                self.owner,
+                                swap_chain_id.unwrap(),
+                            )
+                        }
+                    } else {
+                        false
+                    };
+
+                    if use_external_texture && self_id.backend() == wgt::Backend::Dx12 {
+                        let ret = unsafe {
+                            wgpu_server_ensure_external_texture_for_swap_chain(
+                                self.owner,
+                                swap_chain_id.unwrap(),
+                                self_id,
+                                id,
+                                desc.size.width,
+                                desc.size.height,
+                                desc.format,
+                                desc.usage,
+                            )
+                        };
+                        if ret != true {
+                            error_buf.init(ErrMsg {
+                                message: "Failed to create external texture",
+                                r#type: ErrorBufferType::Internal,
+                            });
+                            return;
+                        }
+
+                        let dx12_device = unsafe {
+                            self.device_as_hal::<wgc::api::Dx12, _, d3d12::Device>(
+                                self_id,
+                                |hal_device| hal_device.unwrap().raw_device().clone(),
+                            )
+                        };
+
+                        let handle =
+                            unsafe { wgpu_server_get_external_texture_handle(self.owner, id) };
+                        if handle.is_null() {
+                            error_buf.init(ErrMsg {
+                                message: "Failed to get external texture handle",
+                                r#type: ErrorBufferType::Internal,
+                            });
+                        }
+                        let mut resource = d3d12::Resource::null();
+                        let hr = unsafe {
+                            dx12_device.OpenSharedHandle(
+                                handle,
+                                &d3d12_ty::ID3D12Resource::uuidof(),
+                                resource.mut_void(),
+                            )
+                        };
+                        if hr != 0 {
+                            error_buf.init(ErrMsg {
+                                message: "Failed to open shared handle",
+                                r#type: ErrorBufferType::Internal,
+                            });
+                        }
+
+                        let hal_texture = unsafe {
+                            <wgh::api::Dx12 as wgh::Api>::Device::texture_from_raw(
+                                resource,
+                                wgt::TextureFormat::Bgra8Unorm,
+                                wgt::TextureDimension::D2,
+                                desc.size,
+                                1,
+                                1,
+                            )
+                        };
+                        let (_, error) = unsafe {
+                            self.create_texture_from_hal::<wgh::api::Dx12>(
+                                hal_texture,
+                                self_id,
+                                &desc,
+                                id,
+                            )
+                        };
+                        if let Some(err) = error {
+                            error_buf.init(err);
+                        }
+                        return;
+                    }
+                }
+
                 let (_, error) = self.device_create_texture::<A>(self_id, &desc, id);
                 if let Some(err) = error {
                     error_buf.init(err);
@@ -478,6 +663,18 @@ impl Global {
             }
             DeviceAction::CreateBindGroupLayout(id, desc) => {
                 let (_, error) = self.device_create_bind_group_layout::<A>(self_id, &desc, id);
+                if let Some(err) = error {
+                    error_buf.init(err);
+                }
+            }
+            DeviceAction::RenderPipelineGetBindGroupLayout(pipeline_id, index, bgl_id) => {
+                let (_, error) = self.render_pipeline_get_bind_group_layout::<A>(pipeline_id, index, bgl_id);
+                if let Some(err) = error {
+                    error_buf.init(err);
+                }
+            }
+            DeviceAction::ComputePipelineGetBindGroupLayout(pipeline_id, index, bgl_id) => {
+                let (_, error) = self.compute_pipeline_get_bind_group_layout::<A>(pipeline_id, index, bgl_id);
                 if let Some(err) = error {
                     error_buf.init(err);
                 }
@@ -542,13 +739,16 @@ impl Global {
                     error_buf.init(err);
                 }
             }
-            DeviceAction::Error(message) => {
-                error_buf.init_str(&message);
+            DeviceAction::Error { message, r#type } => {
+                error_buf.init(ErrMsg {
+                    message: &message,
+                    r#type,
+                });
             }
         }
     }
 
-    fn texture_action<A: wgc::hub::HalApi>(
+    fn texture_action<A: wgc::hal_api::HalApi>(
         &self,
         self_id: id::TextureId,
         action: TextureAction,
@@ -564,7 +764,7 @@ impl Global {
         }
     }
 
-    fn command_encoder_action<A: wgc::hub::HalApi>(
+    fn command_encoder_action<A: wgc::hal_api::HalApi>(
         &self,
         self_id: id::CommandEncoderId,
         action: CommandEncoderAction,
@@ -605,10 +805,15 @@ impl Global {
                     error_buf.init(err);
                 }
             }
-            CommandEncoderAction::RunComputePass { base } => {
-                if let Err(err) =
-                    self.command_encoder_run_compute_pass_impl::<A>(self_id, base.as_ref())
-                {
+            CommandEncoderAction::RunComputePass {
+                base,
+                timestamp_writes,
+            } => {
+                if let Err(err) = self.command_encoder_run_compute_pass_impl::<A>(
+                    self_id,
+                    base.as_ref(),
+                    timestamp_writes.as_ref(),
+                ) {
                     error_buf.init(err);
                 }
             }
@@ -644,12 +849,16 @@ impl Global {
                 base,
                 target_colors,
                 target_depth_stencil,
+                timestamp_writes,
+                occlusion_query_set_id,
             } => {
                 if let Err(err) = self.command_encoder_run_render_pass_impl::<A>(
                     self_id,
                     base.as_ref(),
                     &target_colors,
                     target_depth_stencil.as_ref(),
+                    timestamp_writes.as_ref(),
+                    occlusion_query_set_id,
                 ) {
                     error_buf.init(err);
                 }
@@ -804,6 +1013,15 @@ pub unsafe extern "C" fn wgpu_server_queue_submit(
     if let Err(err) = result {
         error_buf.init(err);
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wgpu_server_on_submitted_work_done(
+    global: &Global,
+    self_id: id::QueueId,
+    callback: wgc::device::queue::SubmittedWorkDoneClosureC,
+) {
+    gfx_select!(self_id => global.queue_on_submitted_work_done(self_id, wgc::device::queue::SubmittedWorkDoneClosure::from_c(callback))).unwrap();
 }
 
 /// # Safety

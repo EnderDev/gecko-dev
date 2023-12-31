@@ -29,6 +29,7 @@
 #include "mozilla/TouchEvents.h"
 #include "mozilla/URLExtraData.h"
 #include "mozilla/dom/Attr.h"
+#include "mozilla/dom/RadioGroupContainer.h"
 #include "nsDOMAttributeMap.h"
 #include "nsAtom.h"
 #include "mozilla/dom/NodeInfo.h"
@@ -112,6 +113,10 @@
 
 #include "NodeUbiReporting.h"
 
+#ifdef ACCESSIBILITY
+#  include "nsAccessibilityService.h"
+#endif
+
 using namespace mozilla;
 using namespace mozilla::dom;
 
@@ -143,12 +148,13 @@ NS_INTERFACE_MAP_BEGIN(nsIContent)
   NS_INTERFACE_MAP_ENTRY(nsISupports)
 NS_INTERFACE_MAP_END
 
-NS_IMPL_MAIN_THREAD_ONLY_CYCLE_COLLECTING_ADDREF(nsIContent)
+NS_IMPL_CYCLE_COLLECTING_ADDREF(nsIContent)
 
 NS_IMPL_DOMARENA_DESTROY(nsIContent)
 
-NS_IMPL_MAIN_THREAD_ONLY_CYCLE_COLLECTING_RELEASE_WITH_LAST_RELEASE_AND_DESTROY(
-    nsIContent, LastRelease(), Destroy())
+NS_IMPL_CYCLE_COLLECTING_RELEASE_WITH_LAST_RELEASE_AND_DESTROY(nsIContent,
+                                                               LastRelease(),
+                                                               Destroy())
 
 nsIContent* nsIContent::FindFirstNonChromeOnlyAccessContent() const {
   // This handles also nested native anonymous content.
@@ -553,8 +559,7 @@ size_t nsIContent::nsExtendedContentSlots::SizeOfExcludingThis(
   return 0;
 }
 
-FragmentOrElement::nsDOMSlots::nsDOMSlots()
-    : nsIContent::nsContentSlots(), mDataset(nullptr) {
+FragmentOrElement::nsDOMSlots::nsDOMSlots() : mDataset(nullptr) {
   MOZ_COUNT_CTOR(nsDOMSlots);
 }
 
@@ -654,6 +659,7 @@ void FragmentOrElement::nsExtendedDOMSlots::UnlinkExtendedSlots(
     aContent.ClearMayHaveAnimations();
   }
   mExplicitlySetAttrElements.Clear();
+  mRadioGroupContainer = nullptr;
 }
 
 void FragmentOrElement::nsExtendedDOMSlots::TraverseExtendedSlots(
@@ -677,6 +683,9 @@ void FragmentOrElement::nsExtendedDOMSlots::TraverseExtendedSlots(
   }
   if (mAnimations) {
     mAnimations->Traverse(aCb);
+  }
+  if (mRadioGroupContainer) {
+    RadioGroupContainer::Traverse(mRadioGroupContainer.get(), aCb);
   }
 }
 
@@ -710,6 +719,10 @@ size_t FragmentOrElement::nsExtendedDOMSlots::SizeOfExcludingThis(
 
   if (mCustomElementData) {
     n += mCustomElementData->SizeOfIncludingThis(aMallocSizeOf);
+  }
+
+  if (mRadioGroupContainer) {
+    n += mRadioGroupContainer->SizeOfIncludingThis(aMallocSizeOf);
   }
 
   return n;
@@ -1024,8 +1037,22 @@ bool nsIContent::IsFocusable(int32_t* aTabIndex, bool aWithMouse) {
   return false;
 }
 
-Element* nsIContent::GetFocusDelegate(bool aWithMouse,
-                                      bool aAutofocusOnly) const {
+Element* nsIContent::GetAutofocusDelegate(bool aWithMouse) const {
+  for (nsINode* node = GetFirstChild(); node; node = node->GetNextNode(this)) {
+    auto* descendant = Element::FromNode(*node);
+    if (!descendant || !descendant->GetBoolAttr(nsGkAtoms::autofocus)) {
+      continue;
+    }
+
+    nsIFrame* frame = descendant->GetPrimaryFrame();
+    if (frame && frame->IsFocusable(aWithMouse)) {
+      return descendant;
+    }
+  }
+  return nullptr;
+}
+
+Element* nsIContent::GetFocusDelegate(bool aWithMouse) const {
   const nsIContent* whereToLook = this;
   if (ShadowRoot* root = GetShadowRoot()) {
     if (!root->DelegatesFocus()) {
@@ -1036,9 +1063,14 @@ Element* nsIContent::GetFocusDelegate(bool aWithMouse,
     whereToLook = root;
   }
 
-  auto IsFocusable = [&](Element* aElement) {
+  auto IsFocusable = [&](Element* aElement) -> nsIFrame::Focusable {
     nsIFrame* frame = aElement->GetPrimaryFrame();
-    return frame && frame->IsFocusable(aWithMouse);
+
+    if (!frame) {
+      return {};
+    }
+
+    return frame->IsFocusable(aWithMouse);
   };
 
   Element* potentialFocus = nullptr;
@@ -1051,18 +1083,25 @@ Element* nsIContent::GetFocusDelegate(bool aWithMouse,
 
     const bool autofocus = el->GetBoolAttr(nsGkAtoms::autofocus);
 
-    if (aAutofocusOnly && !autofocus) {
-      continue;
-    }
     if (autofocus) {
       if (IsFocusable(el)) {
         // Found an autofocus candidate.
         return el;
       }
-    } else if (!potentialFocus && IsFocusable(el)) {
-      // This element could be the one if we can't find an
-      // autofocus candidate which has the precedence.
-      potentialFocus = el;
+    } else if (!potentialFocus) {
+      if (nsIFrame::Focusable focusable = IsFocusable(el)) {
+        if (IsHTMLElement(nsGkAtoms::dialog)) {
+          if (focusable.mTabIndex >= 0) {
+            // If focusTarget is a dialog element and descendant is sequentially
+            // focusable, then set focusableArea to descendant.
+            potentialFocus = el;
+          }
+        } else {
+          // This element could be the one if we can't find an
+          // autofocus candidate which has the precedence.
+          potentialFocus = el;
+        }
+      }
     }
 
     if (!autofocus && potentialFocus) {
@@ -1151,7 +1190,22 @@ void FragmentOrElement::GetTextContentInternal(nsAString& aTextContent,
 void FragmentOrElement::SetTextContentInternal(const nsAString& aTextContent,
                                                nsIPrincipal* aSubjectPrincipal,
                                                ErrorResult& aError) {
-  aError = nsContentUtils::SetNodeTextContent(this, aTextContent, false);
+  bool tryReuse = false;
+  if (!aTextContent.IsEmpty()) {
+    if (nsIContent* firstChild = GetFirstChild()) {
+      tryReuse = firstChild->NodeType() == TEXT_NODE &&
+                 !firstChild->GetNextSibling() &&
+                 firstChild->OwnedOnlyByTheDOMAndFrameTrees() &&
+#ifdef ACCESSIBILITY
+                 !GetAccService() &&
+#endif
+                 !OwnerDoc()->MayHaveDOMMutationObservers() &&
+                 !nsContentUtils::HasMutationListeners(
+                     OwnerDoc(), NS_EVENT_BITS_MUTATION_ALL);
+    }
+  }
+
+  aError = nsContentUtils::SetNodeTextContent(this, aTextContent, tryReuse);
 }
 
 void FragmentOrElement::DestroyContent() {

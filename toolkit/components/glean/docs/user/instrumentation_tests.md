@@ -34,6 +34,9 @@ you're going to want to write some automated tests.
 * You may see values from previous tests persist across tests because the profile directory was shared between test cases.
     * You can reset Glean before your test by calling
       `Services.fog.testResetFOG()` (in JS).
+        * If your instrumentation isn't on the parent process,
+          you should call `await Services.fog.testFlushAllChildren()` before `testResetFOG`.
+          That will ensure all pending data makes it to the parent process to be cleared.
     * You shouldn't have to do this in C++ or Rust since there you should use the
       `FOGFixture` test fixture.
 * If your metric is based on timing (`timespan`, `timing_distribution`),
@@ -197,8 +200,15 @@ But your instrumentation might be on any process, so how do you test it?
 In this case there's a slight addition to the Usual Test Format:
 1) Assert no value in the metric
 2) Express behaviour
-3) _Flush all pending FOG IPC operations with `Services.fog.testFlushAllChildren()`_
+3) _Flush all pending FOG IPC operations with `await Services.fog.testFlushAllChildren()`_
 4) Assert correct value in the metric.
+
+**NOTE:** We learned in
+[bug 1843178](https://bugzilla.mozilla.org/show_bug.cgi?id=1843178)
+that the list of all content processes that `Services.fog.testFlushAllChildren()`
+uses is very quickly updated after the end of a call to `BrowserUtils.withNewTab(...)`.
+If you are using `withNewTab`, you should consider calling `testFlushAllChildren()`
+_within_ the callback.
 
 ## GTests/Google Tests
 

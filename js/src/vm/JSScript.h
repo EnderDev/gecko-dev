@@ -27,6 +27,7 @@
 
 #include "frontend/ScriptIndex.h"  // ScriptIndex
 #include "gc/Barrier.h"
+#include "js/ColumnNumber.h"  // JS::LimitedColumnNumberOneOrigin, JS::LimitedColumnNumberOneOrigin
 #include "js/CompileOptions.h"
 #include "js/Transcoding.h"
 #include "js/UbiNode.h"
@@ -421,6 +422,11 @@ class ScriptSource {
     ScriptSource* source_;
 
     explicit PinnedUnitsBase(ScriptSource* source) : source_(source) {}
+
+    void addReader();
+
+    template <typename Unit>
+    void removeReader();
   };
 
  public:
@@ -439,6 +445,22 @@ class ScriptSource {
                 size_t len);
 
     ~PinnedUnits();
+
+    const Unit* get() const { return units_; }
+
+    const typename SourceTypeTraits<Unit>::CharT* asChars() const {
+      return SourceTypeTraits<Unit>::toString(get());
+    }
+  };
+
+  template <typename Unit>
+  class PinnedUnitsIfUncompressed : public PinnedUnitsBase {
+    const Unit* units_;
+
+   public:
+    PinnedUnitsIfUncompressed(ScriptSource* source, size_t begin, size_t len);
+
+    ~PinnedUnitsIfUncompressed();
 
     const Unit* get() const { return units_; }
 
@@ -597,10 +619,11 @@ class ScriptSource {
   // 0 for other cases.
   uint32_t parameterListEnd_ = 0;
 
-  // Line number within the file where this source starts.
+  // Line number within the file where this source starts (1-origin).
   uint32_t startLine_ = 0;
-  // Column number within the file where this source starts.
-  uint32_t startColumn_ = 0;
+  // Column number within the file where this source starts,
+  // in UTF-16 code units.
+  JS::LimitedColumnNumberOneOrigin startColumn_;
 
   // See: CompileOptions::mutedErrors.
   bool mutedErrors_ = false;
@@ -632,6 +655,9 @@ class ScriptSource {
   template <typename Unit>
   const Unit* units(JSContext* cx, UncompressedSourceCache::AutoHoldEntry& asp,
                     size_t begin, size_t len);
+
+  template <typename Unit>
+  const Unit* uncompressedUnits(size_t begin, size_t len);
 
  public:
   // When creating a JSString* from TwoByte source characters, we don't try to
@@ -1037,7 +1063,7 @@ class ScriptSource {
   bool mutedErrors() const { return mutedErrors_; }
 
   uint32_t startLine() const { return startLine_; }
-  uint32_t startColumn() const { return startColumn_; }
+  JS::LimitedColumnNumberOneOrigin startColumn() const { return startColumn_; }
 
   JS::DelazificationOption delazificationMode() const {
     return delazificationMode_;
@@ -1516,8 +1542,10 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
   [[nodiscard]] bool appendSourceDataForToString(JSContext* cx,
                                                  js::StringBuffer& buf);
 
+  // Line number (1-origin)
   uint32_t lineno() const { return extent_.lineno; }
-  uint32_t column() const { return extent_.column; }
+  // Column number in UTF-16 code units
+  JS::LimitedColumnNumberOneOrigin column() const { return extent_.column; }
 
   JS::DelazificationOption delazificationMode() const {
     return scriptSource()->delazificationMode();
@@ -1952,7 +1980,7 @@ class JSScript : public js::BaseScript {
 
   void addSizeOfJitScript(mozilla::MallocSizeOf mallocSizeOf,
                           size_t* sizeOfJitScript,
-                          size_t* sizeOfBaselineFallbackStubs) const;
+                          size_t* sizeOfAllocSites) const;
 
   mozilla::Span<const js::TryNote> trynotes() const {
     return immutableScriptData()->tryNotes();
@@ -1985,6 +2013,10 @@ class JSScript : public js::BaseScript {
   js::SrcNote* notes() const {
     MOZ_ASSERT(sharedData_);
     return immutableScriptData()->notes();
+  }
+  js::SrcNote* notesEnd() const {
+    MOZ_ASSERT(sharedData_);
+    return immutableScriptData()->notes() + numNotes();
   }
 
   JSString* getString(js::GCThingIndex index) const {
@@ -2144,15 +2176,15 @@ class JSScript : public js::BaseScript {
   void dumpRecursive(JSContext* cx);
 
   static bool dump(JSContext* cx, JS::Handle<JSScript*> script,
-                   DumpOptions& options, js::Sprinter* sp);
+                   DumpOptions& options, js::StringPrinter* sp);
   static bool dumpSrcNotes(JSContext* cx, JS::Handle<JSScript*> script,
-                           js::Sprinter* sp);
+                           js::GenericPrinter* sp);
   static bool dumpTryNotes(JSContext* cx, JS::Handle<JSScript*> script,
-                           js::Sprinter* sp);
+                           js::GenericPrinter* sp);
   static bool dumpScopeNotes(JSContext* cx, JS::Handle<JSScript*> script,
-                             js::Sprinter* sp);
+                             js::GenericPrinter* sp);
   static bool dumpGCThings(JSContext* cx, JS::Handle<JSScript*> script,
-                           js::Sprinter* sp);
+                           js::GenericPrinter* sp);
 #endif
 };
 
@@ -2181,16 +2213,8 @@ struct ScriptAndCounts {
 };
 
 extern JS::UniqueChars FormatIntroducedFilename(const char* filename,
-                                                unsigned lineno,
+                                                uint32_t lineno,
                                                 const char* introducer);
-
-struct GSNCache;
-
-const js::SrcNote* GetSrcNote(GSNCache& cache, JSScript* script,
-                              jsbytecode* pc);
-
-extern const js::SrcNote* GetSrcNote(JSContext* cx, JSScript* script,
-                                     jsbytecode* pc);
 
 extern jsbytecode* LineNumberToPC(JSScript* script, unsigned lineno);
 
@@ -2205,12 +2229,14 @@ void maybeSpewScriptFinalWarmUpCount(JSScript* script);
 
 namespace js {
 
-extern unsigned PCToLineNumber(JSScript* script, jsbytecode* pc,
-                               unsigned* columnp = nullptr);
+extern unsigned PCToLineNumber(
+    JSScript* script, jsbytecode* pc,
+    JS::LimitedColumnNumberOneOrigin* columnp = nullptr);
 
-extern unsigned PCToLineNumber(unsigned startLine, unsigned startCol,
-                               SrcNote* notes, jsbytecode* code, jsbytecode* pc,
-                               unsigned* columnp = nullptr);
+extern unsigned PCToLineNumber(
+    unsigned startLine, JS::LimitedColumnNumberOneOrigin startCol,
+    SrcNote* notes, SrcNote* notesEnd, jsbytecode* code, jsbytecode* pc,
+    JS::LimitedColumnNumberOneOrigin* columnp = nullptr);
 
 /*
  * This function returns the file and line number of the script currently
@@ -2220,7 +2246,7 @@ extern unsigned PCToLineNumber(unsigned startLine, unsigned startCol,
  */
 extern void DescribeScriptedCallerForCompilation(
     JSContext* cx, MutableHandleScript maybeScript, const char** file,
-    unsigned* linenop, uint32_t* pcOffset, bool* mutedErrors);
+    uint32_t* linenop, uint32_t* pcOffset, bool* mutedErrors);
 
 /*
  * Like DescribeScriptedCallerForCompilation, but this function avoids looking
@@ -2228,11 +2254,10 @@ extern void DescribeScriptedCallerForCompilation(
  */
 extern void DescribeScriptedCallerForDirectEval(
     JSContext* cx, HandleScript script, jsbytecode* pc, const char** file,
-    unsigned* linenop, uint32_t* pcOffset, bool* mutedErrors);
+    uint32_t* linenop, uint32_t* pcOffset, bool* mutedErrors);
 
 bool CheckCompileOptionsMatch(const JS::ReadOnlyCompileOptions& options,
-                              js::ImmutableScriptFlags flags,
-                              bool isMultiDecode);
+                              js::ImmutableScriptFlags flags);
 
 void FillImmutableFlagsFromCompileOptionsForTopLevel(
     const JS::ReadOnlyCompileOptions& options, js::ImmutableScriptFlags& flags);

@@ -74,6 +74,39 @@ void nsCanvasFrame::HideCustomContentContainer() {
   }
 }
 
+// Do this off a script-runner because some anon content might load CSS which we
+// don't want to deal with while doing frame construction.
+void InsertAnonymousContentInContainer(Document& aDoc, Element& aContainer) {
+  if (!aContainer.IsInComposedDoc() || aDoc.GetAnonymousContents().IsEmpty()) {
+    return;
+  }
+  for (RefPtr<AnonymousContent>& anonContent : aDoc.GetAnonymousContents()) {
+    if (nsCOMPtr<nsINode> parent = anonContent->Host()->GetParentNode()) {
+      // Parent had better be an old custom content container already
+      // removed from a reframe. Forget about it since we're about to get
+      // inserted in a new one.
+      //
+      // TODO(emilio): Maybe we should extend PostDestroyData and do this
+      // stuff there instead, or something...
+      MOZ_ASSERT(parent != &aContainer);
+      MOZ_ASSERT(parent->IsElement());
+      MOZ_ASSERT(parent->AsElement()->IsRootOfNativeAnonymousSubtree());
+      MOZ_ASSERT(!parent->IsInComposedDoc());
+      MOZ_ASSERT(!parent->GetParentNode());
+
+      parent->RemoveChildNode(anonContent->Host(), true);
+    }
+    aContainer.AppendChildTo(anonContent->Host(), true, IgnoreErrors());
+  }
+  // Flush frames now. This is really sadly needed, but otherwise stylesheets
+  // inserted by the above DOM changes might not be processed in time for layout
+  // to run.
+  // FIXME(emilio): This is because we have a script-running checkpoint just
+  // after ProcessPendingRestyles but before DoReflow. That seems wrong! Ideally
+  // the whole layout / styling pass should be atomic.
+  aDoc.FlushPendingNotifications(FlushType::Frames);
+}
+
 nsresult nsCanvasFrame::CreateAnonymousContent(
     nsTArray<ContentInfo>& aElements) {
   MOZ_ASSERT(!mCustomContentContainer);
@@ -82,19 +115,7 @@ nsresult nsCanvasFrame::CreateAnonymousContent(
     return NS_OK;
   }
 
-  nsCOMPtr<Document> doc = mContent->OwnerDoc();
-
-  RefPtr<AccessibleCaretEventHub> eventHub =
-      PresShell()->GetAccessibleCaretEventHub();
-
-  // This will go through InsertAnonymousContent and such, and we don't really
-  // want it to end up inserting into our content container.
-  //
-  // FIXME(emilio): The fact that this enters into InsertAnonymousContent is a
-  // bit nasty, can we avoid it, maybe doing this off a scriptrunner?
-  if (eventHub) {
-    eventHub->Init();
-  }
+  Document* doc = mContent->OwnerDoc();
 
   // Create the custom content container.
   mCustomContentContainer = doc->CreateHTMLElement(nsGkAtoms::div);
@@ -129,31 +150,15 @@ nsresult nsCanvasFrame::CreateAnonymousContent(
   // Only create a frame for mCustomContentContainer if it has some children.
   if (doc->GetAnonymousContents().IsEmpty()) {
     HideCustomContentContainer();
+  } else {
+    nsContentUtils::AddScriptRunner(NS_NewRunnableFunction(
+        "InsertAnonymousContentInContainer",
+        [doc = RefPtr{doc}, container = RefPtr{mCustomContentContainer.get()}] {
+          InsertAnonymousContentInContainer(*doc, *container);
+        }));
   }
 
-  for (RefPtr<AnonymousContent>& anonContent : doc->GetAnonymousContents()) {
-    if (nsCOMPtr<nsINode> parent = anonContent->ContentNode().GetParentNode()) {
-      // Parent had better be an old custom content container already removed
-      // from a reframe. Forget about it since we're about to get inserted in a
-      // new one.
-      //
-      // TODO(emilio): Maybe we should extend PostDestroyData and do this stuff
-      // there instead, or something...
-      MOZ_ASSERT(parent != mCustomContentContainer);
-      MOZ_ASSERT(parent->IsElement());
-      MOZ_ASSERT(parent->AsElement()->IsRootOfNativeAnonymousSubtree());
-      MOZ_ASSERT(!parent->IsInComposedDoc());
-      MOZ_ASSERT(!parent->GetParentNode());
-
-      parent->RemoveChildNode(&anonContent->ContentNode(), false);
-    }
-
-    mCustomContentContainer->AppendChildTo(&anonContent->ContentNode(), false,
-                                           IgnoreErrors());
-  }
-
-  // Create a popupgroup element for system privileged non-XUL documents to
-  // support context menus and tooltips.
+  // Create a default tooltip element for system privileged documents.
   if (XRE_IsParentProcess() && doc->NodePrincipal()->IsSystemPrincipal()) {
     nsNodeInfoManager* nodeInfoManager = doc->NodeInfoManager();
     RefPtr<NodeInfo> nodeInfo = nodeInfoManager->GetNodeInfo(
@@ -198,19 +203,18 @@ void nsCanvasFrame::AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
   }
 }
 
-void nsCanvasFrame::DestroyFrom(nsIFrame* aDestructRoot,
-                                PostDestroyData& aPostDestroyData) {
+void nsCanvasFrame::Destroy(DestroyContext& aContext) {
   nsIScrollableFrame* sf =
       PresContext()->GetPresShell()->GetRootScrollFrameAsScrollable();
   if (sf) {
     sf->RemoveScrollPositionListener(this);
   }
 
-  aPostDestroyData.AddAnonymousContent(mCustomContentContainer.forget());
+  aContext.AddAnonymousContent(mCustomContentContainer.forget());
   if (mTooltipContent) {
-    aPostDestroyData.AddAnonymousContent(mTooltipContent.forget());
+    aContext.AddAnonymousContent(mTooltipContent.forget());
   }
-  nsContainerFrame::DestroyFrom(aDestructRoot, aPostDestroyData);
+  nsContainerFrame::Destroy(aContext);
 }
 
 void nsCanvasFrame::ScrollPositionWillChange(nscoord aX, nscoord aY) {
@@ -273,9 +277,10 @@ void nsCanvasFrame::InsertFrames(ChildListID aListID, nsIFrame* aPrevFrame,
 }
 
 #ifdef DEBUG
-void nsCanvasFrame::RemoveFrame(ChildListID aListID, nsIFrame* aOldFrame) {
+void nsCanvasFrame::RemoveFrame(DestroyContext& aContext, ChildListID aListID,
+                                nsIFrame* aOldFrame) {
   MOZ_ASSERT(aListID == FrameChildListID::Principal, "unexpected child list");
-  nsContainerFrame::RemoveFrame(aListID, aOldFrame);
+  nsContainerFrame::RemoveFrame(aContext, aListID, aOldFrame);
 }
 #endif
 

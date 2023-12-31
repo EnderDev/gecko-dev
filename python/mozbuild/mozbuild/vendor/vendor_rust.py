@@ -75,26 +75,15 @@ Cargo.lock to the HEAD version, run `git checkout -- Cargo.lock` or
 """
 
 
-WINDOWS_UNDESIRABLE_REASON = """\
-The windows and windows-sys crates and their dependencies are too big to \
-vendor, and is a risk of version duplication due to its current update \
-cadence. Until this is worked out with upstream, we prefer to avoid them.\
-"""
-
 PACKAGES_WE_DONT_WANT = {
-    "windows-sys": WINDOWS_UNDESIRABLE_REASON,
-    "windows": WINDOWS_UNDESIRABLE_REASON,
-    "windows_aarch64_msvc": WINDOWS_UNDESIRABLE_REASON,
-    "windows_i686_gnu": WINDOWS_UNDESIRABLE_REASON,
-    "windows_i686_msvc": WINDOWS_UNDESIRABLE_REASON,
-    "windows_x86_64_gnu": WINDOWS_UNDESIRABLE_REASON,
-    "windows_x86_64_msvc": WINDOWS_UNDESIRABLE_REASON,
+    "windows": "The windows crate is too big to vendor.",
 }
 
 PACKAGES_WE_ALWAYS_WANT_AN_OVERRIDE_OF = [
     "autocfg",
     "cmake",
     "vcpkg",
+    "windows-targets",
 ]
 
 
@@ -107,8 +96,6 @@ TOLERATED_DUPES = {
     # and hasn't been updated in 1.5 years (an hypothetical update is
     # expected to remove the dependency on time altogether).
     "time": 2,
-    # Transition is underway from syn 1.x to 2.x. (bug 1835053)
-    "syn": 2,
 }
 
 
@@ -174,12 +161,12 @@ class VendorRust(MozbuildObject):
         if not out.startswith("cargo"):
             return False
         version = LooseVersion(out.split()[1])
-        # Cargo 1.68.0 changed vendoring in a way that creates a lot of noise
+        # Cargo 1.71.0 changed vendoring in a way that creates a lot of noise
         # if we go back and forth between vendoring with an older version and
         # a newer version. Only allow the newer versions.
         minimum_rust_version = MINIMUM_RUST_VERSION
-        if LooseVersion("1.68.0") >= MINIMUM_RUST_VERSION:
-            minimum_rust_version = "1.68.0"
+        if LooseVersion("1.71.0") >= MINIMUM_RUST_VERSION:
+            minimum_rust_version = "1.71.0"
         if version < minimum_rust_version:
             self.log(
                 logging.ERROR,
@@ -312,8 +299,6 @@ Please commit or stash these changes before vendoring, or re-run with `--ignore-
     RUNTIME_LICENSE_PACKAGE_WHITELIST = {
         "BSD-2-Clause": [
             "arrayref",
-            "cloudabi",
-            "Inflector",
             "mach",
             "qlog",
         ],
@@ -961,4 +946,15 @@ a pull request upstream to ignore those files when publishing.""".format(
                     size=cumulative_added_size
                 ),
             )
+        if "MOZ_AUTOMATION" in os.environ:
+            changed = self.repository.get_changed_files(mode="staged")
+            for file in changed:
+                self.log(
+                    logging.ERROR,
+                    "vendor-change",
+                    {"file": file},
+                    "File was modified by vendor: {file}",
+                )
+            if changed:
+                return False
         return True

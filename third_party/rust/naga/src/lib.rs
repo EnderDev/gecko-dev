@@ -75,8 +75,8 @@ of `Statement`s and other `Expression`s.
 
 Naga's rules for when `Expression`s are evaluated are as follows:
 
--   [`Constant`](Expression::Constant) expressions are considered to be
-    implicitly evaluated before execution begins.
+-   [`Literal`], [`Constant`], and [`ZeroValue`] expressions are
+    considered to be implicitly evaluated before execution begins.
 
 -   [`FunctionArgument`] and [`LocalVariable`] expressions are considered
     implicitly evaluated upon entry to the function to which they belong.
@@ -170,10 +170,41 @@ nested `Block` is not available in the `Block`'s parents. Such a value would
 need to be stored in a local variable to be carried upwards in the statement
 tree.
 
+## Constant expressions
+
+A Naga *constant expression* is one of the following [`Expression`]
+variants, whose operands (if any) are also constant expressions:
+- [`Literal`]
+- [`Constant`], for [`Constant`s][const_type] whose [`override`] is [`None`]
+- [`ZeroValue`], for fixed-size types
+- [`Compose`]
+- [`Access`]
+- [`AccessIndex`]
+- [`Splat`]
+- [`Swizzle`]
+- [`Unary`]
+- [`Binary`]
+- [`Select`]
+- [`Relational`]
+- [`Math`]
+- [`As`]
+
+A constant expression can be evaluated at module translation time.
+
+## Override expressions
+
+A Naga *override expression* is the same as a [constant expression],
+except that it is also allowed to refer to [`Constant`s][const_type]
+whose [`override`] is something other than [`None`].
+
+An override expression can be evaluated at pipeline creation time.
+
 [`AtomicResult`]: Expression::AtomicResult
 [`RayQueryProceedResult`]: Expression::RayQueryProceedResult
 [`CallResult`]: Expression::CallResult
 [`Constant`]: Expression::Constant
+[`ZeroValue`]: Expression::ZeroValue
+[`Literal`]: Expression::Literal
 [`Derivative`]: Expression::Derivative
 [`FunctionArgument`]: Expression::FunctionArgument
 [`GlobalVariable`]: Expression::GlobalVariable
@@ -192,6 +223,26 @@ tree.
 
 [`Validator::validate`]: valid::Validator::validate
 [`ModuleInfo`]: valid::ModuleInfo
+
+[`Literal`]: Expression::Literal
+[`ZeroValue`]: Expression::ZeroValue
+[`Compose`]: Expression::Compose
+[`Access`]: Expression::Access
+[`AccessIndex`]: Expression::AccessIndex
+[`Splat`]: Expression::Splat
+[`Swizzle`]: Expression::Swizzle
+[`Unary`]: Expression::Unary
+[`Binary`]: Expression::Binary
+[`Select`]: Expression::Select
+[`Relational`]: Expression::Relational
+[`Math`]: Expression::Math
+[`As`]: Expression::As
+
+[const_type]: Constant
+[`override`]: Constant::override
+[`None`]: Override::None
+
+[constant expression]: index.html#constant-expressions
 */
 
 #![allow(
@@ -200,7 +251,8 @@ tree.
     clippy::match_like_matches_macro,
     clippy::collapsible_if,
     clippy::derive_partial_eq_without_eq,
-    clippy::needless_borrowed_reference
+    clippy::needless_borrowed_reference,
+    clippy::single_match
 )]
 #![warn(
     trivial_casts,
@@ -212,11 +264,23 @@ tree.
     clippy::rest_pat_in_fully_bound_structs,
     clippy::match_wildcard_for_single_variants
 )]
-#![cfg_attr(not(test), deny(clippy::panic))]
+#![deny(clippy::exit)]
+#![cfg_attr(
+    not(test),
+    warn(
+        clippy::dbg_macro,
+        clippy::panic,
+        clippy::print_stderr,
+        clippy::print_stdout,
+        clippy::todo
+    )
+)]
 
 mod arena;
 pub mod back;
 mod block;
+#[cfg(feature = "compact")]
+pub mod compact;
 pub mod front;
 pub mod keywords;
 pub mod proc;
@@ -241,12 +305,18 @@ pub type FastHashMap<K, T> = rustc_hash::FxHashMap<K, T>;
 /// Hash set that is faster but not resilient to DoS attacks.
 pub type FastHashSet<K> = rustc_hash::FxHashSet<K>;
 
+/// Insertion-order-preserving hash set (`IndexSet<K>`), but with the same
+/// hasher as `FastHashSet<K>` (faster but not resilient to DoS attacks).
+pub type FastIndexSet<K> =
+    indexmap::IndexSet<K, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
+/// Insertion-order-preserving hash map (`IndexMap<K, V>`), but with the same
+/// hasher as `FastHashMap<K, V>` (faster but not resilient to DoS attacks).
+pub type FastIndexMap<K, V> =
+    indexmap::IndexMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
 /// Map of expressions that have associated variable names
-pub(crate) type NamedExpressions = indexmap::IndexMap<
-    Handle<Expression>,
-    String,
-    std::hash::BuildHasherDefault<rustc_hash::FxHasher>,
->;
+pub(crate) type NamedExpressions = FastIndexMap<Handle<Expression>, String>;
 
 /// Early fragment tests.
 ///
@@ -271,7 +341,7 @@ pub(crate) type NamedExpressions = indexmap::IndexMap<
 #[cfg_attr(feature = "deserialize", derive(Deserialize))]
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub struct EarlyDepthTest {
-    conservative: Option<ConservativeDepth>,
+    pub conservative: Option<ConservativeDepth>,
 }
 /// Enables adjusting depth without disabling early Z.
 ///
@@ -402,6 +472,19 @@ pub enum ScalarKind {
     Bool,
 }
 
+/// Characteristics of a scalar type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serialize", derive(Serialize))]
+#[cfg_attr(feature = "deserialize", derive(Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub struct Scalar {
+    /// How the value's bits are to be interpreted.
+    pub kind: ScalarKind,
+
+    /// This size of the value in bytes.
+    pub width: Bytes,
+}
+
 /// Size of an array.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Hash, Eq, Ord, PartialEq, PartialOrd)]
@@ -410,7 +493,7 @@ pub enum ScalarKind {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub enum ArraySize {
     /// The array size is constant.
-    Constant(Handle<Constant>),
+    Constant(std::num::NonZeroU32),
     /// The array size can change at runtime.
     Dynamic,
 }
@@ -488,7 +571,7 @@ bitflags::bitflags! {
     #[cfg_attr(feature = "serialize", derive(Serialize))]
     #[cfg_attr(feature = "deserialize", derive(Deserialize))]
     #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
-    #[derive(Default)]
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
     pub struct StorageAccess: u32 {
         /// Storage can be used as a source for load ops.
         const LOAD = 0x1;
@@ -529,8 +612,10 @@ pub enum StorageFormat {
     Rgba8Snorm,
     Rgba8Uint,
     Rgba8Sint,
+    Bgra8Unorm,
 
     // Packed 32-bit formats
+    Rgb10a2Uint,
     Rgb10a2Unorm,
     Rg11b10Float,
 
@@ -605,13 +690,9 @@ pub struct Type {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub enum TypeInner {
     /// Number of integral or floating-point kind.
-    Scalar { kind: ScalarKind, width: Bytes },
+    Scalar(Scalar),
     /// Vector of numbers.
-    Vector {
-        size: VectorSize,
-        kind: ScalarKind,
-        width: Bytes,
-    },
+    Vector { size: VectorSize, scalar: Scalar },
     /// Matrix of floats.
     Matrix {
         columns: VectorSize,
@@ -619,7 +700,7 @@ pub enum TypeInner {
         width: Bytes,
     },
     /// Atomic scalar.
-    Atomic { kind: ScalarKind, width: Bytes },
+    Atomic(Scalar),
     /// Pointer to another type.
     ///
     /// Pointers to scalars and vectors should be treated as equivalent to
@@ -665,8 +746,7 @@ pub enum TypeInner {
     /// [`TypeResolution::Value`]: proc::TypeResolution::Value
     ValuePointer {
         size: Option<VectorSize>,
-        kind: ScalarKind,
-        width: Bytes,
+        scalar: Scalar,
         space: AddressSpace,
     },
 
@@ -752,13 +832,12 @@ pub enum TypeInner {
     /// buffers could have elements that are dynamically sized arrays, each with
     /// a different length.
     ///
-    /// Binding arrays are not [`DATA`]. This means that all binding array
-    /// globals must be placed in the [`Handle`] address space. Referring to
-    /// such a global produces a `BindingArray` value directly; there are never
-    /// pointers to binding arrays. The only operation permitted on
-    /// `BindingArray` values is indexing, which yields the element by value,
-    /// not a pointer to the element. (This means that buffer array contents
-    /// cannot be stored to; [naga#1864] covers lifting this restriction.)
+    /// Binding arrays are in the same address spaces as their underlying type.
+    /// As such, referring to an array of images produces an [`Image`] value
+    /// directly (as opposed to a pointer). The only operation permitted on
+    /// `BindingArray` values is indexing, which works transparently: indexing
+    /// a binding array of samplers yields a [`Sampler`], indexing a pointer to the
+    /// binding array of storage buffers produces a pointer to the storage struct.
     ///
     /// Unlike textures and samplers, binding arrays are not [`ARGUMENT`], so
     /// they cannot be passed as arguments to functions.
@@ -774,10 +853,34 @@ pub enum TypeInner {
     /// [`SamplerArray`]: https://docs.rs/wgpu/latest/wgpu/enum.BindingResource.html#variant.SamplerArray
     /// [`BufferArray`]: https://docs.rs/wgpu/latest/wgpu/enum.BindingResource.html#variant.BufferArray
     /// [`DATA`]: crate::valid::TypeFlags::DATA
-    /// [`Handle`]: AddressSpace::Handle
     /// [`ARGUMENT`]: crate::valid::TypeFlags::ARGUMENT
     /// [naga#1864]: https://github.com/gfx-rs/naga/issues/1864
     BindingArray { base: Handle<Type>, size: ArraySize },
+}
+
+#[derive(Debug, Clone, Copy, PartialOrd)]
+#[cfg_attr(feature = "serialize", derive(Serialize))]
+#[cfg_attr(feature = "deserialize", derive(Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub enum Literal {
+    /// May not be NaN or infinity.
+    F64(f64),
+    /// May not be NaN or infinity.
+    F32(f32),
+    U32(u32),
+    I32(i32),
+    Bool(bool),
+}
+
+#[derive(Debug, PartialEq)]
+#[cfg_attr(feature = "clone", derive(Clone))]
+#[cfg_attr(feature = "serialize", derive(Serialize))]
+#[cfg_attr(feature = "deserialize", derive(Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub enum Override {
+    None,
+    ByName,
+    ByNameOrId(u32),
 }
 
 /// Constant value.
@@ -788,36 +891,23 @@ pub enum TypeInner {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub struct Constant {
     pub name: Option<String>,
-    pub specialization: Option<u32>,
-    pub inner: ConstantInner,
-}
+    pub r#override: Override,
+    pub ty: Handle<Type>,
 
-/// A literal scalar value, used in constants.
-#[derive(Debug, Clone, Copy, PartialOrd)]
-#[cfg_attr(feature = "serialize", derive(Serialize))]
-#[cfg_attr(feature = "deserialize", derive(Deserialize))]
-#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
-pub enum ScalarValue {
-    Sint(i64),
-    Uint(u64),
-    Float(f64),
-    Bool(bool),
-}
-
-/// Additional information, dependent on the kind of constant.
-#[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serialize", derive(Serialize))]
-#[cfg_attr(feature = "deserialize", derive(Deserialize))]
-#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
-pub enum ConstantInner {
-    Scalar {
-        width: Bytes,
-        value: ScalarValue,
-    },
-    Composite {
-        ty: Handle<Type>,
-        components: Vec<Handle<Constant>>,
-    },
+    /// The value of the constant.
+    ///
+    /// This [`Handle`] refers to [`Module::const_expressions`], not
+    /// any [`Function::expressions`] arena.
+    ///
+    /// If [`override`] is [`None`], then this must be a Naga
+    /// [constant expression]. Otherwise, this may be a Naga
+    /// [override expression] or [constant expression].
+    ///
+    /// [`override`]: Constant::override
+    /// [`None`]: Override::None
+    /// [constant expression]: index.html#constant-expressions
+    /// [override expression]: index.html#override-expressions
+    pub init: Handle<Expression>,
 }
 
 /// Describes how an input/output variable is to be bound.
@@ -847,6 +937,8 @@ pub enum Binding {
     /// [`Fragment`]: crate::ShaderStage::Fragment
     Location {
         location: u32,
+        /// Indicates the 2nd input to the blender when dual-source blending.
+        second_blend_source: bool,
         interpolation: Option<Interpolation>,
         sampling: Option<Sampling>,
     },
@@ -879,7 +971,9 @@ pub struct GlobalVariable {
     /// The type of this variable.
     pub ty: Handle<Type>,
     /// Initial value for this variable.
-    pub init: Option<Handle<Constant>>,
+    ///
+    /// Expression handle lives in const_expressions
+    pub init: Option<Handle<Expression>>,
 }
 
 /// Variable defined at function level.
@@ -893,7 +987,13 @@ pub struct LocalVariable {
     /// The type of this variable.
     pub ty: Handle<Type>,
     /// Initial value for this variable.
-    pub init: Option<Handle<Constant>>,
+    ///
+    /// This handle refers to this `LocalVariable`'s function's
+    /// [`expressions`] arena, but it is required to be an evaluated
+    /// constant expression.
+    ///
+    /// [`expressions`]: Function::expressions
+    pub init: Option<Handle<Expression>>,
 }
 
 /// Operation that can be applied on a single value.
@@ -903,7 +1003,8 @@ pub struct LocalVariable {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub enum UnaryOperator {
     Negate,
-    Not,
+    LogicalNot,
+    BitwiseNot,
 }
 
 /// Operation that can be applied on two values.
@@ -1024,8 +1125,6 @@ pub enum RelationalFunction {
     Any,
     IsNan,
     IsInf,
-    IsFinite,
-    IsNormal,
 }
 
 /// Built-in shader function for math.
@@ -1172,7 +1271,7 @@ bitflags::bitflags! {
     #[cfg_attr(feature = "serialize", derive(Serialize))]
     #[cfg_attr(feature = "deserialize", derive(Deserialize))]
     #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
-    #[derive(Default)]
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct Barrier: u32 {
         /// Barrier affects all `AddressSpace::Storage` accesses.
         const STORAGE = 0x1;
@@ -1184,12 +1283,23 @@ bitflags::bitflags! {
 /// An expression that can be evaluated to obtain a value.
 ///
 /// This is a Single Static Assignment (SSA) scheme similar to SPIR-V.
-#[derive(Clone, Debug)]
-#[cfg_attr(test, derive(PartialEq))]
+#[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serialize", derive(Serialize))]
 #[cfg_attr(feature = "deserialize", derive(Deserialize))]
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub enum Expression {
+    /// Literal.
+    Literal(Literal),
+    /// Constant value.
+    Constant(Handle<Constant>),
+    /// Zero value of a type.
+    ZeroValue(Handle<Type>),
+    /// Composite expression.
+    Compose {
+        ty: Handle<Type>,
+        components: Vec<Handle<Expression>>,
+    },
+
     /// Array access with a computed index.
     ///
     /// ## Typing rules
@@ -1248,8 +1358,6 @@ pub enum Expression {
         base: Handle<Expression>,
         index: u32,
     },
-    /// Constant value.
-    Constant(Handle<Constant>),
     /// Splat scalar into a vector.
     Splat {
         size: VectorSize,
@@ -1260,11 +1368,6 @@ pub enum Expression {
         size: VectorSize,
         vector: Handle<Expression>,
         pattern: [SwizzleComponent; 4],
-    },
-    /// Composite expression.
-    Compose {
-        ty: Handle<Type>,
-        components: Vec<Handle<Expression>>,
     },
 
     /// Reference a function parameter, by its index.
@@ -1314,7 +1417,8 @@ pub enum Expression {
         gather: Option<SwizzleComponent>,
         coordinate: Handle<Expression>,
         array_index: Option<Handle<Expression>>,
-        offset: Option<Handle<Constant>>,
+        /// Expression handle lives in const_expressions
+        offset: Option<Handle<Expression>>,
         level: SampleLevel,
         depth_ref: Option<Handle<Expression>>,
     },
@@ -1415,7 +1519,6 @@ pub enum Expression {
     Derivative {
         axis: DerivativeAxis,
         ctrl: DerivativeControl,
-        //modifier,
         expr: Handle<Expression>,
     },
     /// Call a relational function.
@@ -1445,6 +1548,13 @@ pub enum Expression {
     CallResult(Handle<Function>),
     /// Result of an atomic operation.
     AtomicResult { ty: Handle<Type>, comparison: bool },
+    /// Result of a [`WorkGroupUniformLoad`] statement.
+    ///
+    /// [`WorkGroupUniformLoad`]: Statement::WorkGroupUniformLoad
+    WorkGroupUniformLoadResult {
+        /// The type of the result
+        ty: Handle<Type>,
+    },
     /// Get the length of an array.
     /// The expression must resolve to a pointer to an array with a dynamic size.
     ///
@@ -1470,7 +1580,6 @@ pub enum Expression {
 pub use block::Block;
 
 /// The value of the switch case.
-// Clone is used only for error reporting and is not intended for end users
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(feature = "serialize", derive(Serialize))]
 #[cfg_attr(feature = "deserialize", derive(Deserialize))]
@@ -1579,7 +1688,7 @@ pub enum Statement {
     /// [`body`]: SwitchCase::body
     /// [`Default`]: SwitchValue::Default
     Switch {
-        selector: Handle<Expression>, //int
+        selector: Handle<Expression>,
         cases: Vec<SwitchCase>,
     },
 
@@ -1598,14 +1707,16 @@ pub enum Statement {
     /// The `continuing` block and its substatements must not contain `Return`
     /// or `Kill` statements, or any `Break` or `Continue` statements targeting
     /// this loop. (It may have `Break` and `Continue` statements targeting
-    /// loops or switches nested within the `continuing` block.)
+    /// loops or switches nested within the `continuing` block.) Expressions
+    /// emitted in `body` are in scope in `continuing`.
     ///
     /// If present, `break_if` is an expression which is evaluated after the
-    /// continuing block. If its value is true, control continues after the
-    /// `Loop` statement, rather than branching back to the top of body as
-    /// usual. The `break_if` expression corresponds to a "break if" statement
-    /// in WGSL, or a loop whose back edge is an `OpBranchConditional`
-    /// instruction in SPIR-V.
+    /// continuing block. Expressions emitted in `body` or `continuing` are
+    /// considered to be in scope. If the expression's value is true, control
+    /// continues after the `Loop` statement, rather than branching back to the
+    /// top of body as usual. The `break_if` expression corresponds to a "break
+    /// if" statement in WGSL, or a loop whose back edge is an
+    /// `OpBranchConditional` instruction in SPIR-V.
     ///
     /// [`Break`]: Statement::Break
     /// [`Continue`]: Statement::Continue
@@ -1700,6 +1811,21 @@ pub enum Statement {
         /// [`AtomicResult`] expression representing this function's result.
         ///
         /// [`AtomicResult`]: crate::Expression::AtomicResult
+        result: Handle<Expression>,
+    },
+    /// Load uniformly from a uniform pointer in the workgroup address space.
+    ///
+    /// Corresponds to the [`workgroupUniformLoad`](https://www.w3.org/TR/WGSL/#workgroupUniformLoad-builtin)
+    /// built-in function of wgsl, and has the same barrier semantics
+    WorkGroupUniformLoad {
+        /// This must be of type [`Pointer`] in the [`WorkGroup`] address space
+        ///
+        /// [`Pointer`]: TypeInner::Pointer
+        /// [`WorkGroup`]: AddressSpace::WorkGroup
+        pointer: Handle<Expression>,
+        /// The [`WorkGroupUniformLoadResult`] expression representing this load's result.
+        ///
+        /// [`WorkGroupUniformLoadResult`]: Expression::WorkGroupUniformLoadResult
         result: Handle<Expression>,
     },
     /// Calls a function.
@@ -1837,6 +1963,28 @@ pub struct EntryPoint {
     pub function: Function,
 }
 
+/// Return types predeclared for the frexp, modf, and atomicCompareExchangeWeak built-in functions.
+///
+/// These cannot be spelled in WGSL source.
+///
+/// Stored in [`SpecialTypes::predeclared_types`] and created by [`Module::generate_predeclared_type`].
+#[derive(Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "clone", derive(Clone))]
+#[cfg_attr(feature = "serialize", derive(Serialize))]
+#[cfg_attr(feature = "deserialize", derive(Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub enum PredeclaredType {
+    AtomicCompareExchangeWeakResult(Scalar),
+    ModfResult {
+        size: Option<VectorSize>,
+        width: Bytes,
+    },
+    FrexpResult {
+        size: Option<VectorSize>,
+        width: Bytes,
+    },
+}
+
 /// Set of special types that can be optionally generated by the frontends.
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "clone", derive(Clone))]
@@ -1855,6 +2003,12 @@ pub struct SpecialTypes {
     /// Call [`Module::generate_ray_intersection_type`] to populate
     /// this if needed and return the handle.
     pub ray_intersection: Option<Handle<Type>>,
+
+    /// Types for predeclared wgsl types instantiated on demand.
+    ///
+    /// Call [`Module::generate_predeclared_type`] to populate this if
+    /// needed and return the handle.
+    pub predeclared_types: FastIndexMap<PredeclaredType, Handle<Type>>,
 }
 
 /// Shader module.
@@ -1882,6 +2036,14 @@ pub struct Module {
     pub constants: Arena<Constant>,
     /// Arena for the global variables defined in this module.
     pub global_variables: Arena<GlobalVariable>,
+    /// [Constant expressions] and [override expressions] used by this module.
+    ///
+    /// Each `Expression` must occur in the arena before any
+    /// `Expression` that uses its value.
+    ///
+    /// [Constant expressions]: index.html#constant-expressions
+    /// [override expressions]: index.html#override-expressions
+    pub const_expressions: Arena<Expression>,
     /// Arena for the functions defined in this module.
     ///
     /// Each function must appear in this arena strictly before all its callers.

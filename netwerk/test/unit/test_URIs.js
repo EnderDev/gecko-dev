@@ -493,10 +493,15 @@ function do_test_uri_basic(aTest) {
   do_check_property(aTest, URI, "password");
   do_check_property(aTest, URI, "host");
   do_check_property(aTest, URI, "specIgnoringRef");
-  if ("hasRef" in aTest) {
-    do_info("testing hasref: " + aTest.hasRef + " vs " + URI.hasRef);
-    Assert.equal(aTest.hasRef, URI.hasRef);
-  }
+
+  do_info("testing hasRef");
+  Assert.equal(URI.hasRef, !!aTest.ref, "URI.hasRef is correct");
+  do_info("testing hasUserPass");
+  Assert.equal(
+    URI.hasUserPass,
+    !!aTest.username || !!aTest.password,
+    "URI.hasUserPass is correct"
+  );
 }
 
 // Test that a given URI parses correctly when we add a given ref to the end
@@ -951,9 +956,12 @@ add_task(function test_jarURI_serialization() {
 });
 
 add_task(async function round_trip_invalid_ace_label() {
-  let uri = Services.io.newURI("http://xn--xn--d--fg4n-5y45d/");
-  Assert.equal(uri.spec, "http://xn--xn--d--fg4n-5y45d/");
+  // This is well-formed punycode, but an invalid ACE label due to hyphens in
+  // positions 3 & 4 and trailing hyphen. (Punycode-decode yields "xn--d淾-")
+  let uri = Services.io.newURI("http://xn--xn--d--fg4n/");
+  Assert.equal(uri.spec, "http://xn--xn--d--fg4n/");
 
+  // Entirely invalid punycode will throw a MALFORMED error.
   Assert.throws(() => {
     uri = Services.io.newURI("http://a.b.c.XN--pokxncvks");
   }, /NS_ERROR_MALFORMED_URI/);

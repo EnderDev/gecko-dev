@@ -11,8 +11,8 @@
 #include "mozilla/AntiTrackingUtils.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/LoadInfo.h"
-#include "mozilla/MozPromiseInlines.h"  // For MozPromise::FromDomPromise
 #include "mozilla/NullPrincipal.h"
+#include "mozilla/RefPtr.h"
 #include "mozilla/ResultVariant.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/StaticPrefs_extensions.h"
@@ -153,13 +153,17 @@ static auto CreateDocumentLoadInfo(CanonicalBrowsingContext* aBrowsingContext,
         sandboxFlags);
   }
 
-  if (aLoadState->IsExemptFromHTTPSOnlyMode()) {
+  if (aLoadState->IsExemptFromHTTPSFirstMode()) {
     uint32_t httpsOnlyStatus = loadInfo->GetHttpsOnlyStatus();
-    httpsOnlyStatus |= nsILoadInfo::HTTPS_ONLY_EXEMPT;
+    httpsOnlyStatus |= nsILoadInfo::HTTPS_FIRST_EXEMPT_NEXT_LOAD;
     loadInfo->SetHttpsOnlyStatus(httpsOnlyStatus);
   }
 
+  loadInfo->SetWasSchemelessInput(aLoadState->GetWasSchemelessInput());
+
   loadInfo->SetTriggeringSandboxFlags(aLoadState->TriggeringSandboxFlags());
+  loadInfo->SetTriggeringWindowId(aLoadState->TriggeringWindowId());
+  loadInfo->SetTriggeringStorageAccess(aLoadState->TriggeringStorageAccess());
   loadInfo->SetHasValidUserGestureActivation(
       aLoadState->HasValidUserGestureActivation());
   loadInfo->SetIsMetaRefresh(aLoadState->IsMetaRefresh());
@@ -187,6 +191,8 @@ static auto CreateObjectLoadInfo(nsDocShellLoadState* aLoadState,
   loadInfo->SetHasValidUserGestureActivation(
       aLoadState->HasValidUserGestureActivation());
   loadInfo->SetTriggeringSandboxFlags(aLoadState->TriggeringSandboxFlags());
+  loadInfo->SetTriggeringWindowId(aLoadState->TriggeringWindowId());
+  loadInfo->SetTriggeringStorageAccess(aLoadState->TriggeringStorageAccess());
   loadInfo->SetIsMetaRefresh(aLoadState->IsMetaRefresh());
 
   return loadInfo.forget();
@@ -930,6 +936,27 @@ auto DocumentLoadListener::OpenDocument(
   nsLoadFlags loadFlags = aLoadState->CalculateChannelLoadFlags(
       browsingContext, std::move(aUriModified), std::move(aIsXFOError));
 
+  // Keep track of navigation for the Bounce Tracking Protection.
+  if (browsingContext->IsTopContent()) {
+    RefPtr<BounceTrackingState> bounceTrackingState =
+        browsingContext->GetBounceTrackingState();
+
+    // Not every browsing context has a BounceTrackingState. It's also null when
+    // the feature is disabled.
+    if (bounceTrackingState) {
+      nsCOMPtr<nsIPrincipal> triggeringPrincipal;
+      nsresult rv =
+          loadInfo->GetTriggeringPrincipal(getter_AddRefs(triggeringPrincipal));
+
+      if (!NS_WARN_IF(NS_FAILED(rv))) {
+        DebugOnly<nsresult> rv = bounceTrackingState->OnStartNavigation(
+            triggeringPrincipal, loadInfo->GetHasValidUserGestureActivation());
+        NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
+                             "BounceTrackingState::OnStartNavigation failed");
+      }
+    }
+  }
+
   return Open(aLoadState, loadInfo, loadFlags, aCacheKey, aChannelId,
               aAsyncOpenTime, aTiming, std::move(aInfo), false, aContentParent,
               aRv);
@@ -1516,6 +1543,17 @@ void DocumentLoadListener::SerializeRedirectData(
   }
 
   aArgs.registrarId() = mRedirectChannelId;
+
+#ifdef DEBUG
+  // We only set the granularFingerprintingProtection field when opening http
+  // channels. So, we mark the field as set here if the channel is not a
+  // nsHTTPChannel to pass the assertion check for getting this field in below
+  // LoadInfoToLoadInfoArgs() call.
+  if (!baseChannel) {
+    static_cast<mozilla::net::LoadInfo*>(redirectLoadInfo.get())
+        ->MarkOverriddenFingerprintingSettingsAsSet();
+  }
+#endif
 
   MOZ_ALWAYS_SUCCEEDS(
       ipc::LoadInfoToLoadInfoArgs(redirectLoadInfo, &aArgs.loadInfo()));
@@ -2114,13 +2152,6 @@ DocumentLoadListener::RedirectToRealChannel(
       args.timing() = std::move(mTiming);
     }
 
-    auto loadInfo = args.loadInfo();
-
-    if (loadInfo.isNothing()) {
-      return PDocumentChannelParent::RedirectToRealChannelPromise::
-          CreateAndReject(ipc::ResponseRejectReason::SendError, __func__);
-    }
-
     cp->TransmitBlobDataIfBlobURL(args.uri());
 
     if (CanonicalBrowsingContext* bc = GetDocumentBrowsingContext()) {
@@ -2319,17 +2350,19 @@ bool DocumentLoadListener::DocShellWillDisplayContent(nsresult aStatus) {
 }
 
 bool DocumentLoadListener::MaybeHandleLoadErrorWithURIFixup(nsresult aStatus) {
-  auto* bc = GetDocumentBrowsingContext();
+  RefPtr<CanonicalBrowsingContext> bc = GetDocumentBrowsingContext();
   if (!bc) {
     return false;
   }
 
   nsCOMPtr<nsIInputStream> newPostData;
+  bool wasSchemelessInput = false;
   nsCOMPtr<nsIURI> newURI = nsDocShell::AttemptURIFixup(
       mChannel, aStatus, mOriginalUriString, mLoadStateLoadType, bc->IsTop(),
       mLoadStateInternalLoadFlags &
           nsDocShell::INTERNAL_LOAD_FLAGS_ALLOW_THIRD_PARTY_FIXUP,
-      bc->UsePrivateBrowsing(), true, getter_AddRefs(newPostData));
+      bc->UsePrivateBrowsing(), true, getter_AddRefs(newPostData),
+      &wasSchemelessInput);
 
   // Since aStatus will be NS_OK for 4xx and 5xx error codes we
   // have to check each request which was upgraded by https-first.
@@ -2362,10 +2395,13 @@ bool DocumentLoadListener::MaybeHandleLoadErrorWithURIFixup(nsresult aStatus) {
 
   loadState->SetPostDataStream(newPostData);
 
+  // Record whether the protocol was added through a fixup.
+  loadState->SetWasSchemelessInput(wasSchemelessInput);
+
   if (isHTTPSFirstFixup) {
     // We have to exempt the load from HTTPS-First to prevent a
     // upgrade-downgrade loop.
-    loadState->SetIsExemptFromHTTPSOnlyMode(true);
+    loadState->SetIsExemptFromHTTPSFirstMode(true);
   }
 
   // Ensure to set referrer information in the fallback channel equally to the
@@ -2516,6 +2552,24 @@ DocumentLoadListener::OnStartRequest(nsIRequest* aRequest) {
     // We can also have multiple calls to OnStartRequest when dealing with
     // multi-part content, but only want to redirect once.
     return NS_OK;
+  }
+
+  // Keep track of server responses resulting in a document for the Bounce
+  // Tracking Protection.
+  if (mIsDocumentLoad && GetParentWindowContext() == nullptr &&
+      loadingContext->IsTopContent()) {
+    RefPtr<BounceTrackingState> bounceTrackingState =
+        loadingContext->GetBounceTrackingState();
+
+    // Not every browsing context has a BounceTrackingState. It's also null when
+    // the feature is disabled.
+    if (bounceTrackingState) {
+      DebugOnly<nsresult> rv =
+          bounceTrackingState->OnDocumentStartRequest(mChannel);
+      NS_WARNING_ASSERTION(
+          NS_SUCCEEDED(rv),
+          "BounceTrackingState::OnDocumentStartRequest failed.");
+    }
   }
 
   mChannel->Suspend();

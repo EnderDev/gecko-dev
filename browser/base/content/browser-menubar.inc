@@ -250,6 +250,9 @@
                 <menuitem id="hiddenTabsMenu"
                           oncommand="gTabsPanel.showHiddenTabsPanel(event, 'hidden-tabs-menuitem');"
                           hidden="true" data-l10n-id="menu-history-hidden-tabs"/>
+                <menuitem id="menu_searchHistory"
+                          command="History:SearchHistory"
+                          data-l10n-id="menu-history-search"/>
                 <menu id="historyUndoMenu"
                       disabled="true" data-l10n-id="menu-history-undo-menu">
                   <menupopup id="historyUndoPopup"
@@ -469,6 +472,10 @@
 #else
                           />
 #endif
+                <menuitem id="help_reportBrokenSite"
+                          command="cmd_reportBrokenSite"
+                          data-l10n-id="menu-report-broken-site"
+                          appmenu-data-l10n-id="menu-report-broken-site"/>
                 <menuitem id="feedbackPage"
                           oncommand="openFeedbackPage()"
                           data-l10n-id="menu-help-share-ideas"

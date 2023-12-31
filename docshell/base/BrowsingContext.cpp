@@ -71,6 +71,7 @@
 #include "nsDocShell.h"
 #include "nsDocShellLoadState.h"
 #include "nsFocusManager.h"
+#include "nsGlobalWindowInner.h"
 #include "nsGlobalWindowOuter.h"
 #include "PresShell.h"
 #include "nsIObserverService.h"
@@ -364,6 +365,12 @@ already_AddRefed<BrowsingContext> BrowsingContext::CreateDetached(
     MOZ_DIAGNOSTIC_ASSERT(aOpener->mType == aType);
     fields.Get<IDX_OpenerId>() = aOpener->Id();
     fields.Get<IDX_HadOriginalOpener>() = true;
+
+    if (aType == Type::Chrome && !aParent) {
+      // See SetOpener for why we do this inheritance.
+      fields.Get<IDX_PrefersColorSchemeOverride>() =
+          aOpener->Top()->GetPrefersColorSchemeOverride();
+    }
   }
 
   if (aParent) {
@@ -616,6 +623,7 @@ void BrowsingContext::SetDocShell(nsIDocShell* aDocShell) {
   }
 
   RecomputeCanExecuteScripts();
+  ClearCachedValuesOfLocations();
 }
 
 // This class implements a callback that will return the remote window proxy for
@@ -1047,6 +1055,8 @@ void BrowsingContext::PrepareForProcessChange() {
   mIsInProcess = false;
   mUserGestureStart = TimeStamp();
 
+  ClearCachedValuesOfLocations();
+
   // NOTE: For now, clear our nsDocShell reference, as we're primarily in a
   // different process now. This may need to change in the future with
   // Cross-Process BFCache.
@@ -1070,6 +1080,23 @@ void BrowsingContext::PrepareForProcessChange() {
 
 bool BrowsingContext::IsTargetable() const {
   return !GetClosed() && AncestorsAreCurrent();
+}
+
+void BrowsingContext::SetOpener(BrowsingContext* aOpener) {
+  MOZ_DIAGNOSTIC_ASSERT(!aOpener || aOpener->Group() == Group());
+  MOZ_DIAGNOSTIC_ASSERT(!aOpener || aOpener->mType == mType);
+
+  MOZ_ALWAYS_SUCCEEDS(SetOpenerId(aOpener ? aOpener->Id() : 0));
+
+  if (IsChrome() && IsTop() && aOpener) {
+    // Inherit color scheme overrides from parent window. This is to inherit the
+    // color scheme of dark themed PBM windows in dialogs opened by such
+    // windows.
+    auto openerOverride = aOpener->Top()->PrefersColorSchemeOverride();
+    if (openerOverride != PrefersColorSchemeOverride()) {
+      MOZ_ALWAYS_SUCCEEDS(SetPrefersColorSchemeOverride(openerOverride));
+    }
+  }
 }
 
 bool BrowsingContext::HasOpener() const {
@@ -1413,6 +1440,9 @@ BrowsingContext::~BrowsingContext() {
     sBrowsingContexts->Remove(Id());
   }
   UnregisterBrowserId(this);
+
+  ClearCachedValuesOfLocations();
+  mLocations.clear();
 }
 
 /* static */
@@ -1930,9 +1960,11 @@ nsresult BrowsingContext::LoadURI(nsDocShellLoadState* aLoadState,
 
   MOZ_DIAGNOSTIC_ASSERT(aLoadState->TargetBrowsingContext().IsNull(),
                         "Targeting occurs in InternalLoad");
+  aLoadState->AssertProcessCouldTriggerLoadIfSystem();
 
   if (mDocShell) {
-    return mDocShell->LoadURI(aLoadState, aSetNavigating);
+    nsCOMPtr<nsIDocShell> docShell = mDocShell;
+    return docShell->LoadURI(aLoadState, aSetNavigating);
   }
 
   // Note: We do this check both here and in `nsDocShell::InternalLoad`, since
@@ -2026,9 +2058,11 @@ nsresult BrowsingContext::InternalLoad(nsDocShellLoadState* aLoadState) {
                         "should have target bc set");
   MOZ_DIAGNOSTIC_ASSERT(aLoadState->TargetBrowsingContext() == this,
                         "must be targeting this BrowsingContext");
+  aLoadState->AssertProcessCouldTriggerLoadIfSystem();
 
   if (mDocShell) {
-    return nsDocShell::Cast(mDocShell)->InternalLoad(aLoadState);
+    RefPtr<nsDocShell> docShell = nsDocShell::Cast(mDocShell);
+    return docShell->InternalLoad(aLoadState);
   }
 
   // Note: We do this check both here and in `nsDocShell::InternalLoad`, since
@@ -2090,9 +2124,10 @@ void BrowsingContext::DisplayLoadError(const nsAString& aURI) {
 
   if (mDocShell) {
     bool didDisplayLoadError = false;
-    mDocShell->DisplayLoadError(NS_ERROR_MALFORMED_URI, nullptr,
-                                PromiseFlatString(aURI).get(), nullptr,
-                                &didDisplayLoadError);
+    nsCOMPtr<nsIDocShell> docShell = mDocShell;
+    docShell->DisplayLoadError(NS_ERROR_MALFORMED_URI, nullptr,
+                               PromiseFlatString(aURI).get(), nullptr,
+                               &didDisplayLoadError);
   } else {
     if (ContentParent* cp = Canonical()->GetContentParent()) {
       Unused << cp->SendDisplayLoadError(this, PromiseFlatString(aURI));
@@ -2987,7 +3022,8 @@ void BrowsingContext::DidSet(FieldIndex<IDX_IsActiveBrowserWindowInternal>,
           // the context is the top of a sub-tree of in-process
           // contexts.
           nsContentUtils::DispatchEventOnlyToChrome(
-              doc, win, isActivateEvent ? u"activate"_ns : u"deactivate"_ns,
+              doc, nsGlobalWindowInner::Cast(win),
+              isActivateEvent ? u"activate"_ns : u"deactivate"_ns,
               CanBubble::eYes, Cancelable::eYes, nullptr);
         }
       }
@@ -3436,7 +3472,7 @@ ChildSHistory* BrowsingContext::GetChildSessionHistory() {
 void BrowsingContext::CreateChildSHistory() {
   MOZ_ASSERT(IsTop());
   MOZ_ASSERT(GetHasSessionHistory());
-  MOZ_DIAGNOSTIC_ASSERT(!mChildSessionHistory);
+  MOZ_ASSERT(!mChildSessionHistory);
 
   // Because session history is global in a browsing context tree, every process
   // that has access to a browsing context tree needs access to its session
@@ -3493,17 +3529,26 @@ bool BrowsingContext::CanSet(FieldIndex<IDX_IsUnderHiddenEmbedderElement>,
   return true;
 }
 
+bool BrowsingContext::CanSet(FieldIndex<IDX_ForceOffline>, bool aNewValue,
+                             ContentParent* aSource) {
+  return XRE_IsParentProcess() && !aSource;
+}
+
 void BrowsingContext::DidSet(FieldIndex<IDX_IsUnderHiddenEmbedderElement>,
                              bool aOldValue) {
   nsIDocShell* shell = GetDocShell();
   if (!shell) {
     return;
   }
-
   const bool newValue = IsUnderHiddenEmbedderElement();
   if (NS_WARN_IF(aOldValue == newValue)) {
     return;
   }
+
+  if (auto* bc = BrowserChild::GetFrom(shell)) {
+    bc->UpdateVisibility();
+  }
+
   if (PresShell* presShell = shell->GetPresShell()) {
     presShell->SetIsUnderHiddenEmbedderElement(newValue);
   }
@@ -3522,7 +3567,7 @@ void BrowsingContext::DidSet(FieldIndex<IDX_IsUnderHiddenEmbedderElement>,
     }
 
     bool embedderFrameIsHidden = true;
-    if (auto embedderFrame = embedderElement->GetPrimaryFrame()) {
+    if (auto* embedderFrame = embedderElement->GetPrimaryFrame()) {
       embedderFrameIsHidden = !embedderFrame->StyleVisibility()->IsVisible();
     }
 
@@ -3679,7 +3724,8 @@ void BrowsingContext::HistoryGo(
         [](mozilla::ipc::
                ResponseRejectReason) { /* FIXME Is ignoring this fine? */ });
   } else {
-    aResolver(Canonical()->HistoryGo(
+    RefPtr<CanonicalBrowsingContext> self = Canonical();
+    aResolver(self->HistoryGo(
         aOffset, aHistoryEpoch, aRequireUserInteraction, aUserActivation,
         Canonical()->GetContentParent()
             ? Some(Canonical()->GetContentParent()->ChildID())
@@ -3749,6 +3795,17 @@ void BrowsingContext::ResetLocationChangeRateLimit() {
   // Resetting the timestamp object will cause the check function to
   // init again and reset the rate limit.
   mLocationChangeRateLimitSpanStart = TimeStamp();
+}
+
+void BrowsingContext::LocationCreated(dom::Location* aLocation) {
+  MOZ_ASSERT(!aLocation->isInList());
+  mLocations.insertBack(aLocation);
+}
+
+void BrowsingContext::ClearCachedValuesOfLocations() {
+  for (dom::Location* loc = mLocations.getFirst(); loc; loc = loc->getNext()) {
+    loc->ClearCachedValues();
+  }
 }
 
 }  // namespace dom

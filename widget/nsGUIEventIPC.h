@@ -379,17 +379,33 @@ struct ParamTraits<mozilla::AlternativeCharCode> {
 };
 
 template <>
+struct ParamTraits<mozilla::ShortcutKeyCandidate::ShiftState>
+    : public ContiguousEnumSerializerInclusive<
+          mozilla::ShortcutKeyCandidate::ShiftState,
+          mozilla::ShortcutKeyCandidate::ShiftState::Ignorable,
+          mozilla::ShortcutKeyCandidate::ShiftState::MatchExactly> {};
+
+template <>
+struct ParamTraits<mozilla::ShortcutKeyCandidate::SkipIfEarlierHandlerDisabled>
+    : public ContiguousEnumSerializerInclusive<
+          mozilla::ShortcutKeyCandidate::SkipIfEarlierHandlerDisabled,
+          mozilla::ShortcutKeyCandidate::SkipIfEarlierHandlerDisabled::No,
+          mozilla::ShortcutKeyCandidate::SkipIfEarlierHandlerDisabled::Yes> {};
+
+template <>
 struct ParamTraits<mozilla::ShortcutKeyCandidate> {
   using paramType = mozilla::ShortcutKeyCandidate;
 
   static void Write(MessageWriter* aWriter, const paramType& aParam) {
     WriteParam(aWriter, aParam.mCharCode);
-    WriteParam(aWriter, aParam.mIgnoreShift);
+    WriteParam(aWriter, aParam.mShiftState);
+    WriteParam(aWriter, aParam.mSkipIfEarlierHandlerDisabled);
   }
 
   static bool Read(MessageReader* aReader, paramType* aResult) {
     return ReadParam(aReader, &aResult->mCharCode) &&
-           ReadParam(aReader, &aResult->mIgnoreShift);
+           ReadParam(aReader, &aResult->mShiftState) &&
+           ReadParam(aReader, &aResult->mSkipIfEarlierHandlerDisabled);
   }
 };
 
@@ -871,11 +887,11 @@ struct ParamTraits<mozilla::WritingMode> {
   using paramType = mozilla::WritingMode;
 
   static void Write(MessageWriter* aWriter, const paramType& aParam) {
-    WriteParam(aWriter, aParam.mWritingMode.bits);
+    WriteParam(aWriter, aParam.mWritingMode._0);
   }
 
   static bool Read(MessageReader* aReader, paramType* aResult) {
-    return ReadParam(aReader, &aResult->mWritingMode.bits);
+    return ReadParam(aReader, &aResult->mWritingMode._0);
   }
 };
 

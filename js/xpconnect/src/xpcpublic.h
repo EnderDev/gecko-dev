@@ -55,6 +55,7 @@ struct nsXPTInterfaceInfo;
 namespace JS {
 class Compartment;
 class ContextOptions;
+class PrefableCompileOptions;
 class Realm;
 class RealmOptions;
 class Value;
@@ -275,21 +276,14 @@ class XPCStringConvert {
 
   static inline bool DynamicAtomToJSVal(JSContext* cx, nsDynamicAtom* atom,
                                         JS::MutableHandle<JS::Value> rval) {
-    bool sharedAtom;
-    JSString* str =
-        JS_NewMaybeExternalString(cx, atom->GetUTF16String(), atom->GetLength(),
-                                  &sDynamicAtomExternalString, &sharedAtom);
-    if (!str) {
+    bool shared = false;
+    nsStringBuffer* buf = atom->StringBuffer();
+    if (!StringBufferToJSVal(cx, buf, atom->GetLength(), rval, &shared)) {
       return false;
     }
-    if (sharedAtom) {
-      // We only have non-owning atoms in DOMString for now.
-      // nsDynamicAtom::AddRef is always-inline and defined in a
-      // translation unit we can't get to here.  So we need to go through
-      // nsAtom::AddRef to call it.
-      static_cast<nsAtom*>(atom)->AddRef();
+    if (shared) {
+      buf->AddRef();
     }
-    rval.setString(str);
     return true;
   }
 
@@ -324,14 +318,8 @@ class XPCStringConvert {
     size_t sizeOfBuffer(const char16_t* aChars,
                         mozilla::MallocSizeOf aMallocSizeOf) const override;
   };
-  struct DynamicAtomExternalString : public JSExternalStringCallbacks {
-    void finalize(char16_t* aChars) const override;
-    size_t sizeOfBuffer(const char16_t* aChars,
-                        mozilla::MallocSizeOf aMallocSizeOf) const override;
-  };
   static const LiteralExternalString sLiteralExternalString;
   static const DOMStringExternalString sDOMStringExternalString;
-  static const DynamicAtomExternalString sDynamicAtomExternalString;
 
   XPCStringConvert() = delete;
 };
@@ -351,6 +339,8 @@ bool Base64Decode(JSContext* cx, JS::Handle<JS::Value> val,
  */
 bool NonVoidStringToJsval(JSContext* cx, nsAString& str,
                           JS::MutableHandle<JS::Value> rval);
+bool NonVoidStringToJsval(JSContext* cx, const nsAString& str,
+                          JS::MutableHandle<JS::Value> rval);
 inline bool StringToJsval(JSContext* cx, nsAString& str,
                           JS::MutableHandle<JS::Value> rval) {
   // From the T_ASTRING case in XPCConvert::NativeData2JS.
@@ -361,24 +351,14 @@ inline bool StringToJsval(JSContext* cx, nsAString& str,
   return NonVoidStringToJsval(cx, str, rval);
 }
 
-inline bool NonVoidStringToJsval(JSContext* cx, const nsAString& str,
-                                 JS::MutableHandle<JS::Value> rval) {
-  nsString mutableCopy;
-  if (!mutableCopy.Assign(str, mozilla::fallible)) {
-    JS_ReportOutOfMemory(cx);
-    return false;
-  }
-  return NonVoidStringToJsval(cx, mutableCopy, rval);
-}
-
 inline bool StringToJsval(JSContext* cx, const nsAString& str,
                           JS::MutableHandle<JS::Value> rval) {
-  nsString mutableCopy;
-  if (!mutableCopy.Assign(str, mozilla::fallible)) {
-    JS_ReportOutOfMemory(cx);
-    return false;
+  // From the T_ASTRING case in XPCConvert::NativeData2JS.
+  if (str.IsVoid()) {
+    rval.setNull();
+    return true;
   }
-  return StringToJsval(cx, mutableCopy, rval);
+  return NonVoidStringToJsval(cx, str, rval);
 }
 
 /**
@@ -593,12 +573,30 @@ bool ShouldDiscardSystemSource();
 void SetPrefableRealmOptions(JS::RealmOptions& options);
 void SetPrefableContextOptions(JS::ContextOptions& options);
 
+// This function may be used off-main-thread.
+void SetPrefableCompileOptions(JS::PrefableCompileOptions& options);
+
+// Modify the provided realm options, consistent with |aIsSystemPrincipal| and
+// with globally-cached values of various preferences.
+//
+// Call this function *before* |aOptions| is used to create the corresponding
+// global object, as not all of the options it sets can be modified on an
+// existing global object.  (The type system should make this obvious, because
+// you can't get a *mutable* JS::RealmOptions& from an existing global
+// object.)
+void InitGlobalObjectOptions(JS::RealmOptions& aOptions,
+                             bool aIsSystemPrincipal, bool aSecureContext,
+                             bool aForceUTC, bool aAlwaysUseFdlibm,
+                             bool aLocaleEnUS);
+
 class ErrorBase {
  public:
   nsString mErrorMsg;
   nsString mFileName;
   uint32_t mSourceId;
+  // Line number (1-origin).
   uint32_t mLineNumber;
+  // Column number in UTF-16 code units (1-origin).
   uint32_t mColumn;
 
   ErrorBase() : mSourceId(0), mLineNumber(0), mColumn(0) {}
@@ -715,7 +713,7 @@ void AddGCCallback(xpcGCCallback cb);
 void RemoveGCCallback(xpcGCCallback cb);
 
 // We need an exact page size only if we run the binary in automation.
-#if defined(XP_DARWIN) && defined(__aarch64__)
+#if (defined(XP_DARWIN) && defined(__aarch64__)) || defined(__loongarch__)
 const size_t kAutomationPageSize = 16384;
 #else
 const size_t kAutomationPageSize = 4096;

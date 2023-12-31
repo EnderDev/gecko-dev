@@ -21,7 +21,6 @@
 #include "mozilla/dom/PBackgroundSDBConnectionChild.h"
 #include "mozilla/dom/PFileSystemRequestChild.h"
 #include "mozilla/dom/EndpointForReportChild.h"
-#include "mozilla/dom/PMediaTransportChild.h"
 #include "mozilla/dom/PVsync.h"
 #include "mozilla/dom/TemporaryIPCBlobChild.h"
 #include "mozilla/dom/cache/ActorUtils.h"
@@ -138,6 +137,10 @@ void BackgroundChildImpl::ProcessingError(Result aCode, const char* aReason) {
     default:
       MOZ_CRASH("Unknown error code!");
   }
+
+  nsDependentCString reason(aReason);
+  CrashReporter::AnnotateCrashReport(
+      CrashReporter::Annotation::ipc_channel_error, reason);
 
   MOZ_CRASH_UNSAFE_PRINTF("%s: %s", abortMessage.get(), aReason);
 }
@@ -512,21 +515,6 @@ bool BackgroundChildImpl::DeallocPEndpointForReportChild(
     PEndpointForReportChild* aActor) {
   MOZ_ASSERT(aActor);
   delete static_cast<dom::EndpointForReportChild*>(aActor);
-  return true;
-}
-
-dom::PMediaTransportChild* BackgroundChildImpl::AllocPMediaTransportChild() {
-  // We don't allocate here: MediaTransportHandlerIPC is in charge of that,
-  // so we don't need to know the implementation particulars here.
-  MOZ_ASSERT_UNREACHABLE(
-      "The only thing that ought to be creating a PMediaTransportChild is "
-      "MediaTransportHandlerIPC!");
-  return nullptr;
-}
-
-bool BackgroundChildImpl::DeallocPMediaTransportChild(
-    dom::PMediaTransportChild* aActor) {
-  delete aActor;
   return true;
 }
 

@@ -12,7 +12,7 @@ use crate::parser::{Parse, ParserContext};
 use crate::values::distance::{ComputeSquaredDistance, SquaredDistance};
 use crate::Atom;
 pub use cssparser::{serialize_identifier, serialize_name, CowRcStr, Parser};
-pub use cssparser::{SourceLocation, Token, RGBA};
+pub use cssparser::{SourceLocation, Token};
 use precomputed_hash::PrecomputedHash;
 use selectors::parser::SelectorParseErrorKind;
 use std::fmt::{self, Debug, Write};
@@ -177,15 +177,27 @@ impl cssparser::ToCss for AtomString {
     where
         W: Write,
     {
+        // Wrap in quotes to form a string literal
+        dest.write_char('"')?;
         #[cfg(feature = "servo")]
         {
-            cssparser::CssStringWriter::new(dest).write_str(self.as_ref())
+            cssparser::CssStringWriter::new(dest).write_str(self.as_ref())?;
         }
         #[cfg(feature = "gecko")]
         {
             self.0
-                .with_str(|s| cssparser::CssStringWriter::new(dest).write_str(s))
+                .with_str(|s| cssparser::CssStringWriter::new(dest).write_str(s))?;
         }
+        dest.write_char('"')
+    }
+}
+
+impl style_traits::ToCss for AtomString {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
+        cssparser::ToCss::to_css(self, dest)
     }
 }
 
@@ -496,6 +508,7 @@ impl<A: Debug, B: Debug> Debug for Either<A, B> {
 #[derive(
     Clone,
     Debug,
+    Default,
     Eq,
     Hash,
     MallocSizeOf,
@@ -509,6 +522,19 @@ impl<A: Debug, B: Debug> Debug for Either<A, B> {
 pub struct CustomIdent(pub Atom);
 
 impl CustomIdent {
+    /// Parse a <custom-ident>
+    ///
+    /// TODO(zrhoffman, bug 1844501): Use CustomIdent::parse in more places instead of
+    /// CustomIdent::from_ident.
+    pub fn parse<'i, 't>(
+        input: &mut Parser<'i, 't>,
+        invalid: &[&str],
+    ) -> Result<Self, ParseError<'i>> {
+        let location = input.current_source_location();
+        let ident = input.expect_ident()?;
+        CustomIdent::from_ident(location, ident, invalid)
+    }
+
     /// Parse an already-tokenizer identifier
     pub fn from_ident<'i>(
         location: SourceLocation,

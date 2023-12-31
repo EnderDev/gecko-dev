@@ -42,6 +42,7 @@
 #include "mozilla/SyncRunnable.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/TelemetryEventEnums.h"
+#include "mozilla/Try.h"
 #include "mozilla/UniquePtrExtensions.h"
 #include "mozilla/URLPreloader.h"
 #include "mozilla/Variant.h"
@@ -1361,7 +1362,7 @@ class CallbackNode {
         mData(aData),
         mNextAndMatchKind(aMatchKind) {}
 
-  CallbackNode(const char** aDomains, PrefChangedFunc aFunc, void* aData,
+  CallbackNode(const char* const* aDomains, PrefChangedFunc aFunc, void* aData,
                Preferences::MatchKind aMatchKind)
       : mDomain(AsVariant(aDomains)),
         mFunc(aFunc),
@@ -1370,7 +1371,9 @@ class CallbackNode {
 
   // mDomain is a UniquePtr<>, so any uses of Domain() should only be temporary
   // borrows.
-  const Variant<nsCString, const char**>& Domain() const { return mDomain; }
+  const Variant<nsCString, const char* const*>& Domain() const {
+    return mDomain;
+  }
 
   PrefChangedFunc Func() const { return mFunc; }
   void ClearFunc() { mFunc = nullptr; }
@@ -1386,7 +1389,7 @@ class CallbackNode {
     return mDomain.is<nsCString>() && mDomain.as<nsCString>() == aDomain;
   }
 
-  bool DomainIs(const char** aPrefs) const {
+  bool DomainIs(const char* const* aPrefs) const {
     return mDomain == AsVariant(aPrefs);
   }
 
@@ -1400,7 +1403,8 @@ class CallbackNode {
     if (mDomain.is<nsCString>()) {
       return match(mDomain.as<nsCString>());
     }
-    for (const char** ptr = mDomain.as<const char**>(); *ptr; ptr++) {
+    for (const char* const* ptr = mDomain.as<const char* const*>(); *ptr;
+         ptr++) {
       if (match(nsDependentCString(*ptr))) {
         return true;
       }
@@ -1431,7 +1435,7 @@ class CallbackNode {
   static const uintptr_t kMatchKindMask = uintptr_t(0x1);
   static const uintptr_t kNextMask = ~kMatchKindMask;
 
-  Variant<nsCString, const char**> mDomain;
+  Variant<nsCString, const char* const*> mDomain;
 
   // If someone attempts to remove the node from the callback list while
   // NotifyCallbacks() is running, |func| is set to nullptr. Such nodes will
@@ -2289,10 +2293,7 @@ class nsPrefLocalizedString final : public nsIPrefLocalizedString {
 //----------------------------------------------------------------------------
 
 nsPrefBranch::nsPrefBranch(const char* aPrefRoot, PrefValueKind aKind)
-    : mPrefRoot(aPrefRoot),
-      mKind(aKind),
-      mFreeingObserverList(false),
-      mObservers() {
+    : mPrefRoot(aPrefRoot), mKind(aKind), mFreeingObserverList(false) {
   nsCOMPtr<nsIObserverService> observerService = services::GetObserverService();
   if (observerService) {
     ++mRefCnt;  // must be > 0 when we call this, or we'll get deleted!
@@ -2893,7 +2894,9 @@ nsPrefBranch::AddObserverImpl(const nsACString& aDomain, nsIObserver* aObserver,
 
   mObservers.WithEntryHandle(pCallback.get(), [&](auto&& p) {
     if (p) {
-      NS_WARNING("Ignoring duplicate observer.");
+      NS_WARNING(
+          nsPrintfCString("Ignoring duplicate observer: %s", prefName.get())
+              .get());
     } else {
       // We must pass a fully qualified preference name to the callback
       // aDomain == nullptr is the only possible failure, and we trapped it with
@@ -3329,15 +3332,13 @@ class PWRunnable : public Runnable {
         // ref counted pointer off main thread.
         nsresult rvCopy = rv;
         nsCOMPtr<nsIFile> fileCopy(mFile);
-        SchedulerGroup::Dispatch(
-            TaskCategory::Other,
-            NS_NewRunnableFunction("Preferences::WriterRunnable",
-                                   [fileCopy, rvCopy] {
-                                     MOZ_RELEASE_ASSERT(NS_IsMainThread());
-                                     if (NS_FAILED(rvCopy)) {
-                                       Preferences::HandleDirty();
-                                     }
-                                   }));
+        SchedulerGroup::Dispatch(NS_NewRunnableFunction(
+            "Preferences::WriterRunnable", [fileCopy, rvCopy] {
+              MOZ_RELEASE_ASSERT(NS_IsMainThread());
+              if (NS_FAILED(rvCopy)) {
+                Preferences::HandleDirty();
+              }
+            }));
       }
     }
     // We've completed the write to the best of our abilities, whether
@@ -3372,7 +3373,7 @@ void Preferences::AddSizeOfIncludingThis(MallocSizeOf aMallocSizeOf,
 }
 
 class PreferenceServiceReporter final : public nsIMemoryReporter {
-  ~PreferenceServiceReporter() {}
+  ~PreferenceServiceReporter() = default;
 
  public:
   NS_DECL_ISUPPORTS
@@ -4521,11 +4522,8 @@ static int pref_CompareFileNames(nsIFile* aFile1, nsIFile* aFile2,
 }
 
 // Load default pref files from a directory. The files in the directory are
-// sorted reverse-alphabetically; a set of "special file names" may be
-// specified which are loaded after all the others.
-static nsresult pref_LoadPrefsInDir(nsIFile* aDir,
-                                    char const* const* aSpecialFiles,
-                                    uint32_t aSpecialFilesCount) {
+// sorted reverse-alphabetically.
+static nsresult pref_LoadPrefsInDir(nsIFile* aDir) {
   MOZ_ASSERT(XRE_IsParentProcess());
 
   nsresult rv, rv2;
@@ -4545,7 +4543,6 @@ static nsresult pref_LoadPrefsInDir(nsIFile* aDir,
   }
 
   nsCOMArray<nsIFile> prefFiles(INITIAL_PREF_FILES);
-  nsCOMArray<nsIFile> specialFiles(aSpecialFilesCount);
   nsCOMPtr<nsIFile> prefFile;
 
   while (NS_SUCCEEDED(dirIterator->GetNextFile(getter_AddRefs(prefFile))) &&
@@ -4559,25 +4556,11 @@ static nsresult pref_LoadPrefsInDir(nsIFile* aDir,
     // Skip non-js files.
     if (StringEndsWith(leafName, ".js"_ns,
                        nsCaseInsensitiveCStringComparator)) {
-      bool shouldParse = true;
-
-      // Separate out special files.
-      for (uint32_t i = 0; i < aSpecialFilesCount; ++i) {
-        if (leafName.Equals(nsDependentCString(aSpecialFiles[i]))) {
-          shouldParse = false;
-          // Special files should be processed in order. We put them into the
-          // array by index, which can make the array sparse.
-          specialFiles.ReplaceObjectAt(prefFile, i);
-        }
-      }
-
-      if (shouldParse) {
-        prefFiles.AppendObject(prefFile);
-      }
+      prefFiles.AppendObject(prefFile);
     }
   }
 
-  if (prefFiles.Count() + specialFiles.Count() == 0) {
+  if (prefFiles.Count() == 0) {
     NS_WARNING("No default pref files found.");
     if (NS_SUCCEEDED(rv)) {
       rv = NS_SUCCESS_FILE_DIRECTORY_EMPTY;
@@ -4594,19 +4577,6 @@ static nsresult pref_LoadPrefsInDir(nsIFile* aDir,
     if (NS_FAILED(rv2)) {
       NS_ERROR("Default pref file not parsed successfully.");
       rv = rv2;
-    }
-  }
-
-  arrayCount = specialFiles.Count();
-  for (i = 0; i < arrayCount; ++i) {
-    // This may be a sparse array; test before parsing.
-    nsIFile* file = specialFiles[i];
-    if (file) {
-      rv2 = openPrefFile(file, PrefValueKind::Default);
-      if (NS_FAILED(rv2)) {
-        NS_ERROR("Special default pref file not parsed successfully.");
-        rv = rv2;
-      }
     }
   }
 
@@ -4890,24 +4860,7 @@ nsresult Preferences::InitInitialObjects(bool aIsStartup) {
                               getter_AddRefs(defaultPrefDir));
   NS_ENSURE_SUCCESS(rv, rv);
 
-  // These pref file names should not be used: we process them after all other
-  // application pref files for backwards compatibility.
-  static const char* specialFiles[] = {
-#if defined(XP_MACOSX)
-    "macprefs.js"
-#elif defined(XP_WIN)
-    "winpref.js"
-#elif defined(XP_UNIX)
-    "unix.js"
-#  if defined(_AIX)
-    ,
-    "aix.js"
-#  endif
-#endif
-  };
-
-  rv = pref_LoadPrefsInDir(defaultPrefDir, specialFiles,
-                           ArrayLength(specialFiles));
+  rv = pref_LoadPrefsInDir(defaultPrefDir);
   if (NS_FAILED(rv)) {
     NS_WARNING("Error parsing application default preferences.");
   }
@@ -4980,7 +4933,7 @@ nsresult Preferences::InitInitialObjects(bool aIsStartup) {
       }
 
       // Do we care if a file provided by this process fails to load?
-      pref_LoadPrefsInDir(path, nullptr, 0);
+      pref_LoadPrefsInDir(path);
     }
   }
 
@@ -4996,7 +4949,7 @@ nsresult Preferences::InitInitialObjects(bool aIsStartup) {
   defaultSystemPrefDir->AppendNative("defaults"_ns);
   defaultSystemPrefDir->AppendNative("pref"_ns);
 
-  rv = pref_LoadPrefsInDir(defaultSystemPrefDir, nullptr, 0);
+  rv = pref_LoadPrefsInDir(defaultSystemPrefDir);
   if (NS_FAILED(rv)) {
     NS_WARNING("Error parsing application default preferences.");
   }
@@ -5384,7 +5337,7 @@ static void AssertNotMallocAllocated(T* aPtr) {
 
 /* static */
 nsresult Preferences::AddStrongObservers(nsIObserver* aObserver,
-                                         const char** aPrefs) {
+                                         const char* const* aPrefs) {
   MOZ_ASSERT(aObserver);
   for (uint32_t i = 0; aPrefs[i]; i++) {
     AssertNotMallocAllocated(aPrefs[i]);
@@ -5399,7 +5352,7 @@ nsresult Preferences::AddStrongObservers(nsIObserver* aObserver,
 
 /* static */
 nsresult Preferences::AddWeakObservers(nsIObserver* aObserver,
-                                       const char** aPrefs) {
+                                       const char* const* aPrefs) {
   MOZ_ASSERT(aObserver);
   for (uint32_t i = 0; aPrefs[i]; i++) {
     AssertNotMallocAllocated(aPrefs[i]);
@@ -5414,7 +5367,7 @@ nsresult Preferences::AddWeakObservers(nsIObserver* aObserver,
 
 /* static */
 nsresult Preferences::RemoveObservers(nsIObserver* aObserver,
-                                      const char** aPrefs) {
+                                      const char* const* aPrefs) {
   MOZ_ASSERT(aObserver);
   if (sShutdown) {
     MOZ_ASSERT(!sPreferences);
@@ -5472,7 +5425,7 @@ nsresult Preferences::RegisterCallback(PrefChangedFunc aCallback,
 
 /* static */
 nsresult Preferences::RegisterCallbacks(PrefChangedFunc aCallback,
-                                        const char** aPrefs, void* aData,
+                                        const char* const* aPrefs, void* aData,
                                         MatchKind aMatchKind) {
   return RegisterCallbackImpl(aCallback, aPrefs, aData, aMatchKind);
 }
@@ -5492,14 +5445,14 @@ nsresult Preferences::RegisterCallbackAndCall(PrefChangedFunc aCallback,
 
 /* static */
 nsresult Preferences::RegisterCallbacksAndCall(PrefChangedFunc aCallback,
-                                               const char** aPrefs,
+                                               const char* const* aPrefs,
                                                void* aClosure) {
   MOZ_ASSERT(aCallback);
 
   nsresult rv =
       RegisterCallbacks(aCallback, aPrefs, aClosure, MatchKind::ExactMatch);
   if (NS_SUCCEEDED(rv)) {
-    for (const char** ptr = aPrefs; *ptr; ptr++) {
+    for (const char* const* ptr = aPrefs; *ptr; ptr++) {
       (*aCallback)(*ptr, aClosure);
     }
   }
@@ -5554,8 +5507,8 @@ nsresult Preferences::UnregisterCallback(PrefChangedFunc aCallback,
 
 /* static */
 nsresult Preferences::UnregisterCallbacks(PrefChangedFunc aCallback,
-                                          const char** aPrefs, void* aData,
-                                          MatchKind aMatchKind) {
+                                          const char* const* aPrefs,
+                                          void* aData, MatchKind aMatchKind) {
   return UnregisterCallbackImpl(aCallback, aPrefs, aData, aMatchKind);
 }
 
@@ -6097,12 +6050,6 @@ static const PrefListEntry sDynamicPrefOverrideList[]{
     PREF_LIST_ENTRY("browser.search.region"),
     PREF_LIST_ENTRY(
         "browser.tabs.remote.testOnly.failPBrowserCreation.browsingContext"),
-    PREF_LIST_ENTRY("browser.translation.bing.authURL"),
-    PREF_LIST_ENTRY("browser.translation.bing.clientIdOverride"),
-    PREF_LIST_ENTRY("browser.translation.bing.translateArrayURL"),
-    PREF_LIST_ENTRY("browser.translation.bing.apiKeyOverride"),
-    PREF_LIST_ENTRY("browser.translation.yandex.apiKeyOverride"),
-    PREF_LIST_ENTRY("browser.translation.yandex.translateURLOverride"),
     PREF_LIST_ENTRY("browser.uitour.testingOrigins"),
     PREF_LIST_ENTRY("browser.urlbar.loglevel"),
     PREF_LIST_ENTRY("browser.urlbar.opencompanionsearch.enabled"),
@@ -6111,7 +6058,6 @@ static const PrefListEntry sDynamicPrefOverrideList[]{
     PREF_LIST_ENTRY("extensions.foobaz"),
     PREF_LIST_ENTRY(
         "extensions.formautofill.creditCards.heuristics.testConfidence"),
-    PREF_LIST_ENTRY("general.appname.override"),
     PREF_LIST_ENTRY("general.appversion.override"),
     PREF_LIST_ENTRY("general.buildID.override"),
     PREF_LIST_ENTRY("general.oscpu.override"),

@@ -8,7 +8,6 @@
 #include "mozilla/ServoStyleSetInlines.h"
 
 #include "gfxPlatformFontList.h"
-#include "mozilla/AutoRestyleTimelineMarker.h"
 #include "mozilla/DocumentStyleRootIterator.h"
 #include "mozilla/AttributeStyles.h"
 #include "mozilla/EffectCompositor.h"
@@ -103,16 +102,11 @@ class MOZ_RAII AutoSetInServoTraversal {
 class MOZ_RAII AutoPrepareTraversal {
  public:
   explicit AutoPrepareTraversal(ServoStyleSet* aSet)
-      // For markers for animations, we have already set the markers in
-      // RestyleManager::PostRestyleEventForAnimations so that we don't need
-      // to care about animation restyles here.
-      : mTimelineMarker(aSet->mDocument->GetDocShell(), false),
-        mSetInServoTraversal(aSet) {
+      : mSetInServoTraversal(aSet) {
     MOZ_ASSERT(!aSet->StylistNeedsUpdate());
   }
 
  private:
-  AutoRestyleTimelineMarker mTimelineMarker;
   AutoSetInServoTraversal mSetInServoTraversal;
 };
 
@@ -328,11 +322,12 @@ void ServoStyleSet::PreTraverseSync() {
   // is necessary to avoid a data race when updating the cache.
   Unused << mDocument->GetRootElement();
 
-  // FIXME(emilio): This shouldn't be needed in theory, the call to the same
-  // function in PresShell should do the work, but as it turns out we
+  // FIXME(emilio): These two shouldn't be needed in theory, the call to the
+  // same function in PresShell should do the work, but as it turns out we
   // ProcessPendingRestyles() twice, and runnables from frames just constructed
   // can end up doing editing stuff, which adds stylesheets etc...
   mDocument->FlushUserFontSet();
+  UpdateStylistIfNeeded();
 
   mDocument->ResolveScheduledPresAttrs();
 
@@ -451,13 +446,17 @@ static inline bool LazyPseudoIsCacheable(PseudoStyleType aType,
 
 already_AddRefed<ComputedStyle> ServoStyleSet::ResolvePseudoElementStyle(
     const Element& aOriginatingElement, PseudoStyleType aType,
-    ComputedStyle* aParentStyle, IsProbe aIsProbe) {
+    nsAtom* aFunctionalPseudoParameter, ComputedStyle* aParentStyle,
+    IsProbe aIsProbe) {
   // Runs from frame construction, this should have clean styles already, except
   // with non-lazy FC...
   UpdateStylistIfNeeded();
   MOZ_ASSERT(PseudoStyle::IsPseudoElement(aType));
 
+  // caching is done using `aType` only, therefore results would be wrong for
+  // pseudos with functional parameters (e.g. `::highlight(foo)`).
   const bool cacheable =
+      !aFunctionalPseudoParameter &&
       LazyPseudoIsCacheable(aType, aOriginatingElement, aParentStyle);
   RefPtr<ComputedStyle> style =
       cacheable ? aParentStyle->GetCachedLazyPseudoStyle(aType) : nullptr;
@@ -469,9 +468,9 @@ already_AddRefed<ComputedStyle> ServoStyleSet::ResolvePseudoElementStyle(
     //
     // There are callers which do pass the wrong parent style and it would
     // assert (like ComputeSelectionStyle()). That's messy!
-    style = Servo_ResolvePseudoStyle(&aOriginatingElement, aType, isProbe,
-                                     isProbe ? nullptr : aParentStyle,
-                                     mRawData.get())
+    style = Servo_ResolvePseudoStyle(
+                &aOriginatingElement, aType, aFunctionalPseudoParameter,
+                isProbe, isProbe ? nullptr : aParentStyle, mRawData.get())
                 .Consume();
     if (!style) {
       MOZ_ASSERT(isProbe);
@@ -489,20 +488,6 @@ already_AddRefed<ComputedStyle> ServoStyleSet::ResolvePseudoElementStyle(
   }
 
   return style.forget();
-}
-
-already_AddRefed<ComputedStyle> ServoStyleSet::ProbeHighlightPseudoElementStyle(
-    const dom::Element& aOriginatingElement, const nsAtom* aHighlightName,
-    ComputedStyle* aParentStyle) {
-  MOZ_ASSERT(!StylistNeedsUpdate());
-  MOZ_ASSERT(aHighlightName);
-
-  RefPtr<ComputedStyle> style =
-      Servo_ComputedValues_ResolveHighlightPseudoStyle(
-          &aOriginatingElement, aHighlightName, mRawData.get())
-          .Consume();
-
-  return style ? style.forget() : nullptr;
 }
 
 already_AddRefed<ComputedStyle>
@@ -826,9 +811,9 @@ bool ServoStyleSet::StyleDocument(ServoTraversalFlags aFlags) {
                   !parent->HasAnyOfFlags(Element::kAllServoDescendantBits));
 
     postTraversalRequired |=
-        Servo_TraverseSubtree(root, mRawData.get(), &snapshots, aFlags);
-    postTraversalRequired |= root->HasAnyOfFlags(
-        Element::kAllServoDescendantBits | NODE_NEEDS_FRAME);
+        Servo_TraverseSubtree(root, mRawData.get(), &snapshots, aFlags) ||
+        root->HasAnyOfFlags(Element::kAllServoDescendantBits |
+                            NODE_NEEDS_FRAME);
 
     {
       uint32_t existingBits = mDocument->GetServoRestyleRootDirtyBits();
@@ -866,14 +851,13 @@ bool ServoStyleSet::StyleDocument(ServoTraversalFlags aFlags) {
   // traversal caused, for example, the font-size to change, the SMIL style
   // won't be updated until the next tick anyway.
   if (GetPresContext()->EffectCompositor()->PreTraverse(aFlags)) {
-    nsINode* styleRoot = mDocument->GetServoRestyleRoot();
-    Element* root =
-        styleRoot->IsElement() ? styleRoot->AsElement() : rootElement;
-
-    postTraversalRequired |=
-        Servo_TraverseSubtree(root, mRawData.get(), &snapshots, aFlags);
-    postTraversalRequired |= root->HasAnyOfFlags(
-        Element::kAllServoDescendantBits | NODE_NEEDS_FRAME);
+    DocumentStyleRootIterator iter(mDocument->GetServoRestyleRoot());
+    while (Element* root = iter.GetNextStyleRoot()) {
+      postTraversalRequired |=
+          Servo_TraverseSubtree(root, mRawData.get(), &snapshots, aFlags) ||
+          root->HasAnyOfFlags(Element::kAllServoDescendantBits |
+                              NODE_NEEDS_FRAME);
+    }
   }
 
   return postTraversalRequired;
@@ -1101,15 +1085,6 @@ already_AddRefed<ComputedStyle> ServoStyleSet::GetBaseContextForElement(
       .Consume();
 }
 
-already_AddRefed<ComputedStyle>
-ServoStyleSet::ResolveServoStyleByAddingAnimation(
-    Element* aElement, const ComputedStyle* aStyle,
-    StyleAnimationValue* aAnimationValue) {
-  return Servo_StyleSet_GetComputedValuesByAddingAnimation(
-             mRawData.get(), aElement, aStyle, &Snapshots(), aAnimationValue)
-      .Consume();
-}
-
 already_AddRefed<StyleAnimationValue> ServoStyleSet::ComputeAnimationValue(
     Element* aElement, StyleLockedDeclarationBlock* aDeclarations,
     const ComputedStyle* aStyle) {
@@ -1213,7 +1188,7 @@ void ServoStyleSet::ClearNonInheritingComputedStyles() {
 
 already_AddRefed<ComputedStyle> ServoStyleSet::ResolveStyleLazily(
     const Element& aElement, PseudoStyleType aPseudoType,
-    StyleRuleInclusion aRuleInclusion) {
+    nsAtom* aFunctionalPseudoParameter, StyleRuleInclusion aRuleInclusion) {
   PreTraverseSync();
   MOZ_ASSERT(!StylistNeedsUpdate());
 
@@ -1257,7 +1232,8 @@ already_AddRefed<ComputedStyle> ServoStyleSet::ResolveStyleLazily(
                            pc->PresShell()->DidInitialize();
   return Servo_ResolveStyleLazily(
              elementForStyleResolution, pseudoTypeForStyleResolution,
-             aRuleInclusion, &restyleManager->Snapshots(),
+             aFunctionalPseudoParameter, aRuleInclusion,
+             &restyleManager->Snapshots(),
              restyleManager->GetUndisplayedRestyleGeneration(), canUseCache,
              mRawData.get())
       .Consume();
@@ -1402,6 +1378,72 @@ bool ServoStyleSet::MightHaveNthOfClassDependency(const Element& aElement) {
                                                       &Snapshots());
 }
 
+void ServoStyleSet::MaybeInvalidateRelativeSelectorIDDependency(
+    const Element& aElement, nsAtom* aOldID, nsAtom* aNewID,
+    const ServoElementSnapshotTable& aSnapshots) {
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorIDDependency(
+      mRawData.get(), &aElement, aOldID, aNewID, &aSnapshots);
+}
+
+void ServoStyleSet::MaybeInvalidateRelativeSelectorClassDependency(
+    const Element& aElement, const ServoElementSnapshotTable& aSnapshots) {
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorClassDependency(
+      mRawData.get(), &aElement, &aSnapshots);
+}
+
+void ServoStyleSet::MaybeInvalidateRelativeSelectorAttributeDependency(
+    const Element& aElement, nsAtom* aAttribute,
+    const ServoElementSnapshotTable& aSnapshots) {
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorAttributeDependency(
+      mRawData.get(), &aElement, aAttribute, &aSnapshots);
+}
+
+void ServoStyleSet::MaybeInvalidateRelativeSelectorStateDependency(
+    const Element& aElement, ElementState aState,
+    const ServoElementSnapshotTable& aSnapshots) {
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorStateDependency(
+      mRawData.get(), &aElement, aState.GetInternalValue(), &aSnapshots);
+}
+
+void ServoStyleSet::MaybeInvalidateRelativeSelectorForEmptyDependency(
+    const Element& aElement) {
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorEmptyDependency(mRawData.get(),
+                                                                &aElement);
+}
+
+void ServoStyleSet::MaybeInvalidateRelativeSelectorForNthEdgeDependency(
+    const Element& aElement) {
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorNthEdgeDependency(
+      mRawData.get(), &aElement);
+}
+
+void ServoStyleSet::MaybeInvalidateRelativeSelectorForNthDependencyFromSibling(
+    const Element* aFromSibling) {
+  if (aFromSibling == nullptr) {
+    return;
+  }
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorNthDependencyFromSibling(
+      mRawData.get(), aFromSibling);
+}
+
+void ServoStyleSet::MaybeInvalidateForElementInsertion(
+    const Element& aElement) {
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorForInsertion(mRawData.get(),
+                                                             &aElement);
+}
+
+void ServoStyleSet::MaybeInvalidateForElementAppend(const Element& aElement) {
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorForAppend(mRawData.get(),
+                                                          &aElement);
+}
+
+void ServoStyleSet::MaybeInvalidateForElementRemove(
+    const Element& aElement, const Element* aPrevSibling,
+    const Element* aNextSibling) {
+  Servo_StyleSet_MaybeInvalidateRelativeSelectorForRemoval(
+      mRawData.get(), &aElement, aPrevSibling, aNextSibling);
+}
+
 bool ServoStyleSet::MightHaveNthOfAttributeDependency(
     const Element& aElement, nsAtom* aAttribute) const {
   return Servo_StyleSet_MightHaveNthOfAttributeDependency(
@@ -1418,6 +1460,11 @@ bool ServoStyleSet::HasNthOfStateDependency(const Element& aElement,
                                             dom::ElementState aState) const {
   return Servo_StyleSet_HasNthOfStateDependency(mRawData.get(), &aElement,
                                                 aState.GetInternalValue());
+}
+
+void ServoStyleSet::RestyleSiblingsForNthOf(const Element& aElement,
+                                            uint32_t aFlags) const {
+  Servo_StyleSet_RestyleSiblingsForNthOf(&aElement, aFlags);
 }
 
 bool ServoStyleSet::HasDocumentStateDependency(
@@ -1448,12 +1495,18 @@ void ServoStyleSet::RegisterProperty(const PropertyDefinition& aDefinition,
                                      ErrorResult& aRv) {
   using Result = StyleRegisterCustomPropertyResult;
   auto result = Servo_RegisterCustomProperty(
-      RawData(), &aDefinition.mName, &aDefinition.mSyntax,
-      aDefinition.mInherits,
+      RawData(), mDocument->DefaultStyleAttrURLData(), &aDefinition.mName,
+      &aDefinition.mSyntax, aDefinition.mInherits,
       aDefinition.mInitialValue.WasPassed() ? &aDefinition.mInitialValue.Value()
                                             : nullptr);
   switch (result) {
     case Result::SuccessfullyRegistered:
+      if (Element* root = mDocument->GetRootElement()) {
+        if (nsPresContext* pc = GetPresContext()) {
+          pc->RestyleManager()->PostRestyleEvent(
+              root, RestyleHint::RecascadeSubtree(), nsChangeHint(0));
+        }
+      }
       break;
     case Result::InvalidName:
       return aRv.ThrowSyntaxError("Invalid name");

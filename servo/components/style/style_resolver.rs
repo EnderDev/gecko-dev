@@ -17,7 +17,7 @@ use crate::selector_parser::{PseudoElement, SelectorImpl};
 use crate::stylist::RuleInclusion;
 use log::Level::Trace;
 use selectors::matching::{
-    IgnoreNthChildForInvalidation, MatchingContext, MatchingMode, NeedsSelectorFlags,
+    MatchingForInvalidation, MatchingContext, MatchingMode, NeedsSelectorFlags,
     RelativeSelectorMatchingState, VisitedHandlingMode,
 };
 use servo_arc::Arc;
@@ -351,7 +351,6 @@ where
             pseudo,
             inputs,
             &self.context.shared.guards,
-            pseudo.and(parent_style),
             parent_style,
             layout_parent_style,
             FirstLineReparenting::No,
@@ -465,15 +464,15 @@ where
         let mut applicable_declarations = ApplicableDeclarationList::new();
 
         let bloom_filter = self.context.thread_local.bloom_filter.filter();
-        let nth_index_cache = &mut self.context.thread_local.nth_index_cache;
+        let selector_caches = &mut self.context.thread_local.selector_caches;
         let mut matching_context = MatchingContext::new_for_visited(
             MatchingMode::Normal,
             Some(bloom_filter),
-            nth_index_cache,
+            selector_caches,
             visited_handling,
             self.context.shared.quirks_mode(),
             NeedsSelectorFlags::Yes,
-            IgnoreNthChildForInvalidation::No,
+            MatchingForInvalidation::No,
         );
 
         let stylist = &self.context.shared.stylist;
@@ -559,16 +558,16 @@ where
         }
 
         let bloom_filter = self.context.thread_local.bloom_filter.filter();
-        let nth_index_cache = &mut self.context.thread_local.nth_index_cache;
+        let selector_caches = &mut self.context.thread_local.selector_caches;
 
         let mut matching_context = MatchingContext::<'_, E::Impl>::new_for_visited(
             MatchingMode::ForStatelessPseudoElement,
             Some(bloom_filter),
-            nth_index_cache,
+            selector_caches,
             visited_handling,
             self.context.shared.quirks_mode(),
             NeedsSelectorFlags::Yes,
-            IgnoreNthChildForInvalidation::No,
+            MatchingForInvalidation::No,
         );
         matching_context.extra_data.originating_element_style = Some(originating_element_style);
 

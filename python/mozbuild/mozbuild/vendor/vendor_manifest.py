@@ -30,23 +30,38 @@ DEFAULT_KEEP_FILES = ["**/moz.build", "**/moz.yaml"]
 DEFAULT_INCLUDE_FILES = []
 
 
+def iglob_hidden(*args, **kwargs):
+    # glob._ishidden exists from 3.5 up to 3.12 (and beyond?)
+    old_ishidden = glob._ishidden
+    glob._ishidden = lambda x: False
+    try:
+        yield from glob.iglob(*args, **kwargs)
+    finally:
+        glob._ishidden = old_ishidden
+
+
 def throwe():
     raise Exception
 
 
 def _replace_in_file(file, pattern, replacement, regex=False):
+    def replacer(matchobj: re.Match):
+        if matchobj.group(0) == replacement:
+            print(f"WARNING: {action} replaced '{matchobj.group(0)}' with same.")
+        return replacement
+
     with open(file) as f:
         contents = f.read()
 
-    if regex:
-        newcontents = re.sub(pattern, replacement, contents)
-    else:
-        newcontents = contents.replace(pattern, replacement)
+    action = "replace-in-file-regex"
+    if not regex:
+        pattern = re.escape(pattern)
+        action = "replace-in-file"
 
-    if newcontents == contents:
+    newcontents, count = re.subn(pattern, replacer, contents)
+    if count < 1:
         raise Exception(
-            "Could not find '%s' in %s to %sreplace with '%s'"
-            % (pattern, file, "regex-" if regex else "", replacement)
+            f"{action} could not find '{pattern}' in {file} to replace with '{replacement}'."
         )
 
     with open(file, "w") as f:
@@ -105,6 +120,7 @@ class VendorManifest(MozbuildObject):
         self.yaml_file = yaml_file
         self._extract_directory = throwe
         self.logInfo = functools.partial(self.log, logging.INFO, "vendor")
+        self.patch_mode = patch_mode
         if "vendor-directory" not in self.manifest["vendoring"]:
             self.manifest["vendoring"]["vendor-directory"] = os.path.dirname(
                 self.yaml_file
@@ -156,7 +172,9 @@ class VendorManifest(MozbuildObject):
                 new_revision, timestamp, ignore_modified, add_to_exports
             )
         elif flavor == "individual-files":
-            self.process_individual(new_revision, timestamp, ignore_modified)
+            self.process_individual(
+                new_revision, timestamp, ignore_modified, add_to_exports
+            )
         elif flavor == "rust":
             self.process_rust(
                 command_context,
@@ -183,13 +201,11 @@ class VendorManifest(MozbuildObject):
         from mozbuild.vendor.vendor_rust import VendorRust
 
         vendor_command = command_context._spawn(VendorRust)
-        vendor_command.vendor(
-            ignore_modified=True, build_peers_said_large_imports_were_ok=False
-        )
+        vendor_command.vendor(ignore_modified=True)
 
         self.update_yaml(new_revision, timestamp)
 
-    def process_individual(self, new_revision, timestamp, ignore_modified):
+    def fetch_individual(self, new_revision):
         # This design is used because there is no github API to query
         # for the last commit that modified a file; nor a way to get file
         # blame.  So really all we can do is just download and replace the
@@ -228,16 +244,27 @@ class VendorManifest(MozbuildObject):
             )
             download_and_write_file(url, destination)
 
-        self.spurious_check(new_revision, ignore_modified)
+    def process_regular_or_individual(
+        self, is_individual, new_revision, timestamp, ignore_modified, add_to_exports
+    ):
+        if self.should_perform_step("fetch"):
+            if is_individual:
+                self.fetch_individual(new_revision)
+            else:
+                self.fetch_and_unpack(new_revision)
+        else:
+            self.logInfo({}, "Skipping fetching upstream source.")
 
         self.logInfo({}, "Checking for update actions")
         self.update_files(new_revision)
 
-        self.update_yaml(new_revision, timestamp)
-
-        self.logInfo({"rev": new_revision}, "Updated to '{rev}'.")
-
-        if "patches" in self.manifest["vendoring"]:
+        if self.patch_mode == "check":
+            self.import_local_patches(
+                self.manifest["vendoring"].get("patches", []),
+                os.path.dirname(self.yaml_file),
+                self.manifest["vendoring"]["vendor-directory"],
+            )
+        elif "patches" in self.manifest["vendoring"]:
             # Remind the user
             self.log(
                 logging.CRITICAL,
@@ -246,16 +273,6 @@ class VendorManifest(MozbuildObject):
                 "Patches present in manifest!!! Please run "
                 "'./mach vendor --patch-mode only' after commiting changes.",
             )
-
-    def process_regular(self, new_revision, timestamp, ignore_modified, add_to_exports):
-
-        if self.should_perform_step("fetch"):
-            self.fetch_and_unpack(new_revision)
-        else:
-            self.logInfo({}, "Skipping fetching upstream source.")
-
-        self.logInfo({}, "Checking for update actions")
-        self.update_files(new_revision)
 
         if self.should_perform_step("hg-add"):
             self.logInfo({}, "Registering changes with version control.")
@@ -278,6 +295,8 @@ class VendorManifest(MozbuildObject):
         else:
             self.logInfo({}, "Skipping updating the moz.yaml file.")
 
+        # individual flavor does not need this step, but performing it should
+        # always be a no-op
         if self.should_perform_step("update-moz-build"):
             self.logInfo({}, "Updating moz.build files")
             self.update_moz_build(
@@ -290,15 +309,19 @@ class VendorManifest(MozbuildObject):
 
         self.logInfo({"rev": new_revision}, "Updated to '{rev}'.")
 
-        if "patches" in self.manifest["vendoring"]:
-            # Remind the user
-            self.log(
-                logging.CRITICAL,
-                "vendor",
-                {},
-                "Patches present in manifest!!! Please run "
-                "'./mach vendor --patch-mode only' after commiting changes.",
-            )
+    def process_regular(self, new_revision, timestamp, ignore_modified, add_to_exports):
+        is_individual = False
+        self.process_regular_or_individual(
+            is_individual, new_revision, timestamp, ignore_modified, add_to_exports
+        )
+
+    def process_individual(
+        self, new_revision, timestamp, ignore_modified, add_to_exports
+    ):
+        is_individual = True
+        self.process_regular_or_individual(
+            is_individual, new_revision, timestamp, ignore_modified, add_to_exports
+        )
 
     def get_source_host(self):
         if self.manifest["vendoring"]["source-hosting"] == "gitlab":
@@ -309,6 +332,10 @@ class VendorManifest(MozbuildObject):
             from mozbuild.vendor.host_github import GitHubHost
 
             return GitHubHost(self.manifest)
+        elif self.manifest["vendoring"]["source-hosting"] == "git":
+            from mozbuild.vendor.host_git import GitHost
+
+            return GitHost(self.manifest)
         elif self.manifest["vendoring"]["source-hosting"] == "googlesource":
             from mozbuild.vendor.host_googlesource import GoogleSourceHost
 
@@ -354,11 +381,11 @@ class VendorManifest(MozbuildObject):
                 # Append double asterisk to the end to make glob.iglob recursively match
                 # contents of directory
                 paths.extend(
-                    glob.iglob(mozpath.join(pattern_full_path, "**"), recursive=True)
+                    iglob_hidden(mozpath.join(pattern_full_path, "**"), recursive=True)
                 )
             # Otherwise pattern is a file or wildcard expression so add it without altering it
             else:
-                paths.extend(glob.iglob(pattern_full_path, recursive=True))
+                paths.extend(iglob_hidden(pattern_full_path, recursive=True))
         # Remove folder names from list of paths in order to avoid prematurely
         # truncating directories elsewhere
         # Sort the final list to ensure we preserve 01_, 02_ ordering for e.g. *.patch globs
@@ -405,14 +432,19 @@ class VendorManifest(MozbuildObject):
             url = self.source_host.upstream_release_artifact(revision, release_artifact)
         else:
             url = self.source_host.upstream_snapshot(revision)
+
         self.logInfo({"url": url}, "Fetching code archive from {url}")
 
         with mozfile.NamedTemporaryFile() as tmptarfile:
             tmpextractdir = tempfile.TemporaryDirectory()
             try:
-                req = requests.get(url, stream=True)
-                for data in req.iter_content(4096):
-                    tmptarfile.write(data)
+                if url.startswith("file://"):
+                    with open(url[len("file://") :], "rb") as tarinput:
+                        tmptarfile.write(tarinput.read())
+                else:
+                    req = requests.get(url, stream=True)
+                    for data in req.iter_content(4096):
+                        tmptarfile.write(data)
                 tmptarfile.seek(0)
 
                 vendor_dir = mozpath.normsep(
@@ -439,7 +471,6 @@ class VendorManifest(MozbuildObject):
 
                 self.logInfo({"vd": vendor_dir}, "Unpacking upstream files for {vd}.")
                 with tarfile.open(tmptarfile.name) as tar:
-
                     safe_extract(tar, tmpextractdir.name)
 
                     def get_first_dir(p):
@@ -454,7 +485,9 @@ class VendorManifest(MozbuildObject):
                 # GitLab puts everything down a directory; move it up.
                 if has_prefix:
                     tardir = mozpath.join(tmpextractdir.name, one_prefix)
-                    mozfile.copy_contents(tardir, tmpextractdir.name)
+                    mozfile.copy_contents(
+                        tardir, tmpextractdir.name, ignore_dangling_symlinks=True
+                    )
                     mozfile.remove(tardir)
 
                 if self.should_perform_step("include"):
@@ -479,7 +512,52 @@ class VendorManifest(MozbuildObject):
                     self.logInfo({}, "Skipping removing excluded files.")
                     to_exclude = []
 
-                to_exclude = list(set(to_exclude) - set(to_include))
+                # If we have files that match both patterns, figure out the _longer_
+                # pattern that it matches. (We hope this will be the more precise/stricter one)
+                conflicts = list(set(to_exclude).intersection(set(to_include)))
+                if conflicts:
+                    remove_from_include = []
+                    remove_from_exclude = []
+
+                    for c in conflicts:
+                        longest_exclude = ""
+                        longest_include = ""
+
+                        for pattern in (
+                            self.manifest["vendoring"].get("exclude", [])
+                            + DEFAULT_EXCLUDE_FILES
+                        ):
+                            if c in self.convert_patterns_to_paths(
+                                tmpextractdir.name,
+                                [pattern],
+                            ):
+                                if len(pattern) > len(longest_exclude):
+                                    longest_exclude = pattern
+
+                        for pattern in (
+                            self.manifest["vendoring"].get("include", [])
+                            + DEFAULT_INCLUDE_FILES
+                        ):
+                            if c in self.convert_patterns_to_paths(
+                                tmpextractdir.name,
+                                [pattern],
+                            ):
+                                if len(pattern) > len(longest_include):
+                                    longest_include = pattern
+
+                        if len(longest_include) == len(longest_exclude):
+                            # If it's a tie, give 'include' precedence'
+                            remove_from_exclude.append(c)
+                        elif len(longest_include) == 0 or len(longest_exclude) == 0:
+                            raise Exception("Pattern didn't match both.")
+                        elif len(longest_include) > len(longest_exclude):
+                            remove_from_exclude.append(c)
+                        else:
+                            remove_from_include.append(c)
+
+                    to_exclude = list(set(to_exclude) - set(remove_from_exclude))
+                    to_include = list(set(to_include) - set(remove_from_include))
+
                 if to_exclude:
                     self.logInfo(
                         {"files": list_of_paths_to_readable_string(to_exclude)},

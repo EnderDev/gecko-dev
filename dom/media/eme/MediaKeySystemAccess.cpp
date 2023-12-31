@@ -11,23 +11,24 @@
 #include "DecoderDoctorDiagnostics.h"
 #include "DecoderTraits.h"
 #include "KeySystemConfig.h"
+#include "MP4Decoder.h"
 #include "MediaContainerType.h"
+#include "WebMDecoder.h"
 #include "mozilla/ClearOnShutdown.h"
-#include "mozilla/dom/KeySystemNames.h"
-#include "mozilla/dom/MediaKeySystemAccessBinding.h"
-#include "mozilla/dom/MediaKeySession.h"
-#include "mozilla/dom/MediaSource.h"
 #include "mozilla/EMEUtils.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/Services.h"
 #include "mozilla/StaticPrefs_media.h"
+#include "mozilla/dom/KeySystemNames.h"
+#include "mozilla/dom/MediaKeySession.h"
+#include "mozilla/dom/MediaKeySystemAccessBinding.h"
+#include "mozilla/dom/MediaSource.h"
 #include "nsDOMString.h"
 #include "nsIObserverService.h"
 #include "nsMimeTypes.h"
 #include "nsReadableUtils.h"
 #include "nsServiceManagerUtils.h"
 #include "nsUnicharUtils.h"
-#include "WebMDecoder.h"
 
 #ifdef XP_WIN
 #  include "WMFDecoderModule.h"
@@ -127,7 +128,8 @@ MediaKeySystemStatus MediaKeySystemAccess::GetKeySystemStatus(
   }
 
 #ifdef MOZ_WMF_CDM
-  if (IsPlayReadyKeySystemAndSupported(aKeySystem) &&
+  if ((IsPlayReadyKeySystemAndSupported(aKeySystem) ||
+       IsWidevineExperimentKeySystemAndSupported(aKeySystem)) &&
       KeySystemConfig::Supports(aKeySystem)) {
     return MediaKeySystemStatus::Available;
   }
@@ -159,6 +161,11 @@ static KeySystemConfig::EMECodecString ToEMEAPICodecString(
   if (IsVP9CodecString(aCodec)) {
     return KeySystemConfig::EME_CODEC_VP9;
   }
+#ifdef MOZ_WMF
+  if (IsH265CodecString(aCodec)) {
+    return KeySystemConfig::EME_CODEC_HEVC;
+  }
+#endif
   return ""_ns;
 }
 
@@ -171,6 +178,8 @@ static nsTArray<KeySystemConfig> GetSupportedKeySystems() {
 #ifdef MOZ_WMF_CDM
       NS_ConvertUTF8toUTF16(kPlayReadyKeySystemName),
       NS_ConvertUTF8toUTF16(kPlayReadyKeySystemHardware),
+      NS_ConvertUTF8toUTF16(kWidevineExperimentKeySystemName),
+      NS_ConvertUTF8toUTF16(kWidevineExperiment2KeySystemName),
 #endif
   };
   for (const auto& name : keySystemNames) {
@@ -184,7 +193,7 @@ static bool GetKeySystemConfigs(
     nsTArray<KeySystemConfig>& aOutKeySystemConfig) {
   bool foundConfigs = false;
   for (auto& config : GetSupportedKeySystems()) {
-    if (config.mKeySystem.Equals(aKeySystem)) {
+    if (config.IsSameKeySystem(aKeySystem)) {
       aOutKeySystemConfig.AppendElement(std::move(config));
       foundConfigs = true;
     }
@@ -327,7 +336,8 @@ static CodecType GetCodecType(const KeySystemConfig::EMECodecString& aCodec) {
   }
   if (aCodec.Equals(KeySystemConfig::EME_CODEC_H264) ||
       aCodec.Equals(KeySystemConfig::EME_CODEC_VP8) ||
-      aCodec.Equals(KeySystemConfig::EME_CODEC_VP9)) {
+      aCodec.Equals(KeySystemConfig::EME_CODEC_VP9) ||
+      aCodec.Equals(KeySystemConfig::EME_CODEC_HEVC)) {
     return Video;
   }
   return Invalid;
@@ -461,9 +471,9 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
     // and subtype names are case-insensitive."'. We're using
     // nsContentTypeParser and that is case-insensitive and converts all its
     // parameter outputs to lower case.)
-    const bool isMP4 =
-        DecoderTraits::IsMP4SupportedType(containerType, aDiagnostics);
-    if (isMP4 && !aKeySystem.mMP4.IsSupported()) {
+    const bool supportedInMP4 =
+        MP4Decoder::IsSupportedType(containerType, aDiagnostics);
+    if (supportedInMP4 && !aKeySystem.mMP4.IsSupported()) {
       EME_LOG(
           "MediaKeySystemConfiguration (label='%s') "
           "MediaKeySystemMediaCapability('%s','%s','%s') unsupported; "
@@ -486,7 +496,7 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
           NS_ConvertUTF16toUTF8(encryptionScheme).get());
       continue;
     }
-    if (!isMP4 && !isWebM) {
+    if (!supportedInMP4 && !isWebM) {
       EME_LOG(
           "MediaKeySystemConfiguration (label='%s') "
           "MediaKeySystemMediaCapability('%s','%s','%s') unsupported; "
@@ -518,7 +528,7 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
       // TODO: Remove this once we're sure it doesn't break the web.
       // If container normatively implies a specific set of codecs and codec
       // constraints: Let parameters be that set.
-      if (isMP4) {
+      if (supportedInMP4) {
         if (aCodecType == Audio) {
           codecs.AppendElement(KeySystemConfig::EME_CODEC_AAC);
         } else if (aCodecType == Video) {
@@ -613,7 +623,8 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
     // encrypted media data for the combination of container, media types,
     // robustness and local accumulated configuration in combination with
     // restrictions...
-    const auto& containerSupport = isMP4 ? aKeySystem.mMP4 : aKeySystem.mWebM;
+    const auto& containerSupport =
+        supportedInMP4 ? aKeySystem.mMP4 : aKeySystem.mWebM;
     if (!CanDecryptAndDecode(aKeySystem.mKeySystem, contentTypeString,
                              majorType, containerSupport, codecs,
                              aDiagnostics)) {
@@ -718,6 +729,9 @@ static bool GetSupportedConfig(
     MediaKeySystemConfiguration& aOutConfig,
     DecoderDoctorDiagnostics* aDiagnostics, bool aInPrivateBrowsing,
     const std::function<void(const char*)>& aDeprecationLogFn) {
+  EME_LOG("Compare implementation '%s'\n with request '%s'",
+          NS_ConvertUTF16toUTF8(aKeySystem.GetDebugInfo()).get(),
+          ToCString(aCandidate).get());
   // Let accumulated configuration be a new MediaKeySystemConfiguration
   // dictionary.
   MediaKeySystemConfiguration config;

@@ -12,23 +12,11 @@ add_task(async function test_translations_panel_manage_languages() {
     languagePairs: LANGUAGE_PAIRS,
   });
 
-  const { button } = await assertTranslationsButton(
-    { button: true },
-    "The button is available."
-  );
+  await openTranslationsPanel({ onOpenPanel: assertPanelDefaultView });
 
-  await waitForTranslationsPopupEvent("popupshown", () => {
-    click(button, "Opening the popup");
-  });
+  await openTranslationsSettingsMenu();
 
-  const gearIcon = getByL10nId("translations-panel-settings-button");
-  click(gearIcon, "Open the preferences menu");
-
-  const manageLanguages = getByL10nId(
-    "translations-panel-settings-manage-languages"
-  );
-  info("Choose to manage the languages.");
-  manageLanguages.doCommand();
+  await clickManageLanguages();
 
   await waitForCondition(
     () => gBrowser.currentURI.spec === "about:preferences#general",

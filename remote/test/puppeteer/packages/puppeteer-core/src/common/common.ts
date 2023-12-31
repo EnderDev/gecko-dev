@@ -16,6 +16,7 @@
 
 export * from './Accessibility.js';
 export * from './AriaQueryHandler.js';
+export * from './Binding.js';
 export * from './Browser.js';
 export * from './BrowserConnector.js';
 export * from './BrowserWebSocketTransport.js';
@@ -38,7 +39,6 @@ export * from './ExecutionContext.js';
 export * from './fetch.js';
 export * from './FileChooser.js';
 export * from './FirefoxTargetManager.js';
-export * from './Frame.js';
 export * from './FrameManager.js';
 export * from './FrameTree.js';
 export * from './Input.js';
@@ -56,6 +56,7 @@ export * from './PredefinedNetworkConditions.js';
 export * from './Product.js';
 export * from './Puppeteer.js';
 export * from './PuppeteerViewport.js';
+export * from './QueryHandler.js';
 export * from './SecurityDetails.js';
 export * from './Target.js';
 export * from './TargetManager.js';
@@ -67,4 +68,3 @@ export * from './USKeyboardLayout.js';
 export * from './util.js';
 export * from './WaitTask.js';
 export * from './WebWorker.js';
-export * from './QueryHandler.js';

@@ -973,6 +973,13 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
         nsIGfxInfo::FEATURE_WEBRENDER, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
         DRIVER_COMPARISON_IGNORED, V(0, 0, 0, 0),
         "FEATURE_FAILURE_WEBRENDER_MESA_VM", "");
+    // Disable hardware mesa drivers in virtual machines due to instability.
+    APPEND_TO_DRIVER_BLOCKLIST_EXT(
+        OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
+        WindowProtocol::All, DriverVendor::MesaVM, DeviceFamily::All,
+        nsIGfxInfo::FEATURE_WEBGL_USE_HARDWARE,
+        nsIGfxInfo::FEATURE_BLOCKED_DEVICE, DRIVER_COMPARISON_IGNORED,
+        V(0, 0, 0, 0), "FEATURE_FAILURE_WEBGL_MESA_VM", "");
 
     ////////////////////////////////////
     // FEATURE_WEBRENDER_COMPOSITOR
@@ -1015,6 +1022,15 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
 
     ////////////////////////////////////
     // FEATURE_DMABUF
+#ifdef EARLY_BETA_OR_EARLIER
+    // Disabled due to high volume crash tracked in bug 1788573, fixed in the
+    // 545 driver.
+    APPEND_TO_DRIVER_BLOCKLIST_EXT(
+        OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
+        WindowProtocol::All, DriverVendor::NonMesaAll, DeviceFamily::NvidiaAll,
+        nsIGfxInfo::FEATURE_DMABUF, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
+        DRIVER_LESS_THAN, V(545, 23, 6, 0), "FEATURE_FAILURE_BUG_1788573", "");
+#else
     // Disabled due to high volume crash tracked in bug 1788573.
     APPEND_TO_DRIVER_BLOCKLIST_EXT(
         OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
@@ -1022,6 +1038,7 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
         nsIGfxInfo::FEATURE_DMABUF, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
         DRIVER_COMPARISON_IGNORED, V(0, 0, 0, 0), "FEATURE_FAILURE_BUG_1788573",
         "");
+#endif
 
     ////////////////////////////////////
     // FEATURE_DMABUF_SURFACE_EXPORT
@@ -1087,6 +1104,14 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
         nsIGfxInfo::FEATURE_BLOCKED_DEVICE, DRIVER_COMPARISON_IGNORED,
         V(0, 0, 0, 0), "FEATURE_HARDWARE_VIDEO_DECODING_NO_R600", "");
 
+    // Disable on AMD devices using broken Mesa (Bug 1832080).
+    APPEND_TO_DRIVER_BLOCKLIST_EXT(
+        OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
+        WindowProtocol::All, DriverVendor::MesaAll, DeviceFamily::AtiAll,
+        nsIGfxInfo::FEATURE_HARDWARE_VIDEO_DECODING,
+        nsIGfxInfo::FEATURE_BLOCKED_DEVICE, DRIVER_LESS_THAN, V(23, 1, 1, 0),
+        "FEATURE_HARDWARE_VIDEO_DECODING_AMD_DISABLE", "Mesa 23.1.1.0");
+
     // Disable on Release/late Beta on AMD
 #if !defined(EARLY_BETA_OR_EARLIER)
     APPEND_TO_DRIVER_BLOCKLIST(OperatingSystem::Linux, DeviceFamily::AtiAll,
@@ -1129,6 +1154,15 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
         DRIVER_COMPARISON_IGNORED, V(0, 0, 0, 0),
         "FEATURE_FAILURE_THREADSAFE_GL_NOUVEAU", "");
 
+#ifdef EARLY_BETA_OR_EARLIER
+    // Disabled due to high volume crash tracked in bug 1788573, fixed in the
+    // 545 driver.
+    APPEND_TO_DRIVER_BLOCKLIST_EXT(
+        OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
+        WindowProtocol::All, DriverVendor::NonMesaAll, DeviceFamily::NvidiaAll,
+        nsIGfxInfo::FEATURE_THREADSAFE_GL, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
+        DRIVER_LESS_THAN, V(545, 23, 6, 0), "FEATURE_FAILURE_BUG_1788573", "");
+#else
     // Disabled due to high volume crash tracked in bug 1788573.
     APPEND_TO_DRIVER_BLOCKLIST_EXT(
         OperatingSystem::Linux, ScreenSizeStatus::All, BatteryStatus::All,
@@ -1136,6 +1170,13 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
         nsIGfxInfo::FEATURE_THREADSAFE_GL, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
         DRIVER_COMPARISON_IGNORED, V(0, 0, 0, 0), "FEATURE_FAILURE_BUG_1788573",
         "");
+#endif
+
+    // AMD R600 family does not perform well with WebRender.
+    APPEND_TO_DRIVER_BLOCKLIST(
+        OperatingSystem::Linux, DeviceFamily::AmdR600,
+        nsIGfxInfo::FEATURE_WEBRENDER, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
+        DRIVER_COMPARISON_IGNORED, V(0, 0, 0, 0), "AMD_R600_FAMILY", "");
   }
   return *sDriverInfo;
 }
@@ -1289,14 +1330,11 @@ nsresult GfxInfo::GetFeatureStatusImpl(
     if (!StaticPrefs::media_hardware_video_decoding_enabled_AtStartup()) {
       return ret;
     }
-    bool probeHWDecode = false;
-#ifdef MOZ_WAYLAND
-    probeHWDecode =
+    bool probeHWDecode =
         mIsAccelerated &&
         (*aStatus == nsIGfxInfo::FEATURE_STATUS_OK ||
          StaticPrefs::media_hardware_video_decoding_force_enabled_AtStartup() ||
          StaticPrefs::media_ffmpeg_vaapi_enabled_AtStartup());
-#endif
     if (probeHWDecode) {
       GetDataVAAPI();
       GetDataV4L2();

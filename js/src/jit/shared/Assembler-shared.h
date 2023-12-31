@@ -8,8 +8,10 @@
 #define jit_shared_Assembler_shared_h
 
 #include "mozilla/CheckedInt.h"
+#include "mozilla/DebugOnly.h"
 
 #include <limits.h>
+#include <utility>  // std::pair
 
 #include "gc/Barrier.h"
 #include "jit/AtomicOp.h"
@@ -39,6 +41,8 @@
 // describing how Bind() should patch them.
 #  define JS_CODELABEL_LINKMODE
 #endif
+
+using js::wasm::FaultingCodeOffset;
 
 namespace js {
 namespace jit {
@@ -508,6 +512,7 @@ typedef Vector<SymbolicAccess, 0, SystemAllocPolicy> SymbolicAccessVector;
 // code and metadata.
 
 class MemoryAccessDesc {
+  uint32_t memoryIndex_;
   uint64_t offset64_;
   uint32_t align_;
   Scalar::Type type_;
@@ -515,20 +520,29 @@ class MemoryAccessDesc {
   wasm::BytecodeOffset trapOffset_;
   wasm::SimdOp widenOp_;
   enum { Plain, ZeroExtend, Splat, Widen } loadOp_;
+  // Used for an assertion in MacroAssembler about offset length
+  mozilla::DebugOnly<bool> hugeMemory_;
 
  public:
   explicit MemoryAccessDesc(
-      Scalar::Type type, uint32_t align, uint64_t offset,
-      BytecodeOffset trapOffset,
+      uint32_t memoryIndex, Scalar::Type type, uint32_t align, uint64_t offset,
+      BytecodeOffset trapOffset, mozilla::DebugOnly<bool> hugeMemory,
       const jit::Synchronization& sync = jit::Synchronization::None())
-      : offset64_(offset),
+      : memoryIndex_(memoryIndex),
+        offset64_(offset),
         align_(align),
         type_(type),
         sync_(sync),
         trapOffset_(trapOffset),
         widenOp_(wasm::SimdOp::Limit),
-        loadOp_(Plain) {
+        loadOp_(Plain),
+        hugeMemory_(hugeMemory) {
     MOZ_ASSERT(mozilla::IsPowerOfTwo(align));
+  }
+
+  uint32_t memoryIndex() const {
+    MOZ_ASSERT(memoryIndex_ != UINT32_MAX);
+    return memoryIndex_;
   }
 
   // The offset is a 64-bit value because of memory64.  Almost always, it will
@@ -563,6 +577,13 @@ class MemoryAccessDesc {
   bool isZeroExtendSimd128Load() const { return loadOp_ == ZeroExtend; }
   bool isSplatSimd128Load() const { return loadOp_ == Splat; }
   bool isWidenSimd128Load() const { return loadOp_ == Widen; }
+
+  mozilla::DebugOnly<bool> isHugeMemory() const { return hugeMemory_; }
+#ifdef DEBUG
+  void assertOffsetInGuardPages() const;
+#else
+  void assertOffsetInGuardPages() const {}
+#endif
 
   void setZeroExtendSimd128Load() {
     MOZ_ASSERT(type() == Scalar::Float32 || type() == Scalar::Float64);
@@ -599,6 +620,8 @@ class AssemblerShared {
   wasm::TrapSiteVectorArray trapSites_;
   wasm::SymbolicAccessVector symbolicAccesses_;
   wasm::TryNoteVector tryNotes_;
+  wasm::CodeRangeUnwindInfoVector codeRangesUnwind_;
+
 #ifdef DEBUG
   // To facilitate figuring out which part of SM created each instruction as
   // shown by IONFLAGS=codegen, this maintains a stack of (notionally)
@@ -655,12 +678,11 @@ class AssemblerShared {
   void append(wasm::Trap trap, wasm::TrapSite site) {
     enoughMemory_ &= trapSites_[trap].append(site);
   }
-  void append(const wasm::MemoryAccessDesc& access, uint32_t pcOffset) {
-    appendOutOfBoundsTrap(access.trapOffset(), pcOffset);
-  }
-  void appendOutOfBoundsTrap(wasm::BytecodeOffset trapOffset,
-                             uint32_t pcOffset) {
-    append(wasm::Trap::OutOfBounds, wasm::TrapSite(pcOffset, trapOffset));
+  void append(const wasm::MemoryAccessDesc& access, wasm::TrapMachineInsn insn,
+              FaultingCodeOffset assemblerOffsetOfFaultingMachineInsn) {
+    append(wasm::Trap::OutOfBounds,
+           wasm::TrapSite(insn, assemblerOffsetOfFaultingMachineInsn,
+                          access.trapOffset()));
   }
   void append(wasm::SymbolicAccess access) {
     enoughMemory_ &= symbolicAccesses_.append(access);
@@ -676,11 +698,19 @@ class AssemblerShared {
     return true;
   }
 
+  void append(wasm::CodeRangeUnwindInfo::UnwindHow unwindHow,
+              uint32_t pcOffset) {
+    enoughMemory_ &= codeRangesUnwind_.emplaceBack(pcOffset, unwindHow);
+  }
+
   wasm::CallSiteVector& callSites() { return callSites_; }
   wasm::CallSiteTargetVector& callSiteTargets() { return callSiteTargets_; }
   wasm::TrapSiteVectorArray& trapSites() { return trapSites_; }
   wasm::SymbolicAccessVector& symbolicAccesses() { return symbolicAccesses_; }
   wasm::TryNoteVector& tryNotes() { return tryNotes_; }
+  wasm::CodeRangeUnwindInfoVector& codeRangeUnwindInfos() {
+    return codeRangesUnwind_;
+  }
 };
 
 // AutoCreatedBy pushes and later pops a who-created-these-insns? tag into the

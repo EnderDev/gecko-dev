@@ -10,6 +10,7 @@
 #include "mozilla/dom/ElementInlines.h"
 
 #include "mozilla/dom/Document.h"
+#include "nsObjectLoadingContent.h"
 #include "nsThreadUtils.h"
 #include "nsIWidget.h"
 #include "nsContentUtils.h"
@@ -29,9 +30,6 @@ HTMLEmbedElement::HTMLEmbedElement(
     : nsGenericHTMLElement(std::move(aNodeInfo)) {
   RegisterActivityObserver();
   SetIsNetworkCreated(aFromParser == FROM_PARSER_NETWORK);
-
-  // By default we're in the loading state
-  AddStatesSilently(ElementState::LOADING);
 }
 
 HTMLEmbedElement::~HTMLEmbedElement() {
@@ -136,6 +134,16 @@ void HTMLEmbedElement::AfterMaybeChangeAttr(int32_t aNamespaceID, nsAtom* aName,
       }));
 }
 
+int32_t HTMLEmbedElement::TabIndexDefault() {
+  // Only when we loaded a sub-document, <embed> should be tabbable by default
+  // because it's a navigable containers mentioned in 6.6.3 The tabindex
+  // attribute in the standard (see "If the value is null" section).
+  // https://html.spec.whatwg.org/#the-tabindex-attribute
+  // Otherwise, the default tab-index of <embed> is expected as -1 in a WPT:
+  // https://searchfox.org/mozilla-central/rev/7d98e651953f3135d91e98fa6d33efa131aec7ea/testing/web-platform/tests/html/interaction/focus/sequential-focus-navigation-and-the-tabindex-attribute/tabindex-getter.html#63
+  return Type() == eType_Document ? 0 : -1;
+}
+
 bool HTMLEmbedElement::IsHTMLFocusable(bool aWithMouse, bool* aIsFocusable,
                                        int32_t* aTabIndex) {
   // Plugins that show the empty fallback should not accept focus.
@@ -223,10 +231,6 @@ void HTMLEmbedElement::StartObjectLoad(bool aNotify, bool aForceLoad) {
 
   LoadObject(aNotify, aForceLoad);
   SetIsNetworkCreated(false);
-}
-
-ElementState HTMLEmbedElement::IntrinsicState() const {
-  return nsGenericHTMLElement::IntrinsicState() | ObjectState();
 }
 
 uint32_t HTMLEmbedElement::GetCapabilities() const {

@@ -70,6 +70,7 @@ enum class MediaInfoFlag : uint16_t {
   VIDEO_VP8 = (1 << 6),
   VIDEO_VP9 = (1 << 7),
   VIDEO_THEORA = (1 << 8),
+  VIDEO_HEVC = (1 << 9),
 };
 MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(MediaInfoFlag)
 
@@ -323,7 +324,7 @@ class PerformanceRecorderImpl : public PerformanceRecorderBase {
       MOZ_ASSERT(elapsedTimeUs >= 0, "Elapsed time can't be less than 0!");
       aStageMutator(stage);
       AUTO_PROFILER_STATS(PROFILER_MARKER_UNTYPED);
-      ::profiler_add_marker(
+      profiler_add_marker(
           stage.Name(), stage.Category(),
           MarkerOptions(MarkerTiming::Interval(startTime, now)));
     }

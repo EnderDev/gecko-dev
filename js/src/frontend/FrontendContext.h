@@ -42,11 +42,20 @@ struct FrontendErrors {
   bool outOfMemory = false;
   bool allocationOverflow = false;
 
+  // Set to true if the compilation is initiated with extra bindings, but
+  // the script has no reference to the bindings, and the script should be
+  // compiled without the extra bindings.
+  //
+  // See frontend::CompileGlobalScriptWithExtraBindings.
+  bool extraBindingsAreNotUsed = false;
+
   bool hadErrors() const {
-    return outOfMemory || overRecursed || allocationOverflow || error;
+    return outOfMemory || overRecursed || allocationOverflow ||
+           extraBindingsAreNotUsed || error;
   }
 
   void clearErrors();
+  void clearWarnings();
 };
 
 class FrontendAllocator : public MallocProvider<FrontendAllocator> {
@@ -90,6 +99,10 @@ class FrontendContext {
 #ifdef DEBUG
   // The thread ID where the native stack limit is set.
   mozilla::Maybe<size_t> stackLimitThreadId_;
+
+  // The stack pointer where the AutoCheckRecursionLimit check is performed
+  // last time.
+  void* previousStackPointer_ = nullptr;
 #endif
 
  protected:
@@ -104,8 +117,7 @@ class FrontendContext {
       : alloc_(this),
         nameCollectionPool_(nullptr),
         ownNameCollectionPool_(false),
-        scriptDataTableHolder_(&js::globalSharedScriptDataTableHolder),
-        supportedImportAssertions_() {}
+        scriptDataTableHolder_(&js::globalSharedScriptDataTableHolder) {}
   ~FrontendContext();
 
   void setStackQuota(JS::NativeStackSize stackSize);
@@ -151,9 +163,10 @@ class FrontendContext {
 
   enum class Warning { Suppress, Report };
 
-  void convertToRuntimeError(JSContext* cx, Warning warning = Warning::Report);
-
-  void linkWithJSContext(JSContext* cx);
+  // Returns false if the error cannot be converted (such as due to OOM). An
+  // error might still be reported to the given JSContext. Returns true
+  // otherwise.
+  bool convertToRuntimeError(JSContext* cx, Warning warning = Warning::Report);
 
   mozilla::Maybe<CompileError>& maybeError() { return errors_.error; }
   Vector<CompileError, 0, SystemAllocPolicy>& warnings() {
@@ -182,8 +195,20 @@ class FrontendContext {
   bool hadOutOfMemory() const { return errors_.outOfMemory; }
   bool hadOverRecursed() const { return errors_.overRecursed; }
   bool hadAllocationOverflow() const { return errors_.allocationOverflow; }
+  bool extraBindingsAreNotUsed() const {
+    return errors_.extraBindingsAreNotUsed;
+  }
+  void reportExtraBindingsAreNotUsed() {
+    errors_.extraBindingsAreNotUsed = true;
+  }
+  void clearNoExtraBindingReferencesFound() {
+    errors_.extraBindingsAreNotUsed = false;
+  }
   bool hadErrors() const;
+  // Clear errors and warnings.
   void clearErrors();
+  // Clear warnings only.
+  void clearWarnings();
 
 #ifdef __wasi__
   void incWasiRecursionDepth();
@@ -194,6 +219,10 @@ class FrontendContext {
 #ifdef DEBUG
   void setNativeStackLimitThread();
   void assertNativeStackLimitThread();
+#endif
+
+#ifdef DEBUG
+  void checkAndUpdateFrontendContextRecursionLimit(void* sp);
 #endif
 
  private:
@@ -211,7 +240,7 @@ class MOZ_STACK_CLASS AutoReportFrontendContext : public FrontendContext {
  public:
   explicit AutoReportFrontendContext(JSContext* cx,
                                      Warning warning = Warning::Report)
-      : FrontendContext(), cx_(cx), warning_(warning) {
+      : cx_(cx), warning_(warning) {
     setCurrentJSContext(cx_);
     MOZ_ASSERT(cx_ == maybeCx_);
   }
@@ -224,9 +253,10 @@ class MOZ_STACK_CLASS AutoReportFrontendContext : public FrontendContext {
 
   void clearAutoReport() { cx_ = nullptr; }
 
-  void convertToRuntimeErrorAndClear() {
-    convertToRuntimeError(cx_, warning_);
+  bool convertToRuntimeErrorAndClear() {
+    bool result = convertToRuntimeError(cx_, warning_);
     cx_ = nullptr;
+    return result;
   }
 };
 
@@ -244,8 +274,7 @@ class ManualReportFrontendContext : public FrontendContext {
 #endif
 
  public:
-  explicit ManualReportFrontendContext(JSContext* cx)
-      : FrontendContext(), cx_(cx) {
+  explicit ManualReportFrontendContext(JSContext* cx) : cx_(cx) {
     setCurrentJSContext(cx_);
   }
 

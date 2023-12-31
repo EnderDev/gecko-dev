@@ -46,7 +46,7 @@ XPCOMUtils.defineLazyServiceGetter(
   "nsIHandlerService"
 );
 
-XPCOMUtils.defineLazyGetter(lazy, "gOurBinary", () => {
+ChromeUtils.defineLazyGetter(lazy, "gOurBinary", () => {
   let file = Services.dirsvc.get("XREExeF", Ci.nsIFile);
   // Make sure to get the .app on macOS
   if (AppConstants.platform == "macosx") {
@@ -89,28 +89,6 @@ function getActor(window) {
   } catch (ex) {
     return null;
   }
-}
-
-function getLocalizedStrings(path) {
-  var stringBundle = Services.strings.createBundle(
-    "chrome://pdf.js/locale/" + path
-  );
-
-  var map = {};
-  for (let string of stringBundle.getSimpleEnumeration()) {
-    var key = string.key,
-      property = "textContent";
-    var i = key.lastIndexOf(".");
-    if (i >= 0) {
-      property = key.substring(i + 1);
-      key = key.substring(0, i);
-    }
-    if (!(key in map)) {
-      map[key] = {};
-    }
-    map[key][property] = string.value;
-  }
-  return map;
 }
 
 function isValidMatchesCount(data) {
@@ -295,20 +273,12 @@ class ChromeActions {
     });
   }
 
-  getLocale() {
-    return Services.locale.requestedLocale || "en-US";
-  }
-
-  getStrings() {
-    try {
-      // Lazy initialization of localizedStrings
-      this.localizedStrings ||= getLocalizedStrings("viewer.properties");
-
-      return this.localizedStrings;
-    } catch (e) {
-      log("Unable to retrieve localized strings: " + e);
-      return null;
-    }
+  getLocaleProperties(_data, sendResponse) {
+    const { requestedLocale, defaultLocale, isAppLocaleRTL } = Services.locale;
+    sendResponse({
+      lang: requestedLocale || defaultLocale,
+      isRTL: isAppLocaleRTL,
+    });
   }
 
   supportsIntegratedFind() {
@@ -316,34 +286,20 @@ class ChromeActions {
     return this.domWindow.windowGlobalChild.browsingContext.parent === null;
   }
 
-  supportsDocumentFonts() {
-    const prefBrowser = Services.prefs.getIntPref(
-      "browser.display.use_document_fonts"
-    );
-    const prefGfx = Services.prefs.getBoolPref(
-      "gfx.downloadable_fonts.enabled"
-    );
-    return !!prefBrowser && prefGfx;
-  }
-
-  supportsPinchToZoom() {
-    return Services.prefs.getBoolPref("apz.allow_zooming");
-  }
-
-  supportedMouseWheelZoomModifierKeys() {
+  getBrowserPrefs() {
     return {
-      ctrlKey:
+      canvasMaxAreaInBytes: Services.prefs.getIntPref("gfx.max-alloc-size"),
+      isInAutomation: Cu.isInAutomation,
+      supportsDocumentFonts:
+        !!Services.prefs.getIntPref("browser.display.use_document_fonts") &&
+        Services.prefs.getBoolPref("gfx.downloadable_fonts.enabled"),
+      supportsIntegratedFind: this.supportsIntegratedFind(),
+      supportsMouseWheelZoomCtrlKey:
         Services.prefs.getIntPref("mousewheel.with_control.action") === 3,
-      metaKey: Services.prefs.getIntPref("mousewheel.with_meta.action") === 3,
+      supportsMouseWheelZoomMetaKey:
+        Services.prefs.getIntPref("mousewheel.with_meta.action") === 3,
+      supportsPinchToZoom: Services.prefs.getBoolPref("apz.allow_zooming"),
     };
-  }
-
-  getCanvasMaxArea() {
-    return Services.prefs.getIntPref("gfx.max-alloc-size");
-  }
-
-  isInAutomation() {
-    return Cu.isInAutomation;
   }
 
   isMobile() {
@@ -378,7 +334,7 @@ class ChromeActions {
         lazy.PdfJsTelemetry.onTimeToView(probeInfo.timestamp);
         break;
       case "editing":
-        lazy.PdfJsTelemetry.onEditing(probeInfo.data.type);
+        lazy.PdfJsTelemetry.onEditing(probeInfo);
         break;
       case "buttons":
       case "gv-buttons":
@@ -393,14 +349,6 @@ class ChromeActions {
         }
         break;
     }
-  }
-
-  /**
-   * @param {Object} args - Object with `featureId` and `url` properties.
-   * @param {function} sendResponse - Callback function.
-   */
-  fallback(args, sendResponse) {
-    sendResponse(false);
   }
 
   updateFindControlState(data) {
@@ -481,8 +429,13 @@ class ChromeActions {
           break;
       }
     }
-    sendResponse?.(currentPrefs);
-    return currentPrefs;
+
+    const res = {
+      browserPrefs: this.getBrowserPrefs(),
+      prefs: currentPrefs,
+    };
+    sendResponse?.(res);
+    return res;
   }
 
   /**
@@ -1136,7 +1089,7 @@ PdfStreamConverter.prototype = {
 
         let actor = getActor(domWindow);
         actor?.init(actions.supportsIntegratedFind());
-
+        actor?.sendAsyncMessage("PDFJS:Parent:recordExposure");
         listener.onStopRequest(aRequest, statusCode);
       },
     };

@@ -5,6 +5,24 @@ import { BrowserTestUtils } from "resource://testing-common/BrowserTestUtils.sys
 import { Assert } from "resource://testing-common/Assert.sys.mjs";
 import { TestUtils } from "resource://testing-common/TestUtils.sys.mjs";
 
+var testScope;
+
+/**
+ * Module consumers can optionally initialize the module
+ *
+ * @param {object} scope
+ *   object with SimpleTest and info properties.
+ */
+function init(scope) {
+  testScope = scope;
+}
+
+function getFirefoxViewURL() {
+  return Services.prefs.getBoolPref("browser.tabs.firefox-view-next", true)
+    ? "about:firefoxview-next"
+    : "about:firefoxview";
+}
+
 function assertFirefoxViewTab(win) {
   Assert.ok(win.FirefoxViewHandler.tab, "Firefox View tab exists");
   Assert.ok(win.FirefoxViewHandler.tab?.hidden, "Firefox View tab is hidden");
@@ -27,24 +45,57 @@ async function assertFirefoxViewTabSelected(win) {
 }
 
 async function openFirefoxViewTab(win) {
-  await BrowserTestUtils.synthesizeMouseAtCenter(
-    "#firefox-view-button",
-    { type: "mousedown" },
-    win.browsingContext
-  );
+  if (!testScope?.SimpleTest) {
+    throw new Error(
+      "Must initialize FirefoxViewTestUtils with a test scope which has a SimpleTest property"
+    );
+  }
+  await testScope.SimpleTest.promiseFocus(win);
+  let fxviewTab = win.FirefoxViewHandler.tab;
+  let alreadyLoaded =
+    fxviewTab?.linkedBrowser.currentURI.spec.includes(getFirefoxViewURL()) &&
+    fxviewTab?.linkedBrowser?.contentDocument?.readyState == "complete";
+  let enteredPromise = alreadyLoaded
+    ? Promise.resolve()
+    : TestUtils.topicObserved("firefoxview-entered");
+
+  if (!fxviewTab?.selected) {
+    await BrowserTestUtils.synthesizeMouseAtCenter(
+      "#firefox-view-button",
+      { type: "mousedown" },
+      win.browsingContext
+    );
+    await TestUtils.waitForTick();
+  }
+
+  fxviewTab = win.FirefoxViewHandler.tab;
   assertFirefoxViewTab(win);
   Assert.ok(
     win.FirefoxViewHandler.tab.selected,
     "Firefox View tab is selected"
   );
-  await BrowserTestUtils.browserLoaded(
-    win.FirefoxViewHandler.tab.linkedBrowser
+
+  testScope.info(
+    "openFirefoxViewTab, waiting for complete readyState, visible and firefoxview-entered"
   );
-  return win.FirefoxViewHandler.tab;
+  await Promise.all([
+    TestUtils.waitForCondition(() => {
+      const document = fxviewTab.linkedBrowser.contentDocument;
+      return (
+        document.readyState == "complete" &&
+        document.visibilityState == "visible"
+      );
+    }),
+    enteredPromise,
+  ]);
+  testScope.info("openFirefoxViewTab, ready resolved");
+  return fxviewTab;
 }
 
 function closeFirefoxViewTab(win) {
-  win.gBrowser.removeTab(win.FirefoxViewHandler.tab);
+  if (win.FirefoxViewHandler.tab) {
+    win.gBrowser.removeTab(win.FirefoxViewHandler.tab);
+  }
   Assert.ok(
     !win.FirefoxViewHandler.tab,
     "Reference to Firefox View tab got removed when closing the tab"
@@ -54,7 +105,7 @@ function closeFirefoxViewTab(win) {
 /**
  * Run a task with Firefox View open.
  *
- * @param {Object} options
+ * @param {object} options
  *   Options object.
  * @param {boolean} [options.openNewWindow]
  *   Whether to run the task in a new window. If false, the current window will
@@ -62,18 +113,22 @@ function closeFirefoxViewTab(win) {
  * @param {boolean} [options.resetFlowManager]
  *   Whether to reset the internal state of TabsSetupFlowManager before running
  *   the task.
+ * @param {Window} [options.win]
+ *   The window in which to run the task.
  * @param {function(MozBrowser)} taskFn
  *   The task to run. It can be asynchronous.
  * @returns {any}
  *   The value returned by the task.
  */
 async function withFirefoxView(
-  { openNewWindow = false, resetFlowManager = true },
+  { openNewWindow = false, resetFlowManager = true, win = null },
   taskFn
 ) {
-  const win = openNewWindow
-    ? await BrowserTestUtils.openNewBrowserWindow()
-    : Services.wm.getMostRecentBrowserWindow();
+  if (!win) {
+    win = openNewWindow
+      ? await BrowserTestUtils.openNewBrowserWindow()
+      : Services.wm.getMostRecentBrowserWindow();
+  }
   if (resetFlowManager) {
     const { TabsSetupFlowManager } = ChromeUtils.importESModule(
       "resource:///modules/firefox-view-tabs-setup-manager.sys.mjs"
@@ -109,14 +164,16 @@ async function withFirefoxView(
 }
 
 function isFirefoxViewTabSelectedInWindow(win) {
-  return win.gBrowser.selectedBrowser.currentURI.spec == "about:firefoxview";
+  return win.gBrowser.selectedBrowser.currentURI.spec == getFirefoxViewURL();
 }
 
 export {
+  init,
   withFirefoxView,
   assertFirefoxViewTab,
   assertFirefoxViewTabSelected,
   openFirefoxViewTab,
   closeFirefoxViewTab,
   isFirefoxViewTabSelectedInWindow,
+  getFirefoxViewURL,
 };

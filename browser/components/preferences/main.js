@@ -11,6 +11,9 @@
 ChromeUtils.defineESModuleGetters(this, {
   BackgroundUpdate: "resource://gre/modules/BackgroundUpdate.sys.mjs",
   MigrationUtils: "resource:///modules/MigrationUtils.sys.mjs",
+  TranslationsParent: "resource://gre/actors/TranslationsParent.sys.mjs",
+  WindowsLaunchOnLogin: "resource://gre/modules/WindowsLaunchOnLogin.sys.mjs",
+  NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
 });
 
 // Constants & Enumeration Values
@@ -127,7 +130,9 @@ Preferences.addAll([
   { id: "general.autoScroll", type: "bool" },
   { id: "general.smoothScroll", type: "bool" },
   { id: "widget.gtk.overlay-scrollbars.enabled", type: "bool", inverted: true },
+  { id: "layout.css.always_underline_links", type: "bool" },
   { id: "layout.spellcheckDefault", type: "int" },
+  { id: "accessibility.tabfocus", type: "int" },
 
   {
     id: "browser.preferences.defaultPerformanceSettings.enabled",
@@ -191,7 +196,7 @@ if (AppConstants.MOZ_UPDATER) {
   }
 }
 
-XPCOMUtils.defineLazyGetter(this, "gIsPackagedApp", () => {
+ChromeUtils.defineLazyGetter(this, "gIsPackagedApp", () => {
   return Services.sysinfo.getProperty("isPackagedApp");
 });
 
@@ -409,6 +414,19 @@ var gMainPane = {
       "command",
       gMainPane.onBrowserRestoreSessionChange
     );
+    if (AppConstants.platform == "win") {
+      setEventListener(
+        "windowsLaunchOnLogin",
+        "command",
+        gMainPane.onWindowsLaunchOnLoginChange
+      );
+      NimbusFeatures.windowsLaunchOnLogin.recordExposureEvent({
+        once: true,
+      });
+      if (NimbusFeatures.windowsLaunchOnLogin.getVariable("enabled")) {
+        document.getElementById("windowsLaunchOnLoginBox").hidden = false;
+      }
+    }
     gMainPane.updateBrowserStartupUI =
       gMainPane.updateBrowserStartupUI.bind(gMainPane);
     Preferences.get("browser.privatebrowsing.autostart").on(
@@ -485,11 +503,10 @@ var gMainPane = {
       document.getElementById("dataMigrationGroup").remove();
     }
 
-    // For media control toggle button, we support it on Windows 8.1+ (NT6.3),
-    // MacOs 10.4+ (darwin8.0, but we already don't support that) and
+    // For media control toggle button, we support it on Windows, macOS and
     // gtk-based Linux.
     if (
-      AppConstants.isPlatformAndVersionAtLeast("win", "6.3") ||
+      AppConstants.platform == "win" ||
       AppConstants.platform == "macosx" ||
       AppConstants.MOZ_WIDGET_GTK
     ) {
@@ -498,8 +515,6 @@ var gMainPane = {
 
     // Initializes the fonts dropdowns displayed in this pane.
     this._rebuildFonts();
-
-    this.updateOnScreenKeyboardVisibility();
 
     // Firefox Translations settings panel
     // TODO (Bug 1817084) Remove this code when we disable the extension
@@ -635,6 +650,31 @@ var gMainPane = {
       }
 
       if (AppConstants.platform == "win") {
+        // Check for a launch on login registry key
+        // This accounts for if a user manually changes it in the registry
+        // Disabling in Task Manager works outside of just deleting the registry key
+        // in HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run
+        // but it is not possible to change it back to enabled as the disabled value is just a random
+        // hexadecimal number
+        let launchOnLoginCheckbox = document.getElementById(
+          "windowsLaunchOnLogin"
+        );
+        let registryName = WindowsLaunchOnLogin.getLaunchOnLoginRegistryName();
+        WindowsLaunchOnLogin.withLaunchOnLoginRegistryKey(async wrk => {
+          try {
+            // Reflect registry key value in about:preferences
+            launchOnLoginCheckbox.checked = wrk.hasValue(registryName);
+          } catch (e) {
+            // We should only end up here if we fail to open the registry
+            console.error("Failed to open Windows registry", e);
+          }
+        });
+
+        let approvedByWindows = WindowsLaunchOnLogin.getLaunchOnLoginApproved();
+        launchOnLoginCheckbox.disabled = !approvedByWindows;
+        document.getElementById("windowsLaunchOnLoginDisabledBox").hidden =
+          approvedByWindows;
+
         // On Windows, the Application Update setting is an installation-
         // specific preference, not a profile-specific one. Show a warning to
         // inform users of this.
@@ -724,6 +764,18 @@ var gMainPane = {
       document.getElementById("defaultFont"),
       element => FontBuilder.readFontSelection(element)
     );
+    if (AppConstants.platform == "macosx") {
+      // We only expose this control on macOS, so don't try
+      // to add listeners if it doesn't exist.
+      Preferences.addSyncFromPrefListener(
+        document.getElementById("useFullKeyboardNavigation"),
+        () => this.readUseFullKeyboardNavigation()
+      );
+      Preferences.addSyncToPrefListener(
+        document.getElementById("useFullKeyboardNavigation"),
+        () => this.writeUseFullKeyboardNavigation()
+      );
+    }
     Preferences.addSyncFromPrefListener(
       document.getElementById("checkSpelling"),
       () => this.readCheckSpelling()
@@ -981,18 +1033,11 @@ var gMainPane = {
       /**
        * The fully initialized state.
        *
-       * @param {TranslationsActor} translationsActor
        * @param {Object} supportedLanguages
        * @param {Array<{ langTag: string, displayName: string}} languageList
        * @param {Map<string, DownloadPhase>} downloadPhases
        */
-      constructor(
-        translationsActor,
-        supportedLanguages,
-        languageList,
-        downloadPhases
-      ) {
-        this.translationsActor = translationsActor;
+      constructor(supportedLanguages, languageList, downloadPhases) {
         this.supportedLanguages = supportedLanguages;
         this.languageList = languageList;
         this.downloadPhases = downloadPhases;
@@ -1002,14 +1047,11 @@ var gMainPane = {
        * Handles all of the async initialization logic.
        */
       static async create() {
-        const translationsActor =
-          window.windowGlobalChild.getActor("Translations");
         const supportedLanguages =
-          await translationsActor.getSupportedLanguages();
+          await TranslationsParent.getSupportedLanguages();
         const languageList =
-          TranslationsState.getLanguageList(supportedLanguages);
+          TranslationsParent.getLanguageList(supportedLanguages);
         const downloadPhases = await TranslationsState.createDownloadPhases(
-          translationsActor,
           languageList
         );
 
@@ -1020,7 +1062,6 @@ var gMainPane = {
         }
 
         return new TranslationsState(
-          translationsActor,
           supportedLanguages,
           languageList,
           downloadPhases
@@ -1028,50 +1069,17 @@ var gMainPane = {
       }
 
       /**
-       * Create a unique list of languages, sorted by the display name.
-       *
-       * @param {Object} supportedLanguages
-       * @returns {Array<{ langTag: string, displayName: string}}
-       */
-      static getLanguageList(supportedLanguages) {
-        const displayNames = new Map();
-        for (const languages of [
-          supportedLanguages.fromLanguages,
-          supportedLanguages.toLanguages,
-        ]) {
-          for (const { langTag, displayName } of languages) {
-            displayNames.set(langTag, displayName);
-          }
-        }
-
-        let appLangTag = new Intl.Locale(Services.locale.appLocaleAsBCP47)
-          .language;
-
-        // Don't offer to download the app's language.
-        displayNames.delete(appLangTag);
-
-        // Sort the list of languages by the display names.
-        return [...displayNames.entries()]
-          .map(([langTag, displayName]) => ({
-            langTag,
-            displayName,
-          }))
-          .sort((a, b) => a.displayName.localeCompare(b.displayName));
-      }
-
-      /**
        * Determine the download phase of each language file.
        *
-       * @param {TranslationsChild} translationsActor
        * @param {Array<{ langTag: string, displayName: string}} languageList.
        * @returns {Map<string, DownloadPhase>} Map the language tag to whether it is downloaded.
        */
-      static async createDownloadPhases(translationsActor, languageList) {
+      static async createDownloadPhases(languageList) {
         const downloadPhases = new Map();
         for (const { langTag } of languageList) {
           downloadPhases.set(
             langTag,
-            (await translationsActor.hasAllFilesForLanguage(langTag))
+            (await TranslationsParent.hasAllFilesForLanguage(langTag))
               ? "downloaded"
               : "uninstalled"
           );
@@ -1128,11 +1136,11 @@ var gMainPane = {
         this.hideError();
         this.disableButtons(true);
         try {
-          await this.state.translationsActor.downloadAllFiles();
+          await TranslationsParent.downloadAllFiles();
           this.markAllDownloadPhases("downloaded");
         } catch (error) {
           TranslationsView.showError(
-            "translations-manage-error-download",
+            "translations-manage-error-install",
             error
           );
           await this.reloadDownloadPhases();
@@ -1145,10 +1153,10 @@ var gMainPane = {
         this.hideError();
         this.disableButtons(true);
         try {
-          await this.state.translationsActor.deleteAllLanguageFiles();
+          await TranslationsParent.deleteAllLanguageFiles();
           this.markAllDownloadPhases("uninstalled");
         } catch (error) {
-          TranslationsView.showError("translations-manage-error-delete", error);
+          TranslationsView.showError("translations-manage-error-remove", error);
           // The download phases are invalidated with the error and must be reloaded.
           await this.reloadDownloadPhases();
           console.error(error);
@@ -1165,11 +1173,11 @@ var gMainPane = {
           this.hideError();
           this.updateDownloadPhase(langTag, "loading");
           try {
-            await this.state.translationsActor.downloadLanguageFiles(langTag);
+            await TranslationsParent.downloadLanguageFiles(langTag);
             this.updateDownloadPhase(langTag, "downloaded");
           } catch (error) {
             TranslationsView.showError(
-              "translations-manage-error-download",
+              "translations-manage-error-install",
               error
             );
             this.updateDownloadPhase(langTag, "uninstalled");
@@ -1186,11 +1194,11 @@ var gMainPane = {
           this.hideError();
           this.updateDownloadPhase(langTag, "loading");
           try {
-            await this.state.translationsActor.deleteLanguageFiles(langTag);
+            await TranslationsParent.deleteLanguageFiles(langTag);
             this.updateDownloadPhase(langTag, "uninstalled");
           } catch (error) {
             TranslationsView.showError(
-              "translations-manage-error-delete",
+              "translations-manage-error-remove",
               error
             );
             // The download phases are invalidated with the error and must be reloaded.
@@ -1223,11 +1231,11 @@ var gMainPane = {
 
           document.l10n.setAttributes(
             downloadButton,
-            "translations-manage-language-download-button"
+            "translations-manage-language-install-button"
           );
           document.l10n.setAttributes(
             deleteButton,
-            "translations-manage-language-delete-button"
+            "translations-manage-language-remove-button"
           );
 
           downloadButton.hidden = true;
@@ -1262,10 +1270,7 @@ var gMainPane = {
        */
       async reloadDownloadPhases() {
         this.state.downloadPhases =
-          await TranslationsState.createDownloadPhases(
-            this.state.translationsActor,
-            this.state.languageList
-          );
+          await TranslationsState.createDownloadPhases(this.state.languageList);
         this.updateAllButtons();
       }
 
@@ -1628,6 +1633,23 @@ var gMainPane = {
     startupPref.value = newValue;
   },
 
+  onWindowsLaunchOnLoginChange(event) {
+    if (AppConstants.platform !== "win") {
+      return;
+    }
+    if (event.target.checked) {
+      // windowsLaunchOnLogin has been checked: create registry key
+      WindowsLaunchOnLogin.createLaunchOnLoginRegistryKey();
+      Services.prefs.setBoolPref(
+        "browser.startup.windowsLaunchOnLogin.disableLaunchOnLoginPrompt",
+        true
+      );
+    } else {
+      // windowsLaunchOnLogin has been unchecked: delete registry key
+      WindowsLaunchOnLogin.removeLaunchOnLoginRegistryKey();
+    }
+  },
+
   // TABS
 
   /*
@@ -1727,7 +1749,7 @@ var gMainPane = {
         return;
       }
       try {
-        shellSvc.setDefaultBrowser(true, false);
+        shellSvc.setDefaultBrowser(false);
       } catch (ex) {
         console.error(ex);
         return;
@@ -2006,28 +2028,6 @@ var gMainPane = {
     gotoPref("containers");
   },
 
-  /**
-   * ui.osk.enabled
-   * - when set to true, subject to other conditions, we may sometimes invoke
-   *   an on-screen keyboard when a text input is focused.
-   *   (Currently Windows-only, and depending on prefs, may be Windows-8-only)
-   */
-  updateOnScreenKeyboardVisibility() {
-    if (AppConstants.platform == "win") {
-      let minVersion = Services.prefs.getBoolPref("ui.osk.require_win10")
-        ? 10
-        : 6.2;
-      if (
-        Services.vc.compare(
-          Services.sysinfo.getProperty("version"),
-          minVersion
-        ) >= 0
-      ) {
-        document.getElementById("useOnScreenKeyboard").hidden = false;
-      }
-    }
-  },
-
   updateHardwareAcceleration() {
     // Placeholder for restart on change
   },
@@ -2133,22 +2133,14 @@ var gMainPane = {
   },
 
   onMigrationButtonCommand(command) {
-    // When browser.migrate.content-modal.enabled is enabled by default,
-    // the event handler can just call showMigrationWizardDialog directly,
-    // but for now, we delegate to MigrationUtils to open the native modal
-    // in case that's the dialog we're still using.
-    //
-    // Enabling the pref by default will be part of bug 1822156.
-    const browser = window.docShell.chromeEventHandler;
-    const browserWindow = browser.ownerGlobal;
+    // Even though we're going to be showing the migration wizard here in
+    // about:preferences, we'll delegate the call to
+    // `MigrationUtils.showMigrationWizard`, as this will allow us to
+    // properly measure entering the dialog from the PREFERENCES entrypoint.
+    const browserWindow = window.browsingContext.topChromeWindow;
 
-    // showMigrationWizard blocks on some platforms. We'll dispatch the request
-    // to open to a runnable on the main thread so that we don't have to block
-    // this function call.
-    Services.tm.dispatchToMainThread(() => {
-      MigrationUtils.showMigrationWizard(browserWindow, {
-        entrypoint: MigrationUtils.MIGRATION_ENTRYPOINTS.PREFERENCES,
-      });
+    MigrationUtils.showMigrationWizard(browserWindow, {
+      entrypoint: MigrationUtils.MIGRATION_ENTRYPOINTS.PREFERENCES,
     });
   },
 
@@ -2171,12 +2163,6 @@ var gMainPane = {
     if (!migrationWizardDialog.firstElementChild) {
       let wizard = document.createElement("migration-wizard");
       wizard.toggleAttribute("dialog-mode", true);
-
-      let panelList = document.createElement("panel-list");
-      let panel = document.createXULElement("panel");
-      panel.appendChild(panelList);
-      wizard.appendChild(panel);
-
       migrationWizardDialog.appendChild(wizard);
     }
     migrationWizardDialog.firstElementChild.requestState();
@@ -2199,6 +2185,50 @@ var gMainPane = {
     );
 
     migrationWizardDialog.showModal();
+  },
+
+  /**
+   * Stores the original value of the tabfocus preference to enable proper
+   * restoration if unchanged (since we're mapping an int pref onto a checkbox).
+   */
+  _storedFullKeyboardNavigation: Preferences.get("accessibility.tabfocus"),
+
+  /**
+   * Returns true if any full keyboard nav is enabled and false otherwise, caching
+   * the current value to enable proper pref restoration if the checkbox is
+   * never changed.
+   *
+   * accessibility.tabfocus
+   * - an integer controlling the focusability of:
+   *     1  text controls
+   *     2  form elements
+   *     4  links
+   *     7  all of the above
+   */
+  readUseFullKeyboardNavigation() {
+    var pref = Preferences.get("accessibility.tabfocus");
+    this._storedFullKeyboardNavigation = pref.value;
+
+    return pref.value == 7;
+  },
+
+  /**
+   * Returns the value of the full keyboard nav preference represented by UI,
+   * preserving the preference's "hidden" value if the preference is
+   * unchanged and represents a value not strictly allowed in UI.
+   */
+  writeUseFullKeyboardNavigation() {
+    var checkbox = document.getElementById("useFullKeyboardNavigation");
+    if (checkbox.checked) {
+      return 7;
+    }
+    if (this._storedFullKeyboardNavigation != 7) {
+      // 1/2/4 values set via about:config should persist
+      return this._storedFullKeyboardNavigation;
+    }
+    // When the checkbox is unchecked, this pref shouldn't exist
+    // at all.
+    return undefined;
   },
 
   /**
@@ -3565,7 +3595,7 @@ var gMainPane = {
         // so if those are in use just display them. On other platforms
         // only do so if the folder matches the localized name.
         if (
-          AppConstants.platform == "mac" ||
+          AppConstants.platform == "macosx" ||
           leafName == firefoxLocalizedName
         ) {
           return { file, folderDisplayName: firefoxLocalizedName };

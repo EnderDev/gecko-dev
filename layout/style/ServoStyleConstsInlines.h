@@ -450,20 +450,32 @@ inline imgRequestProxy* StyleComputedImageUrl::GetImage() const {
 template <>
 inline bool StyleGradient::Repeating() const {
   if (IsLinear()) {
-    return AsLinear().repeating;
+    return bool(AsLinear().flags & StyleGradientFlags::REPEATING);
   }
   if (IsRadial()) {
-    return AsRadial().repeating;
+    return bool(AsRadial().flags & StyleGradientFlags::REPEATING);
   }
-  return AsConic().repeating;
+  return bool(AsConic().flags & StyleGradientFlags::REPEATING);
 }
 
 template <>
 bool StyleGradient::IsOpaque() const;
 
+template <>
+inline const StyleColorInterpolationMethod&
+StyleGradient::ColorInterpolationMethod() const {
+  if (IsLinear()) {
+    return AsLinear().color_interpolation_method;
+  }
+  if (IsRadial()) {
+    return AsRadial().color_interpolation_method;
+  }
+  return AsConic().color_interpolation_method;
+}
+
 template <typename Integer>
 inline StyleGenericGridLine<Integer>::StyleGenericGridLine()
-    : ident(do_AddRef(static_cast<nsAtom*>(nsGkAtoms::_empty))),
+    : ident{StyleAtom(do_AddRef(static_cast<nsAtom*>(nsGkAtoms::_empty)))},
       line_num(0),
       is_span(false) {}
 
@@ -680,8 +692,9 @@ bool LengthPercentage::IsDefinitelyZero() const {
   return false;
 }
 
-template <>
-CSSCoord StyleCalcNode::ResolveToCSSPixels(CSSCoord aPercentageBasis) const;
+CSSCoord StyleCalcLengthPercentage::ResolveToCSSPixels(CSSCoord aBasis) const {
+  return Servo_ResolveCalcLengthPercentage(this, aBasis);
+}
 
 template <>
 void StyleCalcNode::ScaleLengthsBy(float);
@@ -693,7 +706,7 @@ CSSCoord LengthPercentage::ResolveToCSSPixels(CSSCoord aPercentageBasis) const {
   if (IsPercentage()) {
     return AsPercentage()._0 * aPercentageBasis;
   }
-  return AsCalc().node.ResolveToCSSPixels(aPercentageBasis);
+  return AsCalc().ResolveToCSSPixels(aPercentageBasis);
 }
 
 template <typename T>
@@ -716,13 +729,13 @@ nscoord LengthPercentage::Resolve(T aPercentageGetter, U aRounder) const {
     return ToLength();
   }
   if (IsPercentage() && AsPercentage()._0 == 0.0f) {
-    return 0.0f;
+    return 0;
   }
   nscoord basis = aPercentageGetter();
   if (IsPercentage()) {
     return aRounder(basis * AsPercentage()._0);
   }
-  return AsCalc().node.Resolve(basis, aRounder);
+  return AsCalc().Resolve(basis, aRounder);
 }
 
 // Note: the static_cast<> wrappers below are needed to disambiguate between
@@ -942,7 +955,7 @@ inline bool RestyleHint::DefinitelyRecascadesAllSubtree() const {
 }
 
 template <>
-ImageResolution StyleImage::GetResolution() const;
+ImageResolution StyleImage::GetResolution(const ComputedStyle&) const;
 
 template <>
 inline const StyleImage& StyleImage::FinalImage() const {
@@ -959,12 +972,9 @@ inline const StyleImage& StyleImage::FinalImage() const {
 }
 
 template <>
-Maybe<CSSIntSize> StyleImage::GetIntrinsicSize() const;
-
-template <>
 inline bool StyleImage::IsImageRequestType() const {
   const auto& finalImage = FinalImage();
-  return finalImage.IsUrl() || finalImage.IsRect();
+  return finalImage.IsUrl();
 }
 
 template <>
@@ -973,9 +983,6 @@ inline const StyleComputedImageUrl* StyleImage::GetImageRequestURLValue()
   const auto& finalImage = FinalImage();
   if (finalImage.IsUrl()) {
     return &finalImage.AsUrl();
-  }
-  if (finalImage.IsRect()) {
-    return &finalImage.AsRect()->url;
   }
   return nullptr;
 }
@@ -998,8 +1005,6 @@ template <>
 bool StyleImage::IsSizeAvailable() const;
 template <>
 bool StyleImage::IsComplete() const;
-template <>
-Maybe<StyleImage::ActualCropRect> StyleImage::ComputeActualCropRect() const;
 template <>
 void StyleImage::ResolveImage(dom::Document&, const StyleImage*);
 
@@ -1083,6 +1088,59 @@ template <>
 inline StyleViewTimelineInset::StyleGenericViewTimelineInset()
     : start(LengthPercentageOrAuto::Auto()),
       end(LengthPercentageOrAuto::Auto()) {}
+
+inline StyleDisplayOutside StyleDisplay::Outside() const {
+  return StyleDisplayOutside((_0 & OUTSIDE_MASK) >> OUTSIDE_SHIFT);
+}
+
+inline StyleDisplayInside StyleDisplay::Inside() const {
+  return StyleDisplayInside(_0 & INSIDE_MASK);
+}
+
+inline bool StyleDisplay::IsListItem() const { return _0 & LIST_ITEM_MASK; }
+
+inline bool StyleDisplay::IsInternalTable() const {
+  return Outside() == StyleDisplayOutside::InternalTable;
+}
+
+inline bool StyleDisplay::IsInternalTableExceptCell() const {
+  return IsInternalTable() && *this != TableCell;
+}
+
+inline bool StyleDisplay::IsInternalRuby() const {
+  return Outside() == StyleDisplayOutside::InternalRuby;
+}
+
+inline bool StyleDisplay::IsRuby() const {
+  return Inside() == StyleDisplayInside::Ruby || IsInternalRuby();
+}
+
+inline bool StyleDisplay::IsInlineFlow() const {
+  return Outside() == StyleDisplayOutside::Inline &&
+         Inside() == StyleDisplayInside::Flow;
+}
+
+inline bool StyleDisplay::IsInlineInside() const {
+  return IsInlineFlow() || IsRuby();
+}
+
+inline bool StyleDisplay::IsInlineOutside() const {
+  return Outside() == StyleDisplayOutside::Inline || IsInternalRuby();
+}
+
+inline float StyleZoom::Zoom(float aValue) const {
+  if (*this == ONE) {
+    return aValue;
+  }
+  return ToFloat() * aValue;
+}
+
+inline float StyleZoom::Unzoom(float aValue) const {
+  if (*this == ONE) {
+    return aValue;
+  }
+  return aValue / ToFloat();
+}
 
 }  // namespace mozilla
 

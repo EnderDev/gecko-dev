@@ -59,6 +59,7 @@
 #include "js/friend/UsageStatistics.h"  // JSMetric, JS_SetAccumulateTelemetryCallback
 #include "js/friend/WindowProxy.h"  // js::SetWindowProxyClass
 #include "js/friend/XrayJitInfo.h"  // JS::SetXrayJitInfo
+#include "js/Utility.h"             // JS::UniqueTwoByteChars
 #include "mozilla/dom/AbortSignalBinding.h"
 #include "mozilla/dom/GeneratedAtomList.h"
 #include "mozilla/dom/BindingUtils.h"
@@ -73,7 +74,7 @@
 #include "mozilla/UniquePtrExtensions.h"
 #include "mozilla/Unused.h"
 #include "AccessCheck.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
 #include "nsAboutProtocolUtils.h"
 
 #include "NodeUbiReporting.h"
@@ -173,7 +174,7 @@ class AsyncFreeSnowWhite : public Runnable {
 
   nsresult Dispatch() {
     nsCOMPtr<nsIRunnable> self(this);
-    return NS_DispatchToCurrentThreadQueue(self.forget(), 500,
+    return NS_DispatchToCurrentThreadQueue(self.forget(), 1000,
                                            EventQueuePriority::Idle);
   }
 
@@ -1458,9 +1459,8 @@ static void ReportZoneStats(const JS::ZoneStats& zStats,
 
   ZRREPORT_BYTES(pathPrefix + "jit-zone"_ns, zStats.jitZone, "The JIT zone.");
 
-  ZRREPORT_BYTES(pathPrefix + "baseline/optimized-stubs"_ns,
-                 zStats.baselineStubsOptimized,
-                 "The Baseline JIT's optimized IC stubs (excluding code).");
+  ZRREPORT_BYTES(pathPrefix + "cacheir-stubs"_ns, zStats.cacheIRStubs,
+                 "The JIT's IC stubs (excluding code).");
 
   ZRREPORT_BYTES(pathPrefix + "script-counts-map"_ns, zStats.scriptCountsMap,
                  "Profiling-related information for scripts.");
@@ -1803,9 +1803,8 @@ static void ReportRealmStats(const JS::RealmStats& realmStats,
                  realmStats.baselineData,
                  "The Baseline JIT's compilation data (BaselineScripts).");
 
-  ZRREPORT_BYTES(realmJSPathPrefix + "baseline/fallback-stubs"_ns,
-                 realmStats.baselineStubsFallback,
-                 "The Baseline JIT's fallback IC stubs (excluding code).");
+  ZRREPORT_BYTES(realmJSPathPrefix + "alloc-sites"_ns, realmStats.allocSites,
+                 "GC allocation site data associated with IC stubs.");
 
   ZRREPORT_BYTES(realmJSPathPrefix + "ion-data"_ns, realmStats.ionData,
                  "The IonMonkey JIT's compilation data (IonScripts).");
@@ -1834,9 +1833,6 @@ static void ReportRealmStats(const JS::RealmStats& realmStats,
   ZRREPORT_BYTES(realmJSPathPrefix + "non-syntactic-lexical-scopes-table"_ns,
                  realmStats.nonSyntacticLexicalScopesTable,
                  "The non-syntactic lexical scopes table.");
-
-  ZRREPORT_BYTES(realmJSPathPrefix + "jit-realm"_ns, realmStats.jitRealm,
-                 "The JIT realm.");
 
   if (sundriesGCHeap > 0) {
     // We deliberately don't use ZRREPORT_GC_BYTES here.
@@ -2530,10 +2526,6 @@ void JSReporter::CollectReports(WindowPaths* windowPaths,
                gStats.helperThread.stateData,
                "Memory used by HelperThreadState.");
 
-  REPORT_BYTES("explicit/js-non-window/helper-thread/parse-task"_ns, KIND_HEAP,
-               gStats.helperThread.parseTask,
-               "The memory used by ParseTasks waiting in HelperThreadState.");
-
   REPORT_BYTES(
       "explicit/js-non-window/helper-thread/ion-compile-task"_ns, KIND_HEAP,
       gStats.helperThread.ionCompileTask,
@@ -2594,6 +2586,9 @@ static void SetUseCounterCallback(JSObject* obj, JSUseCounter counter) {
       break;
     case JSUseCounter::WASM:
       SetUseCounter(obj, eUseCounter_custom_JS_wasm);
+      break;
+    case JSUseCounter::LATE_WEEKDAY:
+      SetUseCounter(obj, eUseCounter_custom_JS_late_weekday);
       break;
     default:
       MOZ_ASSERT_UNREACHABLE("Unexpected JSUseCounter id");
@@ -2728,15 +2723,18 @@ static nsresult ReadSourceFromFilename(JSContext* cx, const char* filename,
 
     // |buf| can't be directly returned -- convert it to UTF-16.
 
-    // On success this overwrites |*twoByteSource| and |*len|.
+    // On success this overwrites |chars| and |*len|.
+    JS::UniqueTwoByteChars chars;
     rv = ScriptLoader::ConvertToUTF16(
         scriptChannel, reinterpret_cast<const unsigned char*>(buf.get()),
-        rawLen, u"UTF-8"_ns, nullptr, *twoByteSource, *len);
+        rawLen, u"UTF-8"_ns, nullptr, chars, *len);
     NS_ENSURE_SUCCESS(rv, rv);
 
-    if (!*twoByteSource) {
+    if (!chars) {
       return NS_ERROR_FAILURE;
     }
+
+    *twoByteSource = chars.release();
   }
 
   return NS_OK;
@@ -2786,9 +2784,7 @@ XPCJSRuntime::XPCJSRuntime(JSContext* aCx)
       mIID2NativeInterfaceMap(mozilla::MakeUnique<IID2NativeInterfaceMap>()),
       mClassInfo2NativeSetMap(mozilla::MakeUnique<ClassInfo2NativeSetMap>()),
       mNativeSetMap(mozilla::MakeUnique<NativeSetMap>()),
-      mWrappedNativeScopes(),
       mGCIsRunning(false),
-      mNativesToReleaseArray(),
       mDoingFinalization(false),
       mAsyncSnowWhiteFreer(new AsyncFreeSnowWhite()) {
   MOZ_COUNT_CTOR_INHERITED(XPCJSRuntime, CycleCollectedJSRuntime);

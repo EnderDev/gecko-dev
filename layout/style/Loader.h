@@ -272,10 +272,9 @@ class Loader final {
    * @param aObserver the observer to notify when the load completes.
    *        May be null.
    * @param aBuffer the stylesheet data
-   * @param aLineNumber the line number at which the stylesheet data started.
    */
   Result<LoadSheetResult, nsresult> LoadInlineStyle(
-      const SheetInfo&, const nsAString& aBuffer, uint32_t aLineNumber,
+      const SheetInfo&, const nsAString& aBuffer,
       nsICSSLoaderObserver* aObserver);
 
   /**
@@ -373,8 +372,8 @@ class Loader final {
   Result<RefPtr<StyleSheet>, nsresult> LoadSheet(
       nsIURI* aURI, StylePreloadKind, const Encoding* aPreloadEncoding,
       nsIReferrerInfo* aReferrerInfo, nsICSSLoaderObserver* aObserver,
-      uint64_t aEarlyHintPreloaderId, CORSMode = CORS_NONE,
-      const nsAString& aIntegrity = u""_ns);
+      uint64_t aEarlyHintPreloaderId, CORSMode aCORSMode,
+      const nsAString& aNonce, const nsAString& aIntegrity);
 
   /**
    * As above, but without caring for a couple things.
@@ -469,19 +468,42 @@ class Loader final {
 
   bool ShouldBypassCache() const;
 
+  enum class PendingLoad { No, Yes };
+
  private:
   friend class mozilla::SharedStyleSheetCache;
   friend class SheetLoadData;
   friend class StreamLoader;
 
+  // Only to be called by `LoadSheet`.
+  [[nodiscard]] bool MaybeDeferLoad(SheetLoadData& aLoadData,
+                                    SheetState aSheetState,
+                                    PendingLoad aPendingLoad,
+                                    const SheetLoadDataHashKey& aKey);
+
+  // Only to be called by `LoadSheet`.
+  bool MaybeCoalesceLoadAndNotifyOpen(SheetLoadData& aLoadData,
+                                      SheetState aSheetState,
+                                      const SheetLoadDataHashKey& aKey,
+                                      const PreloadHashKey& aPreloadKey);
+
+  // Only to be called by `LoadSheet`.
+  [[nodiscard]] nsresult LoadSheetSyncInternal(SheetLoadData& aLoadData,
+                                               SheetState aSheetState);
+
+  // Only to be called by `LoadSheet`.
+  [[nodiscard]] nsresult LoadSheetAsyncInternal(
+      SheetLoadData& aLoadData, uint64_t aEarlyHintPreloaderId,
+      const SheetLoadDataHashKey& aKey);
+
   // Helpers to conditionally block onload if mDocument is non-null.
-  void IncrementOngoingLoadCount() {
+  void IncrementOngoingLoadCountAndMaybeBlockOnload() {
     if (!mOngoingLoadCount++) {
       BlockOnload();
     }
   }
 
-  void DecrementOngoingLoadCount() {
+  void DecrementOngoingLoadCountAndMaybeUnblockOnload() {
     MOZ_DIAGNOSTIC_ASSERT(mOngoingLoadCount);
     MOZ_DIAGNOSTIC_ASSERT(mOngoingLoadCount > mPendingLoadCount);
     if (!--mOngoingLoadCount) {
@@ -491,10 +513,6 @@ class Loader final {
 
   void BlockOnload();
   void UnblockOnload(bool aFireSync);
-
-  // Helper to select the correct dispatch target for asynchronous events for
-  // this loader.
-  already_AddRefed<nsISerialEventTarget> DispatchTarget();
 
   nsresult CheckContentPolicy(nsIPrincipal* aLoadingPrincipal,
                               nsIPrincipal* aTriggeringPrincipal,
@@ -539,7 +557,7 @@ class Loader final {
       nsIURI* aURL, StylePreloadKind, SheetParsingMode aParsingMode,
       UseSystemPrincipal, const Encoding* aPreloadEncoding,
       nsIReferrerInfo* aReferrerInfo, nsICSSLoaderObserver* aObserver,
-      CORSMode aCORSMode, const nsAString& aIntegrity,
+      CORSMode aCORSMode, const nsAString& aNonce, const nsAString& aIntegrity,
       uint64_t aEarlyHintPreloaderId);
 
   RefPtr<StyleSheet> LookupInlineSheetInCache(const nsAString&, nsIPrincipal*);
@@ -552,7 +570,6 @@ class Loader final {
 
   // Note: LoadSheet is responsible for setting the sheet to complete on
   // failure.
-  enum class PendingLoad { No, Yes };
   nsresult LoadSheet(SheetLoadData&, SheetState, uint64_t aEarlyHintPreloaderId,
                      PendingLoad = PendingLoad::No);
 

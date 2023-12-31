@@ -52,7 +52,6 @@ UNIFIED_SOURCES += [
 
 EXTRA_JS_MODULES += [
     "LangPackMatcher.sys.mjs",
-    "PluralForm.sys.mjs",
 ]
 
 XPCOM_MANIFESTS += [
@@ -85,10 +84,14 @@ if CONFIG["COMPILE_ENVIRONMENT"]:
         inputs=["/intl/locale/rust/fluent-langneg-ffi"],
     )
     CbindgenHeader(
+        "oxilangtag_ffi_generated.h", inputs=["/intl/locale/rust/oxilangtag-ffi"]
+    )
+    CbindgenHeader(
         "unic_langid_ffi_generated.h", inputs=["/intl/locale/rust/unic-langid-ffi"]
     )
 
     EXPORTS.mozilla.intl += [
         "!fluent_langneg_ffi_generated.h",
+        "!oxilangtag_ffi_generated.h",
         "!unic_langid_ffi_generated.h",
     ]

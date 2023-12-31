@@ -12,7 +12,6 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/NotNull.h"
 #include "mozilla/ScrollbarPreferences.h"
-#include "mozilla/TimelineConsumers.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/WeakPtr.h"
 #include "mozilla/dom/BrowsingContext.h"
@@ -450,7 +449,8 @@ class nsDocShell final : public nsDocLoader,
       const mozilla::Maybe<nsCString>& aOriginalURIString, uint32_t aLoadType,
       bool aIsTopFrame, bool aAllowKeywordFixup, bool aUsePrivateBrowsing,
       bool aNotifyKeywordSearchLoading = false,
-      nsIInputStream** aNewPostData = nullptr);
+      nsIInputStream** aNewPostData = nullptr,
+      bool* outWasSchemelessInput = nullptr);
 
   static already_AddRefed<nsIURI> MaybeFixBadCertDomainErrorURI(
       nsIChannel* aChannel, nsIURI* aUrl);
@@ -537,23 +537,6 @@ class nsDocShell final : public nsDocLoader,
   friend class mozilla::dom::BrowsingContext;
   friend class mozilla::net::DocumentLoadListener;
   friend class nsGlobalWindowOuter;
-
-  // It is necessary to allow adding a timeline marker wherever a docshell
-  // instance is available. This operation happens frequently and needs to
-  // be very fast, so instead of using a Map or having to search for some
-  // docshell-specific markers storage, a pointer to an `ObservedDocShell` is
-  // is stored on docshells directly.
-  friend void mozilla::TimelineConsumers::AddConsumer(nsDocShell*);
-  friend void mozilla::TimelineConsumers::RemoveConsumer(nsDocShell*);
-  friend void mozilla::TimelineConsumers::AddMarkerForDocShell(
-      nsDocShell*, const char*, MarkerTracingType, MarkerStackRequest);
-  friend void mozilla::TimelineConsumers::AddMarkerForDocShell(
-      nsDocShell*, const char*, const TimeStamp&, MarkerTracingType,
-      MarkerStackRequest);
-  friend void mozilla::TimelineConsumers::AddMarkerForDocShell(
-      nsDocShell*, UniquePtr<AbstractTimelineMarker>&&);
-  friend void mozilla::TimelineConsumers::PopMarkers(
-      nsDocShell*, JSContext*, nsTArray<dom::ProfileTimelineMarker>&);
 
   nsDocShell(mozilla::dom::BrowsingContext* aBrowsingContext,
              uint64_t aContentWindowID);
@@ -718,9 +701,7 @@ class nsDocShell final : public nsDocLoader,
       nsDocShellLoadState* aLoadState);
 
  private:
-  // Returns true if would have called FireOnLocationChange,
-  // but did not because aFireOnLocationChange was false on entry.
-  // In this case it is the caller's responsibility to ensure
+  // Returns true if it is the caller's responsibility to ensure
   // FireOnLocationChange is called.
   // In all other cases false is returned.
   // Either aChannel or aTriggeringPrincipal must be null. If aChannel is
@@ -735,9 +716,9 @@ class nsDocShell final : public nsDocLoader,
   bool OnNewURI(nsIURI* aURI, nsIChannel* aChannel,
                 nsIPrincipal* aTriggeringPrincipal,
                 nsIPrincipal* aPrincipalToInherit,
-                nsIPrincipal* aPartitionedPrincipalToInehrit,
-                nsIContentSecurityPolicy* aCsp, bool aFireOnLocationChange,
-                bool aAddToGlobalHistory, bool aCloneSHChildren);
+                nsIPrincipal* aPartitionedPrincipalToInherit,
+                nsIContentSecurityPolicy* aCsp, bool aAddToGlobalHistory,
+                bool aCloneSHChildren);
 
  public:
   // If wireframe collection is enabled, will attempt to gather the
@@ -979,8 +960,7 @@ class nsDocShell final : public nsDocLoader,
   // TODO: Convert this to MOZ_CAN_RUN_SCRIPT (bug 1415230)
   MOZ_CAN_RUN_SCRIPT_BOUNDARY void FirePageHideShowNonRecursive(bool aShow);
 
-  nsresult Dispatch(mozilla::TaskCategory aCategory,
-                    already_AddRefed<nsIRunnable>&& aRunnable);
+  nsresult Dispatch(already_AddRefed<nsIRunnable>&& aRunnable);
 
   void ReattachEditorToWindow(nsISHEntry* aSHEntry);
   void ClearFrameHistory(nsISHEntry* aEntry);
@@ -1160,7 +1140,10 @@ class nsDocShell final : public nsDocLoader,
                                const nsAString& aTitle, bool aReplace,
                                nsIURI* aCurrentURI, bool aEqualURIs);
 
- private:  // data members
+ private:
+  void SetCurrentURIInternal(nsIURI* aURI);
+
+  // data members
   nsString mTitle;
   nsCString mOriginalUriString;
   nsTObserverArray<nsWeakPtr> mPrivacyObservers;
@@ -1201,10 +1184,8 @@ class nsDocShell final : public nsDocLoader,
    */
   nsCString mContentTypeHint;
 
-  // An observed docshell wrapper is created when recording markers is enabled.
-  mozilla::UniquePtr<mozilla::ObservedDocShell> mObserved;
-
   // mCurrentURI should be marked immutable on set if possible.
+  // Change mCurrentURI only through SetCurrentURIInternal method.
   nsCOMPtr<nsIURI> mCurrentURI;
   nsCOMPtr<nsIReferrerInfo> mReferrerInfo;
 
@@ -1290,10 +1271,6 @@ class nsDocShell final : public nsDocLoader,
   AppType mAppType;
   uint32_t mLoadType;
   uint32_t mFailedLoadType;
-
-  // A depth count of how many times NotifyRunToCompletionStart
-  // has been called without a matching NotifyRunToCompletionStop.
-  uint32_t mJSRunToCompletionDepth;
 
   // Whether or not handling of the <meta name="viewport"> tag is overridden.
   // Possible values are defined as constants in nsIDocShell.idl.

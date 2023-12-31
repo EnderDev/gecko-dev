@@ -13,7 +13,7 @@
 use crate::Atom;
 use app_units::Au;
 use crate::computed_value_flags::*;
-use crate::custom_properties::CustomPropertiesMap;
+use crate::custom_properties::ComputedCustomProperties;
 use crate::gecko_bindings::bindings;
 % for style_struct in data.style_structs:
 use crate::gecko_bindings::bindings::Gecko_Construct_Default_${style_struct.gecko_ffi_name};
@@ -37,7 +37,7 @@ use servo_arc::{Arc, UniqueArc};
 use std::mem::{forget, MaybeUninit, ManuallyDrop};
 use std::{cmp, ops, ptr};
 use crate::values::{self, CustomIdent, KeyframesName};
-use crate::values::computed::{BorderStyle, Percentage, Time, TransitionProperty};
+use crate::values::computed::{BorderStyle, Percentage, Time, TransitionProperty, Zoom};
 use crate::values::computed::font::FontSize;
 use crate::values::generics::column::ColumnCount;
 
@@ -65,8 +65,9 @@ impl ComputedValues {
 
     pub fn new(
         pseudo: Option<<&PseudoElement>,
-        custom_properties: Option<Arc<CustomPropertiesMap>>,
+        custom_properties: ComputedCustomProperties,
         writing_mode: WritingMode,
+        effective_zoom: Zoom,
         flags: ComputedValueFlags,
         rules: Option<StrongRuleNode>,
         visited_style: Option<Arc<ComputedValues>>,
@@ -77,6 +78,7 @@ impl ComputedValues {
         ComputedValuesInner::new(
             custom_properties,
             writing_mode,
+            effective_zoom,
             flags,
             rules,
             visited_style,
@@ -88,8 +90,9 @@ impl ComputedValues {
 
     pub fn default_values(doc: &structs::Document) -> Arc<Self> {
         ComputedValuesInner::new(
-            /* custom_properties = */ None,
-            /* writing_mode = */ WritingMode::empty(), // FIXME(bz): This seems dubious
+            ComputedCustomProperties::default(),
+            WritingMode::empty(), // FIXME(bz): This seems dubious
+            Zoom::ONE,
             ComputedValueFlags::empty(),
             /* rules = */ None,
             /* visited_style = */ None,
@@ -118,7 +121,7 @@ impl ComputedValues {
         if !self.is_pseudo_style() {
             return None;
         }
-        PseudoElement::from_pseudo_type(self.0.mPseudoType)
+        PseudoElement::from_pseudo_type(self.0.mPseudoType, None)
     }
 
     #[inline]
@@ -171,6 +174,7 @@ impl Clone for ComputedValuesInner {
             custom_properties: self.custom_properties.clone(),
             writing_mode: self.writing_mode.clone(),
             flags: self.flags.clone(),
+            effective_zoom: self.effective_zoom,
             rules: self.rules.clone(),
             visited_style: if self.visited_style.is_null() {
                 ptr::null()
@@ -195,8 +199,9 @@ impl Drop for ComputedValuesInner {
 
 impl ComputedValuesInner {
     pub fn new(
-        custom_properties: Option<Arc<CustomPropertiesMap>>,
+        custom_properties: ComputedCustomProperties,
         writing_mode: WritingMode,
+        effective_zoom: Zoom,
         flags: ComputedValueFlags,
         rules: Option<StrongRuleNode>,
         visited_style: Option<Arc<ComputedValues>>,
@@ -210,6 +215,7 @@ impl ComputedValuesInner {
             rules,
             visited_style: visited_style.map_or(ptr::null(), |p| Arc::into_raw(p)) as *const _,
             flags,
+            effective_zoom,
             % for style_struct in data.style_structs:
             ${style_struct.gecko_name}: Arc::into_raw(${style_struct.ident}) as *const _,
             % endfor
@@ -516,17 +522,30 @@ impl ops::DerefMut for ${style_struct.gecko_struct_name} {
 impl ${style_struct.gecko_struct_name} {
     #[allow(dead_code, unused_variables)]
     pub fn default(document: &structs::Document) -> Arc<Self> {
+% if style_struct.document_dependent:
         unsafe {
             let mut result = UniqueArc::<Self>::new_uninit();
-            // FIXME(bug 1595895): Zero the memory to keep valgrind happy, but
-            // these looks like Valgrind false-positives at a quick glance.
-            ptr::write_bytes::<Self>(result.as_mut_ptr(), 0, 1);
             Gecko_Construct_Default_${style_struct.gecko_ffi_name}(
                 result.as_mut_ptr() as *mut _,
                 document,
             );
             UniqueArc::assume_init(result).shareable()
         }
+% else:
+        lazy_static! {
+            static ref DEFAULT: Arc<${style_struct.gecko_struct_name}> = unsafe {
+                let mut result = UniqueArc::<${style_struct.gecko_struct_name}>::new_uninit();
+                Gecko_Construct_Default_${style_struct.gecko_ffi_name}(
+                    result.as_mut_ptr() as *mut _,
+                    std::ptr::null(),
+                );
+                let arc = UniqueArc::assume_init(result).shareable();
+                arc.mark_as_intentionally_leaked();
+                arc
+            };
+        };
+        DEFAULT.clone()
+% endif
     }
 }
 

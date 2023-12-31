@@ -150,7 +150,6 @@ PeekOffsetStruct::PeekOffsetStruct(nsSelectionAmount aAmount,
       mDesiredCaretPos(aDesiredCaretPos),
       mWordMovementType(aWordMovementType),
       mOptions(aOptions),
-      mResultContent(),
       mResultFrame(nullptr),
       mContentOffset(0),
       mAttach(CARET_ASSOCIATE_BEFORE) {}
@@ -1606,7 +1605,7 @@ Selection* nsFrameSelection::GetSelection(SelectionType aSelectionType) const {
 }
 
 void nsFrameSelection::AddHighlightSelection(
-    const nsAtom* aHighlightName, mozilla::dom::Highlight& aHighlight) {
+    nsAtom* aHighlightName, mozilla::dom::Highlight& aHighlight) {
   RefPtr<Selection> selection =
       aHighlight.CreateHighlightSelection(aHighlightName, this);
   if (auto iter =
@@ -1618,12 +1617,12 @@ void nsFrameSelection::AddHighlightSelection(
     iter->second() = std::move(selection);
   } else {
     mHighlightSelections.AppendElement(
-        CompactPair<RefPtr<const nsAtom>, RefPtr<Selection>>(
-            aHighlightName, std::move(selection)));
+        CompactPair<RefPtr<nsAtom>, RefPtr<Selection>>(aHighlightName,
+                                                       std::move(selection)));
   }
 }
 
-void nsFrameSelection::RemoveHighlightSelection(const nsAtom* aHighlightName) {
+void nsFrameSelection::RemoveHighlightSelection(nsAtom* aHighlightName) {
   if (auto iter =
           std::find_if(mHighlightSelections.begin(), mHighlightSelections.end(),
                        [&aHighlightName](auto const& aElm) {
@@ -1637,7 +1636,7 @@ void nsFrameSelection::RemoveHighlightSelection(const nsAtom* aHighlightName) {
 }
 
 void nsFrameSelection::AddHighlightSelectionRange(
-    const nsAtom* aHighlightName, mozilla::dom::Highlight& aHighlight,
+    nsAtom* aHighlightName, mozilla::dom::Highlight& aHighlight,
     mozilla::dom::AbstractRange& aRange) {
   if (auto iter =
           std::find_if(mHighlightSelections.begin(), mHighlightSelections.end(),
@@ -1652,13 +1651,13 @@ void nsFrameSelection::AddHighlightSelectionRange(
     RefPtr<Selection> selection =
         aHighlight.CreateHighlightSelection(aHighlightName, this);
     mHighlightSelections.AppendElement(
-        CompactPair<RefPtr<const nsAtom>, RefPtr<Selection>>(
-            aHighlightName, std::move(selection)));
+        CompactPair<RefPtr<nsAtom>, RefPtr<Selection>>(aHighlightName,
+                                                       std::move(selection)));
   }
 }
 
 void nsFrameSelection::RemoveHighlightSelectionRange(
-    const nsAtom* aHighlightName, mozilla::dom::AbstractRange& aRange) {
+    nsAtom* aHighlightName, mozilla::dom::AbstractRange& aRange) {
   if (auto iter =
           std::find_if(mHighlightSelections.begin(), mHighlightSelections.end(),
                        [&aHighlightName](auto const& aElm) {
@@ -3328,6 +3327,13 @@ void AutoCopyListener::OnSelectionChange(Document* aDocument,
                                          Selection& aSelection,
                                          int16_t aReason) {
   MOZ_ASSERT(IsValidClipboardID(sClipboardID));
+
+  // For now, we should prevent any updates caused by a call of Selection API.
+  // We should allow this in some cases later, though. See the valid usage in
+  // bug 1567160.
+  if (aReason & nsISelectionListener::JS_REASON) {
+    return;
+  }
 
   if (sClipboardID == nsIClipboard::kSelectionCache) {
     // Do nothing if this isn't in the active window and,

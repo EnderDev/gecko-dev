@@ -43,10 +43,10 @@ class LoadInfo;
 
 namespace ipc {
 // we have to forward declare that function so we can use it as a friend.
-nsresult LoadInfoArgsToLoadInfo(
-    const Maybe<mozilla::net::LoadInfoArgs>& aLoadInfoArgs,
-    const nsACString& aOriginRemoteType, nsINode* aCspToInheritLoadingContext,
-    net::LoadInfo** outLoadInfo);
+nsresult LoadInfoArgsToLoadInfo(const mozilla::net::LoadInfoArgs& aLoadInfoArgs,
+                                const nsACString& aOriginRemoteType,
+                                nsINode* aCspToInheritLoadingContext,
+                                net::LoadInfo** outLoadInfo);
 }  // namespace ipc
 
 namespace net {
@@ -195,6 +195,12 @@ class LoadInfo final : public nsILoadInfo {
     mIsThirdPartyContextToTopWindow.reset();
   }
 
+#ifdef DEBUG
+  void MarkOverriddenFingerprintingSettingsAsSet() {
+    mOverriddenFingerprintingSettingsIsSet = true;
+  }
+#endif
+
  private:
   // private constructor that is only allowed to be called from within
   // HttpChannelParent and FTPChannelParent declared as friends undeneath.
@@ -212,7 +218,8 @@ class LoadInfo final : public nsILoadInfo {
       const Maybe<mozilla::dom::ClientInfo>& aInitialClientInfo,
       const Maybe<mozilla::dom::ServiceWorkerDescriptor>& aController,
       nsSecurityFlags aSecurityFlags, uint32_t aSandboxFlags,
-      uint32_t aTriggeringSandboxFlags, nsContentPolicyType aContentPolicyType,
+      uint32_t aTriggeringSandboxFlags, uint64_t aTriggeringWindowId,
+      bool aTriggeringStorageAccess, nsContentPolicyType aContentPolicyType,
       LoadTainting aTainting, bool aBlockAllMixedContent,
       bool aUpgradeInsecureRequests, bool aBrowserUpgradeInsecureRequests,
       bool aBrowserDidUpgradeInsecureRequests,
@@ -239,12 +246,13 @@ class LoadInfo final : public nsILoadInfo {
       bool aHasValidUserGestureActivation, bool aAllowDeprecatedSystemRequests,
       bool aIsInDevToolsContext, bool aParserCreatedScript,
       nsILoadInfo::StoragePermissionState aStoragePermission,
+      const Maybe<RFPTarget>& aOverriddenFingerprintingSettings,
       bool aIsMetaRefresh, uint32_t aRequestBlockingReason,
       nsINode* aLoadingContext,
       nsILoadInfo::CrossOriginEmbedderPolicy aLoadingEmbedderPolicy,
       bool aIsOriginTrialCoepCredentiallessEnabledForTopLevel,
       nsIURI* aUnstrippedURI, nsIInterceptionInfo* aInterceptionInfo,
-      bool aHasInjectedCookieForCookieBannerHandling);
+      bool aHasInjectedCookieForCookieBannerHandling, bool aWasSchemelessInput);
   LoadInfo(const LoadInfo& rhs);
 
   NS_IMETHOD GetRedirects(JSContext* aCx,
@@ -252,7 +260,7 @@ class LoadInfo final : public nsILoadInfo {
                           const RedirectHistoryArray& aArra);
 
   friend nsresult mozilla::ipc::LoadInfoArgsToLoadInfo(
-      const Maybe<mozilla::net::LoadInfoArgs>& aLoadInfoArgs,
+      const mozilla::net::LoadInfoArgs& aLoadInfoArgs,
       const nsACString& aOriginRemoteType, nsINode* aCspToInheritLoadingContext,
       net::LoadInfo** outLoadInfo);
 
@@ -306,6 +314,8 @@ class LoadInfo final : public nsILoadInfo {
   nsSecurityFlags mSecurityFlags;
   uint32_t mSandboxFlags;
   uint32_t mTriggeringSandboxFlags = 0;
+  uint64_t mTriggeringWindowId = 0;
+  bool mTriggeringStorageAccess = false;
   nsContentPolicyType mInternalContentPolicyType;
   LoadTainting mTainting = LoadTainting::Basic;
   bool mBlockAllMixedContent = false;
@@ -354,6 +364,12 @@ class LoadInfo final : public nsILoadInfo {
   bool mParserCreatedScript = false;
   nsILoadInfo::StoragePermissionState mStoragePermission =
       nsILoadInfo::NoStoragePermission;
+  Maybe<RFPTarget> mOverriddenFingerprintingSettings;
+#ifdef DEBUG
+  // A boolean used to ensure the mOverriddenFingerprintingSettings is set
+  // before use it.
+  bool mOverriddenFingerprintingSettingsIsSet = false;
+#endif
   bool mIsMetaRefresh = false;
 
   // Is true if this load was triggered by processing the attributes of the
@@ -384,6 +400,7 @@ class LoadInfo final : public nsILoadInfo {
   nsCOMPtr<nsIInterceptionInfo> mInterceptionInfo;
 
   bool mHasInjectedCookieForCookieBannerHandling = false;
+  bool mWasSchemelessInput = false;
 };
 
 // This is exposed solely for testing purposes and should not be used outside of

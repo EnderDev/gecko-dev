@@ -85,6 +85,7 @@ struct RangePaintInfo;
 class ReflowCountMgr;
 #endif
 class WeakFrame;
+class nsTextFrame;
 class ZoomConstraintsClient;
 
 struct nsCallbackEventRequest;
@@ -113,6 +114,7 @@ class Element;
 class Event;
 class HTMLSlotElement;
 class Selection;
+class PerformanceMainThread;
 }  // namespace dom
 
 namespace gfx {
@@ -384,6 +386,8 @@ class PresShell final : public nsStubDocumentObserver,
    * is, when ResizeReflowOptions::BSizeLimit is not specified).
    */
   bool SimpleResizeReflow(nscoord aWidth, nscoord aHeight);
+
+  bool CanHandleUserInputEvents(WidgetGUIEvent* aGUIEvent);
 
  public:
   /**
@@ -891,17 +895,25 @@ class PresShell final : public nsStubDocumentObserver,
    * PresShell::PaintDefaultBackground, and nsDocShell::SetupNewViewer;
    * bug 488242, bug 476557 and other bugs mentioned there.
    */
-  void SetCanvasBackground(nscolor aColor) { mCanvasBackgroundColor = aColor; }
-  nscolor GetCanvasBackground() const { return mCanvasBackgroundColor; }
+  void SetCanvasBackground(nscolor aColor) {
+    mCanvasBackground.mViewportColor = aColor;
+  }
+  nscolor GetCanvasBackground() const {
+    return mCanvasBackground.mViewportColor;
+  }
 
-  /**
-   * Use the current frame tree (if it exists) to update the background color of
-   * the most recently drawn canvas.
-   */
   struct CanvasBackground {
-    nscolor mColor = 0;
+    // The canvas frame background for the whole viewport.
+    nscolor mViewportColor = 0;
+    // The canvas frame background for a printed page. Note that when
+    // print-previewing / in paged mode we have multiple canvas frames (one for
+    // the viewport, one for each page).
+    nscolor mPageColor = 0;
     bool mCSSSpecified = false;
   };
+
+  // Use the current frame tree (if it exists) to update the background color of
+  // the canvas frames.
   CanvasBackground ComputeCanvasBackground() const;
   void UpdateCanvasBackground();
 
@@ -920,9 +932,7 @@ class PresShell final : public nsStubDocumentObserver,
   }
 
   void ActivenessMaybeChanged();
-  // See ComputeActiveness() for details of these two booleans.
   bool IsActive() const { return mIsActive; }
-  bool IsInActiveTab() const { return mIsInActiveTab; }
 
   /**
    * Keep track of how many times this presshell has been rendered to
@@ -1538,12 +1548,6 @@ class PresShell final : public nsStubDocumentObserver,
   void SetAuthorStyleDisabled(bool aDisabled);
   bool GetAuthorStyleDisabled() const;
 
-  /**
-   * Update the style set somehow to take into account changed prefs which
-   * affect document styling.
-   */
-  void UpdatePreferenceStyles();
-
   // aSheetType is one of the nsIStyleSheetService *_SHEET constants.
   void NotifyStyleSheetServiceSheetAdded(StyleSheet* aSheet,
                                          uint32_t aSheetType);
@@ -1558,30 +1562,17 @@ class PresShell final : public nsStubDocumentObserver,
 
   /**
    * Add a solid color item to the bottom of aList with frame aFrame and bounds
-   * aBounds. Checks first if this needs to be done by checking if aFrame is a
-   * canvas frame (if the AddCanvasBackgroundColorFlags::ForceDraw is passed
-   * then this check is skipped). aBackstopColor is composed behind the
-   * background color of the canvas, it is transparent by default.
+   * aBounds. aBackstopColor is composed behind the background color of the
+   * canvas, and it is transparent by default.
    *
    * We attempt to make the background color part of the scrolled canvas (to
    * reduce transparent layers), and if async scrolling is enabled (and the
    * background is opaque) then we add a second, unscrolled item to handle the
    * checkerboarding case.
-   *
-   * AddCanvasBackgroundColorFlags::AddSubDocument should be specified when
-   * calling this for a subdocument, and LayoutUseContainersForRootFrame might
-   * cause the whole list to be scrolled. In that case the second unscrolled
-   * item will be elided.
-   *
-   * AddCanvasBackgroundColorFlags::AppendUnscrolledOnly only attempts to add
-   * the unscrolled item, so that we can add it manually after
-   * LayoutUseContainersForRootFrame has built the scrolling ContainerLayer.
    */
   void AddCanvasBackgroundColorItem(
       nsDisplayListBuilder* aBuilder, nsDisplayList* aList, nsIFrame* aFrame,
-      const nsRect& aBounds, nscolor aBackstopColor = NS_RGBA(0, 0, 0, 0),
-      AddCanvasBackgroundColorFlags aFlags =
-          AddCanvasBackgroundColorFlags::None);
+      const nsRect& aBounds, nscolor aBackstopColor = NS_RGBA(0, 0, 0, 0));
 
   size_t SizeOfTextRuns(MallocSizeOf aMallocSizeOf) const;
 
@@ -1740,6 +1731,8 @@ class PresShell final : public nsStubDocumentObserver,
 
   bool GetZoomableByAPZ() const;
 
+  bool ReflowForHiddenContentIfNeeded();
+  void UpdateHiddenContentInForcedLayout(nsIFrame*);
   /**
    * If this frame has content hidden via `content-visibilty` that has a pending
    * reflow, force the content to reflow immediately.
@@ -1758,16 +1751,13 @@ class PresShell final : public nsStubDocumentObserver,
 
   void UpdateRelevancyOfContentVisibilityAutoFrames();
   void ScheduleContentRelevancyUpdate(ContentRelevancyReason aReason);
+  void UpdateContentRelevancyImmediately(ContentRelevancyReason aReason);
 
  private:
   ~PresShell();
 
-  void SetIsActive(bool aIsActive, bool aIsInActiveTab);
-  struct Activeness {
-    bool mShouldBeActive = false;
-    bool mIsInActiveTab = false;
-  };
-  Activeness ComputeActiveness() const;
+  void SetIsActive(bool aIsActive);
+  bool ComputeActiveness() const;
 
   MOZ_CAN_RUN_SCRIPT
   void PaintInternal(nsView* aViewToPaint, PaintInternalFlags aFlags);
@@ -1884,7 +1874,6 @@ class PresShell final : public nsStubDocumentObserver,
   void AddUserSheet(StyleSheet*);
   void AddAgentSheet(StyleSheet*);
   void AddAuthorSheet(StyleSheet*);
-  void RemovePreferenceStyles();
 
   /**
    * Initialize cached font inflation preference values and do an initial
@@ -2767,7 +2756,7 @@ class PresShell final : public nsStubDocumentObserver,
      *
      * @param aEvent            The handled event.
      */
-    void FinalizeHandlingEvent(WidgetEvent* aEvent);
+    MOZ_CAN_RUN_SCRIPT void FinalizeHandlingEvent(WidgetEvent* aEvent);
 
     /**
      * AutoCurrentEventInfoSetter() pushes and pops current event info of
@@ -2888,8 +2877,6 @@ class PresShell final : public nsStubDocumentObserver,
   // call their can-run- script methods without local RefPtr variables.
   MOZ_KNOWN_LIVE RefPtr<Document> const mDocument;
   MOZ_KNOWN_LIVE RefPtr<nsPresContext> const mPresContext;
-  // The document's style set owns it but we maintain a ref, may be null.
-  RefPtr<StyleSheet> mPrefStyleSheet;
   UniquePtr<nsCSSFrameConstructor> mFrameConstructor;
   nsViewManager* mViewManager;  // [WEAK] docViewer owns it so I don't have to
   RefPtr<nsFrameSelection> mSelection;
@@ -3006,6 +2993,9 @@ class PresShell final : public nsStubDocumentObserver,
   // NS_UNCONSTRAINEDSIZE) if the mouse isn't over our window or there is no
   // last observed mouse location for some reason.
   nsPoint mMouseLocation;
+  // This is used for the synthetic mouse events too.  This is set when a mouse
+  // event is dispatched into the DOM.
+  static int16_t sMouseButtons;
   // The last observed pointer location relative to that root document in visual
   // coordinates.
   nsPoint mLastOverWindowPointerLocation;
@@ -3048,7 +3038,7 @@ class PresShell final : public nsStubDocumentObserver,
   nscoord mLastAnchorScrollPositionY = 0;
 
   // Most recent canvas background color.
-  nscolor mCanvasBackgroundColor;
+  CanvasBackground mCanvasBackground;
 
   int32_t mActiveSuppressDisplayport;
 
@@ -3123,7 +3113,6 @@ class PresShell final : public nsStubDocumentObserver,
   bool mIgnoreFrameDestruction : 1;
 
   bool mIsActive : 1;
-  bool mIsInActiveTab : 1;
   bool mFrozen : 1;
   bool mIsFirstPaint : 1;
   bool mObservesMutationsForPrint : 1;
@@ -3168,8 +3157,6 @@ class PresShell final : public nsStubDocumentObserver,
 
   bool mApproximateFrameVisibilityVisited : 1;
 
-  bool mHasCSSBackgroundColor : 1;
-
   // Whether the last chrome-only escape key event is consumed.
   bool mIsLastChromeOnlyEscapeKeyConsumed : 1;
 
@@ -3192,11 +3179,6 @@ class PresShell final : public nsStubDocumentObserver,
   // Whether mForceDispatchKeyPressEventsForNonPrintableKeys and
   // mForceUseLegacyKeyCodeAndCharCodeValues are initialized.
   bool mInitializedWithKeyPressEventDispatchingBlacklist : 1;
-
-  // Whether we should dispatch click events for non-primary mouse buttons.
-  bool mForceUseLegacyNonPrimaryDispatch : 1;
-  // Whether mForceUseLegacyNonPrimaryDispatch is initialised.
-  bool mInitializedWithClickEventDispatchingBlacklist : 1;
 
   // Set to true if mMouseLocation is set by a mouse event which is synthesized
   // for tests.

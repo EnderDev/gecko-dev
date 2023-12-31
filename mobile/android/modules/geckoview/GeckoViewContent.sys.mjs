@@ -4,6 +4,12 @@
 
 import { GeckoViewModule } from "resource://gre/modules/GeckoViewModule.sys.mjs";
 
+const lazy = {};
+ChromeUtils.defineESModuleGetters(lazy, {
+  isProductURL: "chrome://global/content/shopping/ShoppingProduct.mjs",
+  ShoppingProduct: "chrome://global/content/shopping/ShoppingProduct.mjs",
+});
+
 export class GeckoViewContent extends GeckoViewModule {
   onInit() {
     this.registerListener([
@@ -14,6 +20,13 @@ export class GeckoViewContent extends GeckoViewModule {
       "GeckoView:HasCookieBannerRuleForBrowsingContextTree",
       "GeckoView:RestoreState",
       "GeckoView:ContainsFormData",
+      "GeckoView:RequestCreateAnalysis",
+      "GeckoView:RequestAnalysisCreationStatus",
+      "GeckoView:PollForAnalysisCompleted",
+      "GeckoView:SendClickAttributionEvent",
+      "GeckoView:SendImpressionAttributionEvent",
+      "GeckoView:RequestAnalysis",
+      "GeckoView:RequestRecommendations",
       "GeckoView:ScrollBy",
       "GeckoView:ScrollTo",
       "GeckoView:SetActive",
@@ -118,6 +131,39 @@ export class GeckoViewContent extends GeckoViewModule {
     }
   }
 
+  #sendDOMFullScreenEventToAllChildren(aEvent) {
+    let { browsingContext } = this.actor;
+
+    while (browsingContext) {
+      if (!browsingContext.currentWindowGlobal) {
+        break;
+      }
+
+      const currentPid = browsingContext.currentWindowGlobal.osPid;
+      const parentPid = browsingContext.parent?.currentWindowGlobal.osPid;
+
+      if (currentPid != parentPid) {
+        if (!browsingContext.parent) {
+          // Top level browsing context. Use origin actor (Bug 1505916).
+          const chromeBC = browsingContext.topChromeWindow?.browsingContext;
+          const requestOrigin = chromeBC?.fullscreenRequestOrigin?.get();
+          if (requestOrigin) {
+            requestOrigin.browsingContext.currentWindowGlobal
+              .getActor("GeckoViewContent")
+              .sendAsyncMessage(aEvent, {});
+            delete chromeBC.fullscreenRequestOrigin;
+            return;
+          }
+        }
+        const actor =
+          browsingContext.currentWindowGlobal.getActor("GeckoViewContent");
+        actor.sendAsyncMessage(aEvent, {});
+      }
+
+      browsingContext = browsingContext.parent;
+    }
+  }
+
   // Bundle event handler.
   onEvent(aEvent, aData, aCallback) {
     debug`onEvent: event=${aEvent}, data=${aData}`;
@@ -145,7 +191,12 @@ export class GeckoViewContent extends GeckoViewModule {
         break;
       }
       case "GeckoView:ZoomToInput":
-        this.sendToAllChildren(aEvent, aData);
+        // For ZoomToInput we just need to send the message to the current focused one.
+        const actor =
+          Services.focus.focusedContentBrowsingContext.currentWindowGlobal.getActor(
+            "GeckoViewContent"
+          );
+        actor.sendAsyncMessage(aEvent, aData);
         break;
       case "GeckoView:ScrollBy":
         // Unclear if that actually works with oop iframes?
@@ -184,6 +235,27 @@ export class GeckoViewContent extends GeckoViewModule {
       case "GeckoView:ContainsFormData":
         this._containsFormData(aCallback);
         break;
+      case "GeckoView:RequestAnalysis":
+        this._requestAnalysis(aData, aCallback);
+        break;
+      case "GeckoView:RequestCreateAnalysis":
+        this._requestCreateAnalysis(aData, aCallback);
+        break;
+      case "GeckoView:RequestAnalysisCreationStatus":
+        this._requestAnalysisCreationStatus(aData, aCallback);
+        break;
+      case "GeckoView:PollForAnalysisCompleted":
+        this._pollForAnalysisCompleted(aData, aCallback);
+        break;
+      case "GeckoView:SendClickAttributionEvent":
+        this._sendAttributionEvent("click", aData, aCallback);
+        break;
+      case "GeckoView:SendImpressionAttributionEvent":
+        this._sendAttributionEvent("impression", aData, aCallback);
+        break;
+      case "GeckoView:RequestRecommendations":
+        this._requestRecommendations(aData, aCallback);
+        break;
       case "GeckoView:IsPdfJs":
         aCallback.onSuccess(this.isPdfJs);
         break;
@@ -213,11 +285,15 @@ export class GeckoViewContent extends GeckoViewModule {
       case "MozDOMFullscreen:Entered":
         if (this.browser == aEvent.target) {
           // Remote browser; dispatch to content process.
-          this.sendToAllChildren("GeckoView:DOMFullscreenEntered");
+          this.#sendDOMFullScreenEventToAllChildren(
+            "GeckoView:DOMFullscreenEntered"
+          );
         }
         break;
       case "MozDOMFullscreen:Exited":
-        this.sendToAllChildren("GeckoView:DOMFullscreenExited");
+        this.#sendDOMFullScreenEventToAllChildren(
+          "GeckoView:DOMFullscreenExited"
+        );
         break;
       case "pagetitlechanged":
         this.eventDispatcher.sendRequest({
@@ -298,6 +374,107 @@ export class GeckoViewContent extends GeckoViewModule {
 
   async _containsFormData(aCallback) {
     aCallback.onSuccess(await this.actor.containsFormData());
+  }
+
+  async _requestAnalysis(aData, aCallback) {
+    const url = Services.io.newURI(aData.url);
+    if (!lazy.isProductURL(url)) {
+      aCallback.onError(`Cannot requestAnalysis on a non-product url.`);
+    } else {
+      const product = new lazy.ShoppingProduct(url);
+      const analysis = await product.requestAnalysis();
+      if (!analysis) {
+        aCallback.onError(`Product analysis returned null.`);
+        return;
+      }
+      aCallback.onSuccess({ analysis });
+    }
+  }
+
+  async _requestCreateAnalysis(aData, aCallback) {
+    const url = Services.io.newURI(aData.url);
+    if (!lazy.isProductURL(url)) {
+      aCallback.onError(`Cannot requestCreateAnalysis on a non-product url.`);
+    } else {
+      const product = new lazy.ShoppingProduct(url);
+      const status = await product.requestCreateAnalysis();
+      if (!status) {
+        aCallback.onError(`Creation of product analysis returned null.`);
+        return;
+      }
+      aCallback.onSuccess(status.status);
+    }
+  }
+
+  async _requestAnalysisCreationStatus(aData, aCallback) {
+    const url = Services.io.newURI(aData.url);
+    if (!lazy.isProductURL(url)) {
+      aCallback.onError(
+        `Cannot requestAnalysisCreationStatus on a non-product url.`
+      );
+    } else {
+      const product = new lazy.ShoppingProduct(url);
+      const status = await product.requestAnalysisCreationStatus();
+      if (!status) {
+        aCallback.onError(
+          `Status of creation of product analysis returned null.`
+        );
+        return;
+      }
+      aCallback.onSuccess(status.status);
+    }
+  }
+
+  async _pollForAnalysisCompleted(aData, aCallback) {
+    const url = Services.io.newURI(aData.url);
+    if (!lazy.isProductURL(url)) {
+      aCallback.onError(
+        `Cannot pollForAnalysisCompleted on a non-product url.`
+      );
+    } else {
+      const product = new lazy.ShoppingProduct(url);
+      const status = await product.pollForAnalysisCompleted();
+      if (!status) {
+        aCallback.onError(
+          `Polling the status of creation of product analysis returned null.`
+        );
+        return;
+      }
+      aCallback.onSuccess(status.status);
+    }
+  }
+
+  async _sendAttributionEvent(aEvent, aData, aCallback) {
+    let result;
+    if (Services.prefs.getBoolPref("geckoview.shopping.test_response", true)) {
+      result = { TEST_AID: "TEST_AID_RESPONSE" };
+    } else {
+      result = await lazy.ShoppingProduct.sendAttributionEvent(
+        aEvent,
+        aData.aid,
+        "geckoview_android"
+      );
+    }
+    if (!result || !(aData.aid in result) || !result[aData.aid]) {
+      aCallback.onSuccess(false);
+      return;
+    }
+    aCallback.onSuccess(true);
+  }
+
+  async _requestRecommendations(aData, aCallback) {
+    const url = Services.io.newURI(aData.url);
+    if (!lazy.isProductURL(url)) {
+      aCallback.onError(`Cannot requestRecommendations on a non-product url.`);
+    } else {
+      const product = new lazy.ShoppingProduct(url);
+      const recommendations = await product.requestRecommendations();
+      if (!recommendations) {
+        aCallback.onError(`Product recommendations returned null.`);
+        return;
+      }
+      aCallback.onSuccess({ recommendations });
+    }
   }
 
   async _hasCookieBannerRuleForBrowsingContextTree(aCallback) {

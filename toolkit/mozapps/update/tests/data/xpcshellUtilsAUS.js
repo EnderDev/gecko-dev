@@ -1635,61 +1635,65 @@ function getSpecialFolderDir(aCSIDL) {
   return dir;
 }
 
-XPCOMUtils.defineLazyGetter(this, "gInstallDirPathHash", function test_gIDPH() {
-  if (AppConstants.platform != "win") {
-    do_throw("Windows only function called by a different platform!");
-  }
+ChromeUtils.defineLazyGetter(
+  this,
+  "gInstallDirPathHash",
+  function test_gIDPH() {
+    if (AppConstants.platform != "win") {
+      do_throw("Windows only function called by a different platform!");
+    }
 
-  if (!MOZ_APP_BASENAME) {
+    if (!MOZ_APP_BASENAME) {
+      return null;
+    }
+
+    let vendor = MOZ_APP_VENDOR ? MOZ_APP_VENDOR : "Mozilla";
+    let appDir = getApplyDirFile();
+
+    const REG_PATH =
+      "SOFTWARE\\" + vendor + "\\" + MOZ_APP_BASENAME + "\\TaskBarIDs";
+    let regKey = Cc["@mozilla.org/windows-registry-key;1"].createInstance(
+      Ci.nsIWindowsRegKey
+    );
+    try {
+      regKey.open(
+        Ci.nsIWindowsRegKey.ROOT_KEY_LOCAL_MACHINE,
+        REG_PATH,
+        Ci.nsIWindowsRegKey.ACCESS_ALL
+      );
+      regKey.writeStringValue(appDir.path, gTestID);
+      return gTestID;
+    } catch (e) {}
+
+    try {
+      regKey.create(
+        Ci.nsIWindowsRegKey.ROOT_KEY_CURRENT_USER,
+        REG_PATH,
+        Ci.nsIWindowsRegKey.ACCESS_ALL
+      );
+      regKey.writeStringValue(appDir.path, gTestID);
+      return gTestID;
+    } catch (e) {
+      logTestInfo(
+        "failed to create registry value. Registry Path: " +
+          REG_PATH +
+          ", Value Name: " +
+          appDir.path +
+          ", Value Data: " +
+          gTestID +
+          ", Exception " +
+          e
+      );
+      do_throw(
+        "Unable to write HKLM or HKCU TaskBarIDs registry value, key path: " +
+          REG_PATH
+      );
+    }
     return null;
   }
+);
 
-  let vendor = MOZ_APP_VENDOR ? MOZ_APP_VENDOR : "Mozilla";
-  let appDir = getApplyDirFile();
-
-  const REG_PATH =
-    "SOFTWARE\\" + vendor + "\\" + MOZ_APP_BASENAME + "\\TaskBarIDs";
-  let regKey = Cc["@mozilla.org/windows-registry-key;1"].createInstance(
-    Ci.nsIWindowsRegKey
-  );
-  try {
-    regKey.open(
-      Ci.nsIWindowsRegKey.ROOT_KEY_LOCAL_MACHINE,
-      REG_PATH,
-      Ci.nsIWindowsRegKey.ACCESS_ALL
-    );
-    regKey.writeStringValue(appDir.path, gTestID);
-    return gTestID;
-  } catch (e) {}
-
-  try {
-    regKey.create(
-      Ci.nsIWindowsRegKey.ROOT_KEY_CURRENT_USER,
-      REG_PATH,
-      Ci.nsIWindowsRegKey.ACCESS_ALL
-    );
-    regKey.writeStringValue(appDir.path, gTestID);
-    return gTestID;
-  } catch (e) {
-    logTestInfo(
-      "failed to create registry value. Registry Path: " +
-        REG_PATH +
-        ", Value Name: " +
-        appDir.path +
-        ", Value Data: " +
-        gTestID +
-        ", Exception " +
-        e
-    );
-    do_throw(
-      "Unable to write HKLM or HKCU TaskBarIDs registry value, key path: " +
-        REG_PATH
-    );
-  }
-  return null;
-});
-
-XPCOMUtils.defineLazyGetter(this, "gLocalAppDataDir", function test_gLADD() {
+ChromeUtils.defineLazyGetter(this, "gLocalAppDataDir", function test_gLADD() {
   if (AppConstants.platform != "win") {
     do_throw("Windows only function called by a different platform!");
   }
@@ -1698,7 +1702,7 @@ XPCOMUtils.defineLazyGetter(this, "gLocalAppDataDir", function test_gLADD() {
   return getSpecialFolderDir(CSIDL_LOCAL_APPDATA);
 });
 
-XPCOMUtils.defineLazyGetter(this, "gCommonAppDataDir", function test_gCDD() {
+ChromeUtils.defineLazyGetter(this, "gCommonAppDataDir", function test_gCDD() {
   if (AppConstants.platform != "win") {
     do_throw("Windows only function called by a different platform!");
   }
@@ -1707,7 +1711,7 @@ XPCOMUtils.defineLazyGetter(this, "gCommonAppDataDir", function test_gCDD() {
   return getSpecialFolderDir(CSIDL_COMMON_APPDATA);
 });
 
-XPCOMUtils.defineLazyGetter(this, "gProgFilesDir", function test_gPFD() {
+ChromeUtils.defineLazyGetter(this, "gProgFilesDir", function test_gPFD() {
   if (AppConstants.platform != "win") {
     do_throw("Windows only function called by a different platform!");
   }
@@ -1777,7 +1781,7 @@ function createWorldWritableAppUpdateDir() {
   }
 }
 
-XPCOMUtils.defineLazyGetter(this, "gUpdatesRootDir", function test_gURD() {
+ChromeUtils.defineLazyGetter(this, "gUpdatesRootDir", function test_gURD() {
   if (AppConstants.platform != "macosx") {
     do_throw("Mac OS X only function called by a different platform!");
   }
@@ -3348,8 +3352,39 @@ function removeTimeStamps(aLogContents) {
 }
 
 /**
+ * Helper function that gets the contents of the last update log.
+ *
+ * It used to be that we only kept one copy of the updater log. This would be
+ * the copy created by the elevated updater, if it was run. If it wasn't run,
+ * then then it would be the only copy (created by the unelevated updater).
+ * Now we keep both of these files. These tests were written assuming that
+ * this unelevated updater log would be overwritten if the updater ran
+ * elevated. Since that is no longer true, we can get the correct log intended
+ * by these tests by always just trying for the elevated version first and, if
+ * that doesn't exist, getting the unelevated version.
+ * This works better than checking `gIsServiceTest` because some service tests
+ * intentionally run bits of the test without elevation.
+ */
+function getLogFileContents() {
+  let updateLog = getUpdateDirFile(FILE_LAST_UPDATE_ELEVATED_LOG);
+  let updateLogContents;
+  try {
+    updateLogContents = readFileBytes(updateLog);
+  } catch (ex) {
+    if (ex.result != Cr.NS_ERROR_FILE_NOT_FOUND) {
+      throw ex;
+    }
+    updateLog = getUpdateDirFile(FILE_LAST_UPDATE_LOG);
+    updateLogContents = readFileBytes(updateLog);
+  }
+  return updateLogContents;
+}
+
+/**
  * Helper function for updater binary tests for verifying the contents of the
  * update log after a successful update.
+ * Requires that the compare file have all the correct log lines in the correct
+ * order, but it is not an error for extra lines to be present in the test file.
  *
  * @param   aCompareLogFile
  *          The log file to compare the update log with.
@@ -3373,8 +3408,7 @@ function checkUpdateLogContents(
     return;
   }
 
-  let updateLog = getUpdateDirFile(FILE_LAST_UPDATE_LOG);
-  let updateLogContents = readFileBytes(updateLog);
+  let updateLogContents = getLogFileContents();
 
   // Remove leading timestamps
   updateLogContents = removeTimeStamps(updateLogContents);
@@ -3514,40 +3548,27 @@ function checkUpdateLogContents(
   // Remove leading and trailing newlines
   compareLogContents = compareLogContents.replace(/^\n|\n$/g, "");
 
+  // Compare line by line, skipping non-matching lines that may be in the update
+  // log so that these tests don't start failing just because we add a new log
+  // message to the updater.
+  let compareLogContentsArray = compareLogContents.split("\n");
+  let updateLogContentsArray = updateLogContents.split("\n");
+  while (updateLogContentsArray.length && compareLogContentsArray.length) {
+    if (updateLogContentsArray[0] == compareLogContentsArray[0]) {
+      compareLogContentsArray.shift();
+    }
+    updateLogContentsArray.shift();
+  }
+
   // Don't write the contents of the file to the log to reduce log spam
   // unless there is a failure.
-  if (compareLogContents == updateLogContents) {
+  if (!compareLogContentsArray.length) {
     Assert.ok(true, "the update log contents" + MSG_SHOULD_EQUAL);
   } else {
-    logTestInfo("the update log contents are not correct");
-    logUpdateLog(FILE_LAST_UPDATE_LOG);
-    let aryLog = updateLogContents.split("\n");
-    let aryCompare = compareLogContents.split("\n");
-    // Pushing an empty string to both arrays makes it so either array's length
-    // can be used in the for loop below without going out of bounds.
-    aryLog.push("");
-    aryCompare.push("");
-    // xpcshell tests won't display the entire contents so log the first
-    // incorrect line.
-    for (let i = 0; i < aryLog.length; ++i) {
-      if (aryLog[i] != aryCompare[i]) {
-        logTestInfo(
-          "the first incorrect line is line #" +
-            i +
-            " and the " +
-            "value is: '" +
-            aryLog[i] +
-            "'"
-        );
-        Assert.equal(
-          aryLog[i],
-          aryCompare[i],
-          "the update log contents" + MSG_SHOULD_EQUAL
-        );
-      }
-    }
-    // This should never happen!
-    do_throw("Unable to find incorrect update log contents!");
+    Assert.ok(
+      false,
+      `the update log is missing the line: '${compareLogContentsArray[0]}'`
+    );
   }
 }
 
@@ -3558,19 +3579,47 @@ function checkUpdateLogContents(
  *          The string to check if the update log contains.
  */
 function checkUpdateLogContains(aCheckString) {
-  let updateLog = getUpdateDirFile(FILE_LAST_UPDATE_LOG);
-  let updateLogContents = readFileBytes(updateLog).replace(/\r\n/g, "\n");
+  let updateLogContents = getLogFileContents();
+  updateLogContents = updateLogContents.replace(/\r\n/g, "\n");
   updateLogContents = removeTimeStamps(updateLogContents);
   updateLogContents = replaceLogPaths(updateLogContents);
-  Assert.notEqual(
-    updateLogContents.indexOf(aCheckString),
-    -1,
-    "the update log '" +
-      updateLog +
-      "' contents should contain value: '" +
-      aCheckString +
-      "'"
-  );
+
+  // Compare line by line, skipping non-matching lines that may be in the update
+  // log so that these tests don't start failing just because we add a new log
+  // message to the updater.
+  let isFirstCompareLine = true;
+  let compareLogContentsArray = aCheckString.split("\n");
+  let updateLogContentsArray = updateLogContents.split("\n");
+  while (updateLogContentsArray.length && compareLogContentsArray.length) {
+    let isLastCompareLine = compareLogContentsArray.length == 1;
+    if (isFirstCompareLine && isLastCompareLine) {
+      if (updateLogContentsArray[0].includes(compareLogContentsArray[0])) {
+        compareLogContentsArray.shift();
+        isFirstCompareLine = false;
+      }
+    } else if (isFirstCompareLine) {
+      if (updateLogContentsArray[0].endsWith(compareLogContentsArray[0])) {
+        compareLogContentsArray.shift();
+        isFirstCompareLine = false;
+      }
+    } else if (isLastCompareLine) {
+      if (updateLogContentsArray[0].startsWith(compareLogContentsArray[0])) {
+        compareLogContentsArray.shift();
+      }
+    } else if (updateLogContentsArray[0] == compareLogContentsArray[0]) {
+      compareLogContentsArray.shift();
+    }
+    updateLogContentsArray.shift();
+  }
+
+  if (!compareLogContentsArray.length) {
+    Assert.ok(true, "the update log contents" + MSG_SHOULD_EQUAL);
+  } else {
+    Assert.ok(
+      false,
+      `the update log is missing the line: '${compareLogContentsArray[0]}'`
+    );
+  }
 }
 
 /**
@@ -4192,7 +4241,9 @@ function start_httpserver() {
     );
   }
 
-  let { HttpServer } = ChromeUtils.import("resource://testing-common/httpd.js");
+  let { HttpServer } = ChromeUtils.importESModule(
+    "resource://testing-common/httpd.sys.mjs"
+  );
   gTestserver = new HttpServer();
   gTestserver.registerDirectory("/", dir);
   gTestserver.registerPathHandler("/" + gHTTPHandlerPath, pathHandler);

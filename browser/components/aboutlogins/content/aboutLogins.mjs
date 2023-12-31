@@ -121,6 +121,9 @@ window.addEventListener("AboutLoginsChromeToContent", event => {
       break;
     }
     case "Setup": {
+      gElements.loginList.selectLoginByDomainOrGuid(
+        event.detail.value.preselectedLogin
+      );
       handleAllLogins(event.detail.value.logins);
       handleSyncState(event.detail.value.syncState);
       gElements.loginList.setSortDirection(event.detail.value.selectedSort);
@@ -154,7 +157,7 @@ window.addEventListener("AboutLoginsRemoveAllLoginsDialog", () => {
   let options = {};
   if (fxaLoggedIn && passwordSyncEnabled) {
     options.title = "about-logins-confirm-remove-all-sync-dialog-title";
-    options.message = "about-logins-confirm-remove-all-sync-dialog-message";
+    options.message = "about-logins-confirm-remove-all-sync-dialog-message2";
   } else {
     options.title = "about-logins-confirm-remove-all-dialog-title";
     options.message = "about-logins-confirm-remove-all-dialog-message";
@@ -277,12 +280,6 @@ if (searchParamsChanged) {
 }
 
 if (!searchParamsChanged) {
-  if (document.location.hash) {
-    const loginDomainOrGuid = decodeURIComponent(
-      document.location.hash.slice(1)
-    );
-    gElements.loginList.selectLoginByDomainOrGuid(loginDomainOrGuid);
-  }
   gElements.loginFilter.focus();
   document.dispatchEvent(new CustomEvent("AboutLoginsInit", { bubbles: true }));
 }

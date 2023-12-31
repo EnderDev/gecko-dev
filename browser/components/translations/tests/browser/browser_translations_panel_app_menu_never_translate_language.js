@@ -20,28 +20,17 @@ add_task(async function test_uncheck_never_translate_language_shows_button() {
     "The translations button is available"
   );
 
-  info(
-    "The page should still be in its original, untranslated form because " +
-      "the document language is in the neverTranslateLanguages pref"
-  );
-  await runInPage(async TranslationsTest => {
-    const { getH1 } = TranslationsTest.getSelectors();
-    await TranslationsTest.assertTranslationResult(
-      "The page's H1 is in Spanish.",
-      getH1,
-      "Don Quijote de La Mancha"
-    );
+  await assertPageIsUntranslated(runInPage);
+
+  await openTranslationsPanel({
+    openFromAppMenu: true,
+    onOpenPanel: assertPanelDefaultView,
   });
+  await openTranslationsSettingsMenu();
 
-  info(
-    "Simulate clicking always-translate-language in the settings menu, " +
-      "adding the document language to the alwaysTranslateLanguages pref"
-  );
-  await openTranslationsSettingsMenuViaAppMenu();
-
-  await assertIsNeverTranslateLanguage("es", true);
-  await toggleNeverTranslateLanguage();
-  await assertIsNeverTranslateLanguage("es", false);
+  await assertIsNeverTranslateLanguage("es", { checked: true });
+  await clickNeverTranslateLanguage();
+  await assertIsNeverTranslateLanguage("es", { checked: false });
 
   await cleanup();
 });

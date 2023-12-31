@@ -73,8 +73,7 @@ class nsSliderFrame final : public nsContainerFrame {
               nsReflowStatus& aStatus) override;
 
   // nsIFrame overrides
-  void DestroyFrom(nsIFrame* aDestructRoot,
-                   PostDestroyData& aPostDestroyData) override;
+  void Destroy(DestroyContext&) override;
 
   void BuildDisplayList(nsDisplayListBuilder* aBuilder,
                         const nsDisplayListSet& aLists) override;
@@ -100,7 +99,7 @@ class nsSliderFrame final : public nsContainerFrame {
   void InsertFrames(ChildListID aListID, nsIFrame* aPrevFrame,
                     const nsLineList::iterator* aPrevFrameLine,
                     nsFrameList&& aFrameList) override;
-  void RemoveFrame(ChildListID aListID, nsIFrame* aOldFrame) override;
+  void RemoveFrame(DestroyContext&, ChildListID, nsIFrame*) override;
 
   nsresult StartDrag(mozilla::dom::Event* aEvent);
   nsresult StopDrag();
@@ -184,14 +183,24 @@ class nsSliderFrame final : public nsContainerFrame {
     nsRepeatService::GetInstance()->Start(Notify, this, mContent->OwnerDoc(),
                                           "nsSliderFrame"_ns);
   }
-  void StopRepeat() { nsRepeatService::GetInstance()->Stop(Notify, this); }
+  void StopRepeat() {
+    nsRepeatService::GetInstance()->Stop(Notify, this);
+    mCurrentClickHoldDestination = Nothing();
+  }
   void Notify();
   static void Notify(void* aData) {
     (static_cast<nsSliderFrame*>(aData))->Notify();
   }
   void PageScroll(bool aClickAndHold);
 
+  void SetupDrag(mozilla::WidgetGUIEvent* aEvent, nsIFrame* aThumbFrame,
+                 nscoord aPos, bool aIsHorizontal);
+
   nsPoint mDestinationPoint;
+  // If we are in a scrollbar track click-and-hold, this is populated with
+  // the destination of the scroll started at the most recent tick of the
+  // repeat timer.
+  Maybe<nsPoint> mCurrentClickHoldDestination;
   RefPtr<nsSliderMediator> mMediator;
 
   float mRatio;
@@ -230,7 +239,6 @@ class nsSliderFrame final : public nsContainerFrame {
   nscoord mThumbMinLength;
 
   static bool gMiddlePref;
-  static int32_t gSnapMultiplier;
 };  // class nsSliderFrame
 
 #endif

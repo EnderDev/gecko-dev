@@ -170,27 +170,6 @@ static BlockAction CheckBlockInfo(const DllBlockInfo* aInfo,
                                   uint64_t& aVersion) {
   aVersion = DllBlockInfo::ALL_VERSIONS;
 
-  if (aInfo->mFlags & (DllBlockInfoFlags::BLOCK_WIN8_AND_OLDER |
-                       DllBlockInfoFlags::BLOCK_WIN7_AND_OLDER)) {
-    RTL_OSVERSIONINFOW osv = {sizeof(osv)};
-    NTSTATUS ntStatus = ::RtlGetVersion(&osv);
-    if (!NT_SUCCESS(ntStatus)) {
-      return BlockAction::Error;
-    }
-
-    if ((aInfo->mFlags & DllBlockInfoFlags::BLOCK_WIN8_AND_OLDER) &&
-        (osv.dwMajorVersion > 6 ||
-         (osv.dwMajorVersion == 6 && osv.dwMinorVersion > 2))) {
-      return BlockAction::Allow;
-    }
-
-    if ((aInfo->mFlags & DllBlockInfoFlags::BLOCK_WIN7_AND_OLDER) &&
-        (osv.dwMajorVersion > 6 ||
-         (osv.dwMajorVersion == 6 && osv.dwMinorVersion > 1))) {
-      return BlockAction::Allow;
-    }
-  }
-
   if ((aInfo->mFlags & DllBlockInfoFlags::CHILD_PROCESSES_ONLY) &&
       !(gBlocklistInitFlags & eDllBlocklistInitFlagIsChildProcess)) {
     return BlockAction::Allow;
@@ -424,15 +403,25 @@ NTSTATUS NTAPI patched_LdrLoadDll(PWCHAR aDllPath, PULONG aFlags,
 
 CrossProcessDllInterceptor::FuncHookType<NtMapViewOfSectionPtr>
     stub_NtMapViewOfSection;
-constexpr DWORD kPageExecutable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
-                                  PAGE_EXECUTE_READWRITE |
-                                  PAGE_EXECUTE_WRITECOPY;
 
 // All the code for patched_NtMapViewOfSection that relies on checked stack
-// buffers (e.g. sectionFileName) should be put in this helper function (see
-// bug 1733532).
-MOZ_NEVER_INLINE NTSTATUS AfterMapViewOfExecutableImageSection(
+// buffers (e.g. mbi, sectionFileName) should be put in this helper function
+// (see bug 1733532).
+MOZ_NEVER_INLINE NTSTATUS AfterMapViewOfExecutableSection(
     HANDLE aProcess, PVOID* aBaseAddress, NTSTATUS aStubStatus) {
+  // We don't care about mappings that aren't MEM_IMAGE.
+  MEMORY_BASIC_INFORMATION mbi;
+  NTSTATUS ntStatus =
+      ::NtQueryVirtualMemory(aProcess, *aBaseAddress, MemoryBasicInformation,
+                             &mbi, sizeof(mbi), nullptr);
+  if (!NT_SUCCESS(ntStatus)) {
+    ::NtUnmapViewOfSection(aProcess, *aBaseAddress);
+    return STATUS_ACCESS_DENIED;
+  }
+  if (!(mbi.Type & MEM_IMAGE)) {
+    return aStubStatus;
+  }
+
   // Get the section name
   nt::MemorySectionNameBuf sectionFileName(
       gLoaderPrivateAPI.GetSectionNameBuffer(*aBaseAddress));
@@ -455,6 +444,7 @@ MOZ_NEVER_INLINE NTSTATUS AfterMapViewOfExecutableImageSection(
   if (::RtlCompareUnicodeString(&k32Name, &leafOnStack, TRUE) == 0) {
     blockAction = BlockAction::Allow;
   } else {
+    auto noSharedSectionReset{SharedSection::AutoNoReset()};
     k32Exports = gSharedSection.GetKernel32Exports();
     // Small optimization: Since loading a dependent module does not involve
     // LdrLoadDll, we know isInjectedDependent is false if we hold a top frame.
@@ -558,7 +548,7 @@ MOZ_NEVER_INLINE NTSTATUS AfterMapViewOfExecutableImageSection(
 // bug 1733532). Hence this function is declared as MOZ_NO_STACK_PROTECTOR.
 // Ideally, all code relying on stack buffers should be put in the dedicated
 // helper function AfterMapViewOfExecutableImageSection, which does not have
-// the MOZ_NO_STACK_PROTECTOR attribute. The mbi variable below is an
+// the MOZ_NO_STACK_PROTECTOR attribute. The obi variable below is an
 // exception to this rule, as it is required to collect the information that
 // lets us decide whether we really need to go through the helper function.
 NTSTATUS NTAPI patched_NtMapViewOfSection(
@@ -566,6 +556,24 @@ NTSTATUS NTAPI patched_NtMapViewOfSection(
     SIZE_T aCommitSize, PLARGE_INTEGER aSectionOffset, PSIZE_T aViewSize,
     SECTION_INHERIT aInheritDisposition, ULONG aAllocationType,
     ULONG aProtectionFlags) {
+  // Save off the values currently in the out-pointers for later restoration if
+  // we decide not to permit this mapping.
+  auto const rollback =
+      [
+          // Avoid taking a reference to the stack frame, mostly out of
+          // paranoia. (The values of `aBaseAddress` et al. may have been
+          // crafted to point to our return address anyway...)
+          =,
+          // `NtMapViewOfSection` itself is mildly robust to invalid pointers;
+          // we can't easily do that, but we can at least check for `nullptr`.
+          baseAddress = aBaseAddress ? *aBaseAddress : nullptr,
+          sectionOffset = aSectionOffset ? *aSectionOffset : LARGE_INTEGER{},
+          viewSize = aViewSize ? *aViewSize : 0]() {
+        if (aBaseAddress) *aBaseAddress = baseAddress;
+        if (aSectionOffset) *aSectionOffset = sectionOffset;
+        if (aViewSize) *aViewSize = viewSize;
+      };
+
   // We always map first, then we check for additional info after.
   NTSTATUS stubStatus = stub_NtMapViewOfSection(
       aSection, aProcess, aBaseAddress, aZeroBits, aCommitSize, aSectionOffset,
@@ -579,28 +587,33 @@ NTSTATUS NTAPI patched_NtMapViewOfSection(
     return stubStatus;
   }
 
-  // Do a query to see if we are mapping a MEM_IMAGE section that was created
-  // as executable. If not, we bail out. In particular, this avoids using stack
-  // buffers during calls to Thread32Next.
-  MEMORY_BASIC_INFORMATION mbi;
-  NTSTATUS ntStatus =
-      ::NtQueryVirtualMemory(aProcess, *aBaseAddress, MemoryBasicInformation,
-                             &mbi, sizeof(mbi), nullptr);
+  PUBLIC_OBJECT_BASIC_INFORMATION obi;
+  NTSTATUS ntStatus = ::NtQueryObject(aSection, ObjectBasicInformation, &obi,
+                                      sizeof(obi), nullptr);
   if (!NT_SUCCESS(ntStatus)) {
     ::NtUnmapViewOfSection(aProcess, *aBaseAddress);
+    rollback();
     return STATUS_ACCESS_DENIED;
   }
 
-  // We don't care about mappings that aren't MEM_IMAGE or executable.
-  // We check for the AllocationProtect, not the Protect field (nor the
-  // aProtectionFlags argument) because the first section of a mapped image is
-  // always PAGE_READONLY even when it's mapped as an executable.
-  if (!(mbi.Type & MEM_IMAGE) || !(mbi.AllocationProtect & kPageExecutable)) {
+  // We don't care about sections for which the permission to map executable
+  // views was not asked at creation time. This early exit path is notably
+  // taken for:
+  //  - calls to LoadLibraryExW using LOAD_LIBRARY_AS_DATAFILE or
+  //    LOAD_LIBRARY_AS_IMAGE_RESOURCE (bug 1842088), thus allowing us to load
+  //    blocked DLLs for analysis without executing them;
+  //  - calls to Thread32Next (bug 1733532), thus avoiding the helper function
+  //    with stack cookie checks.
+  if (!(obi.GrantedAccess & SECTION_MAP_EXECUTE)) {
     return stubStatus;
   }
 
-  return AfterMapViewOfExecutableImageSection(aProcess, aBaseAddress,
-                                              stubStatus);
+  NTSTATUS rv =
+      AfterMapViewOfExecutableSection(aProcess, aBaseAddress, stubStatus);
+  if (FAILED(rv)) {
+    rollback();
+  }
+  return rv;
 }
 
 }  // namespace freestanding

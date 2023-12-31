@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-/* eslint-env mozilla/chrome-worker */
+/* eslint-env worker */
 
 "use strict";
 
@@ -28,7 +28,8 @@ onmessage = async function (msg) {
       // We don't need these types of files.
       if (
         fileName == "verified_contents.json" ||
-        fileName == "icon-128x128.png"
+        fileName == "icon-128x128.png" ||
+        fileName.startsWith("_")
       ) {
         continue;
       }

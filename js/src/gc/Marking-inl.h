@@ -16,6 +16,7 @@
 #include "js/Value.h"
 #include "vm/StringType.h"
 #include "vm/TaggedProto.h"
+#include "wasm/WasmAnyRef.h"
 
 #include "gc/Nursery-inl.h"
 
@@ -65,6 +66,17 @@ struct TaggedPtr<TaggedProto> {
   static TaggedProto empty() { return TaggedProto(); }
 };
 
+template <>
+struct TaggedPtr<wasm::AnyRef> {
+  static wasm::AnyRef wrap(JSObject* obj) {
+    return wasm::AnyRef::fromJSObjectOrNull(obj);
+  }
+  static wasm::AnyRef wrap(JSString* str) {
+    return wasm::AnyRef::fromJSString(str);
+  }
+  static wasm::AnyRef empty() { return wasm::AnyRef(); }
+};
+
 template <typename T>
 struct MightBeForwarded {
   static_assert(std::is_base_of_v<Cell, T>);
@@ -81,11 +93,16 @@ struct MightBeForwarded {
 
 template <typename T>
 inline bool IsForwarded(const T* t) {
-  if (!MightBeForwarded<T>::value) {
+  if constexpr (!MightBeForwarded<T>::value) {
     MOZ_ASSERT(!t->isForwarded());
     return false;
   }
 
+  return t->isForwarded();
+}
+
+template <>
+inline bool IsForwarded<Cell>(const Cell* t) {
   return t->isForwarded();
 }
 

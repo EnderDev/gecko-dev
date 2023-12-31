@@ -21,6 +21,7 @@
 #include "mozilla/MemoryChecking.h"
 #include "mozilla/Poison.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/PreferenceSheet.h"
 #include "mozilla/Printf.h"
 #include "mozilla/ProcessType.h"
 #include "mozilla/ResultExtensions.h"
@@ -119,7 +120,9 @@
 #  include "mozilla/DllPrefetchExperimentRegistryInfo.h"
 #  include "mozilla/WindowsBCryptInitialization.h"
 #  include "mozilla/WindowsDllBlocklist.h"
+#  include "mozilla/WindowsMsctfInitialization.h"
 #  include "mozilla/WindowsProcessMitigations.h"
+#  include "mozilla/WindowsVersion.h"
 #  include "mozilla/WinHeaderOnlyUtils.h"
 #  include "mozilla/mscom/ProcessRuntime.h"
 #  include "mozilla/mscom/ProfilerMarkers.h"
@@ -246,6 +249,7 @@
 #  include "mozilla/CodeCoverageHandler.h"
 #endif
 
+#include "GMPProcessChild.h"
 #include "SafeMode.h"
 
 #ifdef MOZ_BACKGROUNDTASKS
@@ -318,6 +322,11 @@ bool gRestartedByOS = false;
 
 bool gIsGtest = false;
 
+bool gKioskMode = false;
+int gKioskMonitor = -1;
+
+bool gAllowContentAnalysis = false;
+
 nsString gAbsoluteArgv0Path;
 
 #if defined(XP_WIN)
@@ -337,10 +346,6 @@ nsString gProcessStartupShortcut;
 #  endif /* MOZ_X11 */
 #endif
 #include "BinaryPath.h"
-
-#ifdef MOZ_LINKER
-extern "C" MFBT_API bool IsSignalHandlingBroken();
-#endif
 
 #ifdef FUZZING
 #  include "FuzzerRunner.h"
@@ -437,21 +442,13 @@ bool IsWaylandEnabled() {
         return true;
       }
     }
-#  ifdef EARLY_BETA_OR_EARLIER
     // Enable by default when we're running on a recent enough GTK version. We'd
     // like to check further details like compositor version and so on ideally
     // to make sure we don't enable it on old Mutter or what not, but we can't,
     // so let's assume that if the user is running on a Wayland session by
     // default we're ok, since either the distro has enabled Wayland by default,
     // or the user has gone out of their way to use Wayland.
-    //
-    // TODO(emilio): If users hit problems, we might be able to restrict it to
-    // GNOME / KDE  / known-good-desktop environments by checking
-    // XDG_CURRENT_DESKTOP or so...
     return !gtk_check_version(3, 24, 30);
-#  else
-    return false;
-#  endif
   }();
   return isWaylandEnabled;
 }
@@ -1586,15 +1583,15 @@ nsXULAppInfo::GetRestartedByOS(bool* aResult) {
 
 NS_IMETHODIMP
 nsXULAppInfo::GetChromeColorSchemeIsDark(bool* aResult) {
-  LookAndFeel::EnsureColorSchemesInitialized();
-  *aResult = LookAndFeel::ColorSchemeForChrome() == ColorScheme::Dark;
+  PreferenceSheet::EnsureInitialized();
+  *aResult = PreferenceSheet::ColorSchemeForChrome() == ColorScheme::Dark;
   return NS_OK;
 }
 
 NS_IMETHODIMP
 nsXULAppInfo::GetContentThemeDerivedColorSchemeIsDark(bool* aResult) {
   *aResult =
-      LookAndFeel::ThemeDerivedColorSchemeForContent() == ColorScheme::Dark;
+      PreferenceSheet::ThemeDerivedColorSchemeForContent() == ColorScheme::Dark;
   return NS_OK;
 }
 
@@ -1615,6 +1612,16 @@ NS_IMETHODIMP
 nsXULAppInfo::GetDesktopEnvironment(nsACString& aDesktopEnvironment) {
 #ifdef MOZ_WIDGET_GTK
   aDesktopEnvironment.Assign(GetDesktopEnvironmentIdentifier());
+#endif
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsXULAppInfo::GetIsWayland(bool* aResult) {
+#ifdef MOZ_WIDGET_GTK
+  *aResult = GdkIsWaylandDisplay();
+#else
+  *aResult = false;
 #endif
   return NS_OK;
 }
@@ -2451,7 +2458,9 @@ static void OnDefaultAgentRemoteSettingsPrefChanged(const char* aPref,
 
   nsAutoString prefVal;
   rv = Preferences::GetString(aPref, prefVal);
-  NS_ENSURE_SUCCESS_VOID(rv);
+  if (NS_FAILED(rv)) {
+    return;
+  }
 
   if (prefVal.IsEmpty()) {
     rv = regKey->RemoveValue(valueName);
@@ -3976,6 +3985,16 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
 #endif
   }
 
+  gKioskMode = CheckArg("kiosk", nullptr, CheckArgFlag::None);
+  const char* kioskMonitorNumber = nullptr;
+  if (CheckArg("kiosk-monitor", &kioskMonitorNumber, CheckArgFlag::None)) {
+    gKioskMode = true;
+    gKioskMonitor = atoi(kioskMonitorNumber);
+  }
+
+  gAllowContentAnalysis = CheckArg("allow-content-analysis", nullptr,
+                                   CheckArgFlag::RemoveArg) == ARG_FOUND;
+
   nsresult rv;
   ArgResult ar;
 
@@ -4123,11 +4142,6 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
     nsDependentCString releaseChannel(MOZ_STRINGIFY(MOZ_UPDATE_CHANNEL));
     CrashReporter::AnnotateCrashReport(
         CrashReporter::Annotation::ReleaseChannel, releaseChannel);
-#ifdef MOZ_LINKER
-    CrashReporter::AnnotateCrashReport(
-        CrashReporter::Annotation::CrashAddressLikelyWrong,
-        IsSignalHandlingBroken());
-#endif
 
 #ifdef XP_WIN
     nsAutoString appInitDLLs;
@@ -5416,8 +5430,6 @@ nsresult XREMain::XRE_mainRun() {
     mozilla::FilePreferences::InitDirectoriesAllowlist();
     mozilla::FilePreferences::InitPrefs();
 
-    OverrideDefaultLocaleIfNeeded();
-
     nsCString userAgentLocale;
     LocaleService::GetInstance()->GetAppLocaleAsBCP47(userAgentLocale);
     CrashReporter::AnnotateCrashReport(
@@ -5810,6 +5822,14 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
     DebugOnly<bool> result = WindowsBCryptInitialization();
     MOZ_ASSERT(result);
   }
+
+#  if defined(_M_IX86) || defined(_M_X64)
+  {
+    DebugOnly<bool> result = WindowsMsctfInitialization();
+    MOZ_ASSERT(result);
+  }
+#  endif  // _M_IX86 || _M_X64
+
 #endif  // defined(XP_WIN)
 
   // Once we unset the exception handler, we lose the ability to properly
@@ -5960,12 +5980,16 @@ nsresult XRE_InitCommandLine(int aArgc, char* aArgv[]) {
 #endif
 
 #if defined(MOZ_WIDGET_ANDROID)
-  nsCOMPtr<nsIFile> greOmni =
-      gAppData ? gAppData->xreDirectory : GreOmniPath(aArgc, aArgv);
-  if (!greOmni) {
-    return NS_ERROR_FAILURE;
+  // gAppData is non-null iff this is the parent process.  Otherwise,
+  // the `-greomni`/`-appomni` flags are cross-platform and handled in
+  // ContentProcess::Init.
+  if (gAppData) {
+    nsCOMPtr<nsIFile> greOmni = gAppData->xreDirectory;
+    if (!greOmni) {
+      return NS_ERROR_FAILURE;
+    }
+    mozilla::Omnijar::Init(greOmni, greOmni);
   }
-  mozilla::Omnijar::Init(greOmni, greOmni);
 #endif
 
   return rv;
@@ -6013,14 +6037,19 @@ bool XRE_UseNativeEventProcessing() {
 #  if defined(XP_WIN)
       auto upc = mozilla::ipc::UtilityProcessChild::Get();
       MOZ_ASSERT(upc);
-      // WindowsUtils is for Windows APIs, which typically require a Windows
-      // native event loop.
-      return upc->mSandbox == mozilla::ipc::SandboxingKind::WINDOWS_UTILS;
+
+      using SboxKind = mozilla::ipc::SandboxingKind;
+      // These processes are used as external hosts for accessing Windows
+      // APIs which (may) require a Windows native event loop.
+      return upc->mSandbox == SboxKind::WINDOWS_UTILS ||
+             upc->mSandbox == SboxKind::WINDOWS_FILE_DIALOG;
 #  else
       return false;
 #  endif  // defined(XP_WIN)
     }
 #endif  // defined(XP_MACOSX) || defined(XP_WIN)
+    case GeckoProcessType_GMPlugin:
+      return mozilla::gmp::GMPProcessChild::UseNativeEventProcessing();
     case GeckoProcessType_Content:
       return StaticPrefs::dom_ipc_useNativeEventProcessing_content();
     default:
@@ -6084,20 +6113,6 @@ void SetupErrorHandling(const char* progname) {
   setbuf(stdout, 0);
 }
 
-// Note: This function should not be needed anymore. See Bug 818634 for details.
-void OverrideDefaultLocaleIfNeeded() {
-  // Read pref to decide whether to override default locale with US English.
-  if (mozilla::Preferences::GetBool("javascript.use_us_english_locale",
-                                    false)) {
-    // Set the application-wide C-locale. Needed to resist fingerprinting
-    // of Date.toLocaleFormat(). We use the locale to "C.UTF-8" if possible,
-    // to avoid interfering with non-ASCII keyboard input on some Linux
-    // desktops. Otherwise fall back to the "C" locale, which is available on
-    // all platforms.
-    setlocale(LC_ALL, "C.UTF-8") || setlocale(LC_ALL, "C");
-  }
-}
-
 static bool gRunSelfAsContentProc = false;
 
 void XRE_EnableSameExecutableForContentProc() {
@@ -6114,17 +6129,27 @@ mozilla::BinPathType XRE_GetChildProcBinPathType(
     return BinPathType::PluginContainer;
   }
 
+#ifdef XP_WIN
+  // On Windows, plugin-container may or may not be used depending on
+  // the process type (e.g., actual plugins vs. content processes)
   switch (aProcessType) {
-#define GECKO_PROCESS_TYPE(enum_value, enum_name, string_name, proc_typename, \
-                           process_bin_type, procinfo_typename,               \
-                           webidl_typename, allcaps_name)                     \
-  case GeckoProcessType_##enum_name:                                          \
-    return BinPathType::process_bin_type;
-#include "mozilla/GeckoProcessTypes.h"
-#undef GECKO_PROCESS_TYPE
+#  define GECKO_PROCESS_TYPE(enum_value, enum_name, string_name,               \
+                             proc_typename, process_bin_type,                  \
+                             procinfo_typename, webidl_typename, allcaps_name) \
+    case GeckoProcessType_##enum_name:                                         \
+      return BinPathType::process_bin_type;
+#  include "mozilla/GeckoProcessTypes.h"
+#  undef GECKO_PROCESS_TYPE
     default:
       return BinPathType::PluginContainer;
   }
+#else
+  // On (non-macOS) Unix, plugin-container isn't used (except in cases
+  // like xpcshell that are handled by the gRunSelfAsContentProc check
+  // above).  It isn't necessary the way it is on other platforms, and
+  // it interferes with using the fork server.
+  return BinPathType::Self;
+#endif
 }
 
 // From mozglue/static/rust/lib.rs

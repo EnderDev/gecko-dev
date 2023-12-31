@@ -17,7 +17,8 @@
 #include "nsJSUtils.h"
 
 #include "nsDocShell.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
+#include "nsGlobalWindowOuter.h"
 #include "nsHashPropertyBag.h"
 #include "nsIBaseWindow.h"
 #include "nsIBrowserDOMWindow.h"
@@ -73,7 +74,6 @@
 #include "mozilla/dom/SessionStorageManager.h"
 #include "nsIAppWindow.h"
 #include "nsIXULBrowserWindow.h"
-#include "nsGlobalWindow.h"
 #include "ReferrerInfo.h"
 
 using namespace mozilla;
@@ -228,9 +228,7 @@ NS_IMPL_QUERY_INTERFACE(nsWindowWatcher, nsIWindowWatcher, nsIPromptFactory,
                         nsPIWindowWatcher)
 
 nsWindowWatcher::nsWindowWatcher()
-    : mEnumeratorList(),
-      mOldestWindow(nullptr),
-      mListLock("nsWindowWatcher.mListLock") {}
+    : mOldestWindow(nullptr), mListLock("nsWindowWatcher.mListLock") {}
 
 nsWindowWatcher::~nsWindowWatcher() {
   // delete data
@@ -502,9 +500,10 @@ nsWindowWatcher::OpenWindowWithRemoteTab(nsIRemoteTab* aRemoteTab,
   if (parentBC) {
     RefPtr<Element> browserElement = parentBC->Top()->GetEmbedderElement();
     if (browserElement && browserElement->GetOwnerGlobal() &&
-        browserElement->GetOwnerGlobal()->AsInnerWindow()) {
-      parentWindowOuter =
-          browserElement->GetOwnerGlobal()->AsInnerWindow()->GetOuterWindow();
+        browserElement->GetOwnerGlobal()->GetAsInnerWindow()) {
+      parentWindowOuter = browserElement->GetOwnerGlobal()
+                              ->GetAsInnerWindow()
+                              ->GetOuterWindow();
     }
 
     isFissionWindow = parentBC->UseRemoteSubframes();
@@ -1279,6 +1278,12 @@ nsresult nsWindowWatcher::OpenWindowInternal(
       loadState->SetTriggeringSandboxFlags(parentBC->GetSandboxFlags());
     }
 
+    if (parentInnerWin) {
+      loadState->SetTriggeringWindowId(parentInnerWin->WindowID());
+      loadState->SetTriggeringStorageAccess(
+          parentInnerWin->UsingStorageAccess());
+    }
+
     if (subjectPrincipal) {
       loadState->SetTriggeringPrincipal(subjectPrincipal);
     }
@@ -2016,23 +2021,11 @@ uint32_t nsWindowWatcher::CalculateChromeFlagsForSystem(
     chromeFlags |= nsIWebBrowserChrome::CHROME_MODAL |
                    nsIWebBrowserChrome::CHROME_DEPENDENT;
   }
-
-  /* On mobile we want to ignore the dialog window feature, since the mobile UI
-     does not provide any affordance for dialog windows. This does not interfere
-     with dialog windows created through openDialog. */
-  bool disableDialogFeature = false;
-  nsCOMPtr<nsIPrefBranch> branch = do_GetService(NS_PREFSERVICE_CONTRACTID);
-
-  branch->GetBoolPref("dom.disable_window_open_dialog_feature",
-                      &disableDialogFeature);
-
-  if (!disableDialogFeature) {
-    if (aFeatures.GetBoolWithDefault("dialog", false)) {
-      chromeFlags |= nsIWebBrowserChrome::CHROME_OPENAS_DIALOG;
-    }
+  if (aFeatures.GetBoolWithDefault("dialog", false)) {
+    chromeFlags |= nsIWebBrowserChrome::CHROME_OPENAS_DIALOG;
   }
 
-  /* and dialogs need to have the last word. assume dialogs are dialogs,
+  /* dialogs need to have the last word. assume dialogs are dialogs,
      and opened as chrome, unless explicitly told otherwise. */
   if (aDialog) {
     if (!aFeatures.Exists("dialog")) {
@@ -2346,14 +2339,14 @@ static void SizeOpenedWindow(nsIDocShellTreeOwner* aTreeOwner,
             winHeight = height + extraHeight;
           }
           if (winHeight > screenCssSize.height) {
-            height = screenCssSize.height - extraHeight;
+            height = static_cast<int32_t>(screenCssSize.height - extraHeight);
           }
           if (width < 100) {
             width = 100;
             winWidth = width + extraWidth;
           }
           if (winWidth > screenCssSize.width) {
-            width = screenCssSize.width - extraWidth;
+            width = static_cast<int32_t>(screenCssSize.width - extraWidth);
           }
         } else {
           int32_t targetContentWidth = 0;

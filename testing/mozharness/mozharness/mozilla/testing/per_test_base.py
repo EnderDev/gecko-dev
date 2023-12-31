@@ -13,7 +13,6 @@ import posixpath
 import sys
 
 import mozinfo
-from manifestparser import TestManifest
 
 
 class SingleTestMixin(object):
@@ -69,7 +68,10 @@ class SingleTestMixin(object):
         is_fission = "fission.autostart=true" in self.config.get("extra_prefs", [])
         tests_by_path = {}
         all_disabled = []
-        for (path, suite) in manifests:
+        #  HACK: import here so we don't need import for rest of class
+        from manifestparser import TestManifest
+
+        for path, suite in manifests:
             if os.path.exists(path):
                 man = TestManifest([path], strict=False)
                 active = man.active_tests(
@@ -120,7 +122,7 @@ class SingleTestMixin(object):
         import manifest
 
         self.reftest_test_dir = os.path.join(dirs["abs_reftest_dir"], "tests")
-        for (path, suite, subsuite) in ref_manifests:
+        for path, suite, subsuite in ref_manifests:
             if os.path.exists(path):
                 man = manifest.ReftestManifest()
                 man.load(path)
@@ -280,7 +282,7 @@ class SingleTestMixin(object):
 
             repo_tests_path = os.path.join("testing", "web-platform", extra, "tests")
             tests_path = os.path.join("tests", "web-platform", extra, "tests")
-            for (type, path, test) in man:
+            for type, path, test in man:
                 if type not in ["testharness", "reftest", "wdspec"]:
                     continue
                 repo_path = os.path.join(repo_tests_path, path)

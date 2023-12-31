@@ -16,7 +16,6 @@
 #include "mozilla/Unused.h"
 #include "mozilla/Utf8.h"  // mozilla::Utf8Unit
 
-#include "js/OffThreadScriptCompilation.h"
 #include "js/SourceText.h"
 
 #include "ModuleLoadRequest.h"
@@ -36,10 +35,14 @@ namespace JS::loader {
 NS_IMPL_CYCLE_COLLECTION(ScriptFetchOptions, mTriggeringPrincipal, mElement)
 
 ScriptFetchOptions::ScriptFetchOptions(
-    mozilla::CORSMode aCORSMode, mozilla::dom::ReferrerPolicy aReferrerPolicy,
-    nsIPrincipal* aTriggeringPrincipal, mozilla::dom::Element* aElement)
+    mozilla::CORSMode aCORSMode, const nsAString& aNonce,
+    mozilla::dom::RequestPriority aFetchPriority,
+    const ParserMetadata aParserMetadata, nsIPrincipal* aTriggeringPrincipal,
+    mozilla::dom::Element* aElement)
     : mCORSMode(aCORSMode),
-      mReferrerPolicy(aReferrerPolicy),
+      mNonce(aNonce),
+      mFetchPriority(aFetchPriority),
+      mParserMetadata(aParserMetadata),
       mTriggeringPrincipal(aTriggeringPrincipal),
       mElement(aElement) {}
 
@@ -72,20 +75,20 @@ NS_IMPL_CYCLE_COLLECTION_TRACE_BEGIN(ScriptLoadRequest)
   NS_IMPL_CYCLE_COLLECTION_TRACE_JS_MEMBER_CALLBACK(mScriptForBytecodeEncoding)
 NS_IMPL_CYCLE_COLLECTION_TRACE_END
 
-ScriptLoadRequest::ScriptLoadRequest(ScriptKind aKind, nsIURI* aURI,
-                                     ScriptFetchOptions* aFetchOptions,
-                                     const SRIMetadata& aIntegrity,
-                                     nsIURI* aReferrer,
-                                     LoadContextBase* aContext)
+ScriptLoadRequest::ScriptLoadRequest(
+    ScriptKind aKind, nsIURI* aURI,
+    mozilla::dom::ReferrerPolicy aReferrerPolicy,
+    ScriptFetchOptions* aFetchOptions, const SRIMetadata& aIntegrity,
+    nsIURI* aReferrer, LoadContextBase* aContext)
     : mKind(aKind),
       mState(State::Fetching),
       mFetchSourceOnly(false),
       mDataType(DataType::eUnknown),
+      mReferrerPolicy(aReferrerPolicy),
       mFetchOptions(aFetchOptions),
       mIntegrity(aIntegrity),
       mReferrer(aReferrer),
       mScriptTextLength(0),
-      mScriptBytecode(),
       mBytecodeOffset(0),
       mURI(aURI),
       mLoadContext(aContext),
@@ -99,7 +102,7 @@ ScriptLoadRequest::ScriptLoadRequest(ScriptKind aKind, nsIURI* aURI,
 ScriptLoadRequest::~ScriptLoadRequest() { DropJSObjects(this); }
 
 void ScriptLoadRequest::SetReady() {
-  MOZ_ASSERT(!IsReadyToRun());
+  MOZ_ASSERT(!IsFinished());
   mState = State::Ready;
 }
 
@@ -157,20 +160,6 @@ const ModuleLoadRequest* ScriptLoadRequest::AsModuleRequest() const {
 void ScriptLoadRequest::SetBytecode() {
   MOZ_ASSERT(IsUnknownDataType());
   mDataType = DataType::eBytecode;
-}
-
-bool ScriptLoadRequest::IsUTF8ParsingEnabled() {
-  if (HasLoadContext()) {
-    if (mLoadContext->IsWindowContext()) {
-      return mozilla::StaticPrefs::
-          dom_script_loader_external_scripts_utf8_parsing_enabled();
-    }
-    if (mLoadContext->IsWorkerContext()) {
-      return mozilla::StaticPrefs::
-          dom_worker_script_loader_utf8_parsing_enabled();
-    }
-  }
-  return false;
 }
 
 void ScriptLoadRequest::ClearScriptSource() {

@@ -322,10 +322,6 @@ class ContentParent final : public PContentParent,
 
   mozilla::ipc::IPCResult RecvCreateGMPService();
 
-  mozilla::ipc::IPCResult RecvRemovePermission(
-      nsIPrincipal* aPrincipal, const nsACString& aPermissionType,
-      nsresult* aRv);
-
   NS_DECL_CYCLE_COLLECTION_CLASS_AMBIGUOUS(ContentParent, nsIObserver)
 
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
@@ -408,6 +404,12 @@ class ContentParent final : public PContentParent,
 
   bool NeedsPermissionsUpdate(const nsACString& aPermissionKey) const;
 
+  // Getter for which permission keys should signal that a content
+  // process needs to know about the change of a permission with this as the
+  // secondary key, like for 3rdPartyFrameStorage^https://secondary.com
+  bool NeedsSecondaryKeyPermissionsUpdate(
+      const nsACString& aPermissionKey) const;
+
   // Manage pending load states which have been sent to this process, and are
   // expected to be used to start a load imminently.
   already_AddRefed<nsDocShellLoadState> TakePendingLoadStateForId(
@@ -461,10 +463,6 @@ class ContentParent final : public PContentParent,
 
   PRemoteSpellcheckEngineParent* AllocPRemoteSpellcheckEngineParent();
 
-  mozilla::ipc::IPCResult RecvRecordingDeviceEvents(
-      const nsAString& aRecordingStatus, const nsAString& aPageURL,
-      const bool& aIsAudio, const bool& aIsVideo);
-
   bool CycleCollectWithLogs(bool aDumpAllTraces,
                             nsICycleCollectorLogSink* aSink,
                             nsIDumpGCAndCCLogsCallback* aCallback);
@@ -508,8 +506,7 @@ class ContentParent final : public PContentParent,
 
   static void BroadcastBlobURLRegistration(
       const nsACString& aURI, BlobImpl* aBlobImpl, nsIPrincipal* aPrincipal,
-      const Maybe<nsID>& aAgentClusterId,
-      ContentParent* aIgnoreThisCP = nullptr);
+      const nsCString& aPartitionKey, ContentParent* aIgnoreThisCP = nullptr);
 
   static void BroadcastBlobURLUnregistration(
       const nsACString& aURI, nsIPrincipal* aPrincipal,
@@ -517,7 +514,7 @@ class ContentParent final : public PContentParent,
 
   mozilla::ipc::IPCResult RecvStoreAndBroadcastBlobURLRegistration(
       const nsACString& aURI, const IPCBlob& aBlob, nsIPrincipal* aPrincipal,
-      const Maybe<nsID>& aAgentCluster);
+      const nsCString& aPartitionKey);
 
   mozilla::ipc::IPCResult RecvUnstoreAndBroadcastBlobURLUnregistration(
       const nsACString& aURI, nsIPrincipal* aPrincipal);
@@ -539,13 +536,6 @@ class ContentParent final : public PContentParent,
       PURLClassifierLocalParent* aActor, nsIURI* aURI,
       nsTArray<IPCURLClassifierFeature>&& aFeatures) override;
 
-  PLoginReputationParent* AllocPLoginReputationParent(nsIURI* aURI);
-
-  virtual mozilla::ipc::IPCResult RecvPLoginReputationConstructor(
-      PLoginReputationParent* aActor, nsIURI* aURI) override;
-
-  bool DeallocPLoginReputationParent(PLoginReputationParent* aActor);
-
   PSessionStorageObserverParent* AllocPSessionStorageObserverParent();
 
   virtual mozilla::ipc::IPCResult RecvPSessionStorageObserverConstructor(
@@ -559,16 +549,16 @@ class ContentParent final : public PContentParent,
   bool DeallocPURLClassifierParent(PURLClassifierParent* aActor);
 
   // Use the PHangMonitor channel to ask the child to repaint a tab.
-  void PaintTabWhileInterruptingJS(BrowserParent* aBrowserParent,
-                                   const layers::LayersObserverEpoch& aEpoch);
+  void PaintTabWhileInterruptingJS(BrowserParent*);
 
-  void UnloadLayersWhileInterruptingJS(
-      BrowserParent* aBrowserParent, const layers::LayersObserverEpoch& aEpoch);
+  void UnloadLayersWhileInterruptingJS(BrowserParent*);
 
   void CancelContentJSExecutionIfRunning(
       BrowserParent* aBrowserParent,
       nsIRemoteTab::NavigationType aNavigationType,
       const CancelContentJSOptions& aCancelContentJSOptions);
+
+  void SetMainThreadQoSPriority(nsIThread::QoSPriority aQoSPriority);
 
   // This function is called when we are about to load a document from an
   // HTTP(S) or FTP channel for a content process.  It is a useful place
@@ -673,8 +663,7 @@ class ContentParent final : public PContentParent,
       const nsACString& aBlobURL, nsIPrincipal* pTriggeringPrincipal,
       nsIPrincipal* pLoadingPrincipal,
       const OriginAttributes& aOriginAttributes, uint64_t aInnerWindowId,
-      const Maybe<nsID>& aAgentClusterId,
-      BlobURLDataRequestResolver&& aResolver);
+      const nsCString& aPartitionKey, BlobURLDataRequestResolver&& aResolver);
 
  protected:
   bool CheckBrowsingContextEmbedder(CanonicalBrowsingContext* aBC,
@@ -940,7 +929,7 @@ class ContentParent final : public PContentParent,
   bool DeallocPScriptCacheParent(PScriptCacheParent* shell);
 
   already_AddRefed<PExternalHelperAppParent> AllocPExternalHelperAppParent(
-      nsIURI* aUri, const Maybe<mozilla::net::LoadInfoArgs>& aLoadInfoArgs,
+      nsIURI* aUri, const mozilla::net::LoadInfoArgs& aLoadInfoArgs,
       const nsACString& aMimeContentType, const nsACString& aContentDisposition,
       const uint32_t& aContentDispositionHint,
       const nsAString& aContentDispositionFilename, const bool& aForceSave,
@@ -950,8 +939,8 @@ class ContentParent final : public PContentParent,
 
   mozilla::ipc::IPCResult RecvPExternalHelperAppConstructor(
       PExternalHelperAppParent* actor, nsIURI* uri,
-      const Maybe<LoadInfoArgs>& loadInfoArgs,
-      const nsACString& aMimeContentType, const nsACString& aContentDisposition,
+      const LoadInfoArgs& loadInfoArgs, const nsACString& aMimeContentType,
+      const nsACString& aContentDisposition,
       const uint32_t& aContentDispositionHint,
       const nsAString& aContentDispositionFilename, const bool& aForceSave,
       const int64_t& aContentLength, const bool& aWasFileChannel,
@@ -998,10 +987,6 @@ class ContentParent final : public PContentParent,
                                                const int32_t& aWhichClipboard,
                                                bool* aHasType);
 
-  mozilla::ipc::IPCResult RecvClipboardHasTypesAsync(
-      nsTArray<nsCString>&& aTypes, const int32_t& aWhichClipboard,
-      ClipboardHasTypesAsyncResolver&& aResolver);
-
   mozilla::ipc::IPCResult RecvGetExternalClipboardFormats(
       const int32_t& aWhichClipboard, const bool& aPlainTextOnly,
       nsTArray<nsCString>* aTypes);
@@ -1012,10 +997,6 @@ class ContentParent final : public PContentParent,
 
   already_AddRefed<PClipboardWriteRequestParent>
   AllocPClipboardWriteRequestParent(const int32_t& aClipboardType);
-
-  mozilla::ipc::IPCResult RecvPlaySound(nsIURI* aURI);
-  mozilla::ipc::IPCResult RecvBeep();
-  mozilla::ipc::IPCResult RecvPlayEventSound(const uint32_t& aEventId);
 
   mozilla::ipc::IPCResult RecvGetIconForExtension(const nsACString& aFileExt,
                                                   const uint32_t& aIconSize,
@@ -1075,9 +1056,8 @@ class ContentParent final : public PContentParent,
       const uint64_t& aInnerWindowId, const bool& aIsFromChromeContext);
 
   mozilla::ipc::IPCResult RecvReportFrameTimingData(
-      const mozilla::Maybe<LoadInfoArgs>& loadInfoArgs,
-      const nsAString& entryName, const nsAString& initiatorType,
-      UniquePtr<PerformanceTimingData>&& aData);
+      const LoadInfoArgs& loadInfoArgs, const nsAString& entryName,
+      const nsAString& initiatorType, UniquePtr<PerformanceTimingData>&& aData);
 
   mozilla::ipc::IPCResult RecvScriptErrorWithStack(
       const nsAString& aMessage, const nsAString& aSourceName,
@@ -1597,6 +1577,7 @@ class ContentParent final : public PContentParent,
   nsRefPtrHashtable<nsIDHashKey, GetFilesHelper> mGetFilesPendingRequests;
 
   nsTHashSet<nsCString> mActivePermissionKeys;
+  nsTHashSet<nsCString> mActiveSecondaryPermissionKeys;
 
   nsTArray<nsCString> mBlobURLs;
 
@@ -1714,8 +1695,6 @@ const nsDependentCSubstring RemoteTypePrefix(
 bool IsWebRemoteType(const nsACString& aContentProcessType);
 
 bool IsWebCoopCoepRemoteType(const nsACString& aContentProcessType);
-
-bool IsPrivilegedMozillaRemoteType(const nsACString& aContentProcessType);
 
 bool IsExtensionRemoteType(const nsACString& aContentProcessType);
 

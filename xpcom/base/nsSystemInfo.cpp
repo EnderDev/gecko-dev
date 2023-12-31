@@ -15,6 +15,7 @@
 #include "mozilla/LazyIdleThread.h"
 #include "mozilla/LookAndFeel.h"
 #include "mozilla/Sprintf.h"
+#include "mozilla/Try.h"
 #include "jsapi.h"
 #include "js/PropertyAndElement.h"  // JS_SetProperty
 #include "mozilla/dom/Promise.h"
@@ -930,7 +931,7 @@ nsresult CollectProcessInfo(ProcessInfo& info) {
   return NS_OK;
 }
 
-#if defined(XP_WIN) && (_WIN32_WINNT < 0x0A00)
+#if defined(__MINGW32__)
 WINBASEAPI
 BOOL WINAPI IsUserCetAvailableInEnvironment(_In_ DWORD UserCetEnvironment);
 
@@ -1057,6 +1058,13 @@ nsresult nsSystemInfo::Init() {
   bool hasUserCET = isUserCetAvailable &&
                     isUserCetAvailable(USER_CET_ENVIRONMENT_WIN32_PROCESS);
   rv = SetPropertyAsBool(u"hasUserCET"_ns, hasUserCET);
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    return rv;
+  }
+
+  nsString pointerExplanation;
+  widget::WinUtils::GetPointerExplanation(&pointerExplanation);
+  rv = SetPropertyAsAString(u"pointingDevices"_ns, pointerExplanation);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     return rv;
   }

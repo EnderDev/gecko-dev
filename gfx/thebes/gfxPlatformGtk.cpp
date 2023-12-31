@@ -101,7 +101,13 @@ static bool IsX11EGLEnvvarEnabled() {
 
 gfxPlatformGtk::gfxPlatformGtk() {
   if (!gfxPlatform::IsHeadless()) {
-    gtk_init(nullptr, nullptr);
+    if (!gtk_init_check(nullptr, nullptr)) {
+      gfxCriticalNote << "Failed to init Gtk, missing display? DISPLAY="
+                      << getenv("DISPLAY")
+                      << " WAYLAND_DISPLAY=" << getenv("WAYLAND_DISPLAY")
+                      << "\n";
+      abort();
+    }
   }
 
   mIsX11Display = gfxPlatform::IsHeadless() ? false : GdkIsX11Display();
@@ -187,10 +193,6 @@ void gfxPlatformGtk::InitDmabufConfig() {
   FeatureState& feature = gfxConfig::GetFeature(Feature::DMABUF);
   feature.EnableByDefault();
 
-  if (StaticPrefs::widget_dmabuf_force_enabled_AtStartup()) {
-    feature.UserForceEnable("Force enabled by pref");
-  }
-
   nsCString failureId;
   int32_t status;
   nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
@@ -203,16 +205,28 @@ void gfxPlatformGtk::InitDmabufConfig() {
                     failureId);
   }
 
+  if (StaticPrefs::widget_dmabuf_force_enabled_AtStartup()) {
+    feature.UserForceEnable("Force enabled by pref");
+  } else if (!StaticPrefs::widget_dmabuf_enabled_AtStartup()) {
+    feature.UserDisable("Force disable by pref",
+                        "FEATURE_FAILURE_USER_FORCE_DISABLED"_ns);
+  }
+
   if (!gfxVars::UseEGL()) {
     feature.ForceDisable(FeatureStatus::Unavailable, "Requires EGL",
                          "FEATURE_FAILURE_REQUIRES_EGL"_ns);
   }
 
-  if (feature.IsEnabled()) {
-    nsAutoCString drmRenderDevice;
-    gfxInfo->GetDrmRenderDevice(drmRenderDevice);
-    gfxVars::SetDrmRenderDevice(drmRenderDevice);
+  if (!gfxVars::WebglUseHardware()) {
+    feature.Disable(FeatureStatus::Blocklisted,
+                    "DMABuf disabled with software rendering", failureId);
+  }
 
+  nsAutoCString drmRenderDevice;
+  gfxInfo->GetDrmRenderDevice(drmRenderDevice);
+  gfxVars::SetDrmRenderDevice(drmRenderDevice);
+
+  if (feature.IsEnabled()) {
     if (!GetDMABufDevice()->IsEnabled(failureId)) {
       feature.ForceDisable(FeatureStatus::Failed, "Failed to configure",
                            failureId);
@@ -991,7 +1005,8 @@ gfxPlatformGtk::CreateGlobalHardwareVsyncSource() {
   // gl::sGLXLibrary.SupportsVideoSync() when EGL is used as NVIDIA drivers
   // refuse to use EGL GL context when GLX was initialized first and fail
   // silently.
-  if (gfxConfig::IsEnabled(Feature::HW_COMPOSITING) && !isXwayland &&
+  if (StaticPrefs::gfx_x11_glx_sgi_video_sync_AtStartup() &&
+      gfxConfig::IsEnabled(Feature::HW_COMPOSITING) && !isXwayland &&
       (!gfxVars::UseEGL() || isMesa) &&
       gl::sGLXLibrary.SupportsVideoSync(DefaultXDisplay())) {
     RefPtr<GtkVsyncSource> vsyncSource = new GtkVsyncSource();
@@ -1014,3 +1029,9 @@ void gfxPlatformGtk::BuildContentDeviceData(ContentDeviceData* aOut) {
 
   aOut->cmsOutputProfileData() = GetPlatformCMSOutputProfileData();
 }
+
+// Wrapper for third party code (WebRTC for instance) where
+// gfxVars can't be included.
+namespace mozilla::gfx {
+bool IsDMABufEnabled() { return gfxVars::UseDMABuf(); }
+}  // namespace mozilla::gfx

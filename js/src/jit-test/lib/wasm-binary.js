@@ -45,12 +45,13 @@ const V128Code         = 0x7b;
 const AnyFuncCode      = 0x70;
 const ExternRefCode    = 0x6f;
 const EqRefCode        = 0x6d;
-const OptRefCode       = 0x6c; // (ref null $t), needs heap type immediate
-const RefCode          = 0x6b; // (ref $t), needs heap type immediate
+const OptRefCode       = 0x63; // (ref null $t), needs heap type immediate
+const RefCode          = 0x64; // (ref $t), needs heap type immediate
 const FuncCode         = 0x60;
 const StructCode       = 0x5f;
 const ArrayCode        = 0x5e;
 const VoidCode         = 0x40;
+const BadType          = 0x79; // reserved for testing
 
 // Opcodes
 const UnreachableCode  = 0x00
@@ -63,6 +64,9 @@ const EndCode          = 0x0b;
 const ReturnCode       = 0x0f;
 const CallCode         = 0x10;
 const CallIndirectCode = 0x11;
+const ReturnCallCode   = 0x12;
+const ReturnCallIndirectCode = 0x13;
+const ReturnCallRefCode      = 0x15;
 const DelegateCode     = 0x18;
 const DropCode         = 0x1a;
 const SelectCode       = 0x1b;
@@ -119,21 +123,6 @@ const RefFuncCode      = 0xd2;
 // SIMD opcodes
 const V128LoadCode = 0x00;
 const V128StoreCode = 0x0b;
-const I32x4DotSI16x8Code = 0xba;
-const F32x4CeilCode = 0xd8;
-const F32x4FloorCode = 0xd9;
-const F32x4TruncCode = 0xda;
-const F32x4NearestCode = 0xdb;
-const F64x2CeilCode = 0xdc;
-const F64x2FloorCode = 0xdd;
-const F64x2TruncCode = 0xde;
-const F64x2NearestCode = 0xdf;
-const F32x4PMinCode = 0xea;
-const F32x4PMaxCode = 0xeb;
-const F64x2PMinCode = 0xf6;
-const F64x2PMaxCode = 0xf7;
-const V128Load32ZeroCode = 0xfc;
-const V128Load64ZeroCode = 0xfd;
 
 // Relaxed SIMD opcodes.
 const I8x16RelaxedSwizzleCode = 0x100;
@@ -173,7 +162,10 @@ const definedOpcodes =
      ...(wasmExceptionsEnabled() ? [0x06, 0x07, 0x08, 0x09] : []),
      0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
      0x10, 0x11,
+     ...(wasmTailCallsEnabled() ? [0x12, 0x13] : []),
      ...(wasmFunctionReferencesEnabled() ? [0x14] : []),
+     ...(wasmTailCallsEnabled() &&
+         wasmFunctionReferencesEnabled() ? [0x15] : []),
      ...(wasmExceptionsEnabled() ? [0x18, 0x19] : []),
      0x1a, 0x1b, 0x1c,
      0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,
@@ -260,8 +252,8 @@ function varU32(u32) {
 }
 
 function varS32(s32) {
-    assertEq(s32 >= -Math.pow(2,31), true);
-    assertEq(s32 < Math.pow(2,31), true);
+    assertEq(s32 >= -Math.pow(2,31), true, `varS32 input must be number between -2^31 and 2^31-1, got ${s32}`);
+    assertEq(s32 < Math.pow(2,31), true, `varS32 input must be number between -2^31 and 2^31-1, got ${s32}`);
     var bytes = [];
     do {
         var byte = s32 & 0x7f;
@@ -444,14 +436,16 @@ function _fieldType(input) {
  */
 function _encodeType(typeObj) {
     const typeBytes = [];
+    // Types are now final by default.
+    const final = typeObj.final ?? true;
     if (typeObj.sub !== undefined) {
-        // TODO: This should default to true once final types are actually supported.
-        const final = typeObj.final ?? false;
-        if (final) {
-            throw new Error("We do not support final types yet. If final types are in fact supported, remove this exception and default final to true :)");
-        }
         typeBytes.push(final ? 0x4e : 0x50);
         typeBytes.push(...varU32(1), ...varU32(typeObj.sub));
+    }
+    else if (final == false) {
+        // This type is extensible even if no supertype is defined.
+        typeBytes.push(0x50);
+        typeBytes.push(0x00);
     }
     typeBytes.push(typeObj.kind);
     switch (typeObj.kind) {

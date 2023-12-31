@@ -47,6 +47,7 @@
 #include "mozilla/dom/XMLHttpRequestEventTarget.h"
 #include "mozilla/dom/XMLHttpRequestString.h"
 #include "mozilla/Encoding.h"
+#include "nsBaseChannel.h"
 
 #ifdef Status
 /* Xlib headers insist on this for some reason... Nuke it because
@@ -333,7 +334,7 @@ class XMLHttpRequestMainThread final : public XMLHttpRequest,
   void Abort() {
     IgnoredErrorResult rv;
     AbortInternal(rv);
-    MOZ_ASSERT(!rv.Failed());
+    MOZ_ASSERT(!rv.Failed() || rv.ErrorCodeIs(NS_ERROR_DOM_ABORT_ERR));
   }
 
   virtual void Abort(ErrorResult& aRv) override;
@@ -409,6 +410,8 @@ class XMLHttpRequestMainThread final : public XMLHttpRequest,
 
   void SetSource(UniquePtr<ProfileChunkedBuffer> aSource);
 
+  nsresult ErrorDetail() const { return mErrorLoadDetail; }
+
   virtual uint16_t ErrorCode() const override {
     return static_cast<uint16_t>(mErrorLoad);
   }
@@ -474,6 +477,9 @@ class XMLHttpRequestMainThread final : public XMLHttpRequest,
   // set to "text/xml".
   void EnsureChannelContentType();
 
+  // Gets the value of the final content-type header from the channel.
+  bool GetContentType(nsACString& aValue) const;
+
   already_AddRefed<nsIHttpChannel> GetCurrentHttpChannel();
   already_AddRefed<nsIJARChannel> GetCurrentJARChannel();
 
@@ -505,6 +511,9 @@ class XMLHttpRequestMainThread final : public XMLHttpRequest,
   void ResumeEventDispatching();
 
   void AbortInternal(ErrorResult& aRv);
+
+  Maybe<nsBaseChannel::ContentRange> GetRequestedContentRange() const;
+  void GetContentRangeHeader(nsACString&) const;
 
   struct PendingEvent {
     RefPtr<DOMEventTargetHelper> mTarget;
@@ -680,6 +689,7 @@ class XMLHttpRequestMainThread final : public XMLHttpRequest,
   nsCOMPtr<nsITimer> mTimeoutTimer;
   void StartTimeoutTimer();
   void HandleTimeoutCallback();
+  void CancelTimeoutTimer();
 
   nsCOMPtr<nsIRunnable> mResumeTimeoutRunnable;
 
@@ -692,6 +702,7 @@ class XMLHttpRequestMainThread final : public XMLHttpRequest,
   void CancelSyncTimeoutTimer();
 
   ErrorType mErrorLoad;
+  nsresult mErrorLoadDetail;
   bool mErrorParsingXML;
   bool mWaitingForOnStopRequest;
   bool mProgressTimerIsActive;
@@ -715,9 +726,9 @@ class XMLHttpRequestMainThread final : public XMLHttpRequest,
   /**
    * Close the XMLHttpRequest's channels.
    */
-  void CloseRequest();
+  void CloseRequest(nsresult detail);
 
-  void TerminateOngoingFetch();
+  void TerminateOngoingFetch(nsresult detail);
 
   /**
    * Close the XMLHttpRequest's channels and dispatch appropriate progress

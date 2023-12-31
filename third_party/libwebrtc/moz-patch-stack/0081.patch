@@ -1,34 +1,33 @@
-From: Andreas Pehrson <apehrson@mozilla.com>
-Date: Fri, 24 Feb 2023 15:01:00 +0100
-Subject: Bug 1817024 - (fix-0e2cf6cc01) Skip library
- create_peer_connection_quality_test_frame_generator. r?mjf!
+From: Nico Grunbaum <na-g@nostrum.com>
+Date: Thu, 22 Jun 2023 16:23:00 +0000
+Subject: Bug 1837918 - libwebrtc update broke the build on
+ OpenBSD;r=mjf,webrtc-reviewers
 
-Differential Revision: https://phabricator.services.mozilla.com/D170887
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/fbbc1bf963fda30bca26ae6aac0c3459b8ebea6f
+Differential Revision: https://phabricator.services.mozilla.com/D181791
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/2a6a838b7021bb285f9485c2ceda6ba2543e0d6f
 ---
- api/BUILD.gn | 2 ++
- 1 file changed, 2 insertions(+)
+ modules/video_capture/video_capture_options.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
 
-diff --git a/api/BUILD.gn b/api/BUILD.gn
-index 0ed8a0c3ec..654359ed37 100644
---- a/api/BUILD.gn
-+++ b/api/BUILD.gn
-@@ -702,6 +702,7 @@ rtc_library("create_frame_generator") {
-   absl_deps = [ "//third_party/abseil-cpp/absl/types:optional" ]
- }
+diff --git a/modules/video_capture/video_capture_options.h b/modules/video_capture/video_capture_options.h
+index 6f72f7927e..37965305d9 100644
+--- a/modules/video_capture/video_capture_options.h
++++ b/modules/video_capture/video_capture_options.h
+@@ -55,7 +55,7 @@ class RTC_EXPORT VideoCaptureOptions {
  
-+if (!build_with_mozilla) {
- rtc_library("create_peer_connection_quality_test_frame_generator") {
-   visibility = [ "*" ]
-   testonly = true
-@@ -718,6 +719,7 @@ rtc_library("create_peer_connection_quality_test_frame_generator") {
-   ]
-   absl_deps = [ "//third_party/abseil-cpp/absl/types:optional" ]
- }
-+}
+   void Init(Callback* callback);
  
- rtc_source_set("libjingle_logging_api") {
-   visibility = [ "*" ]
--- 
-2.34.1
-
+-#if defined(WEBRTC_LINUX)
++#if defined(WEBRTC_LINUX) || defined(WEBRTC_BSD)
+   bool allow_v4l2() const { return allow_v4l2_; }
+   void set_allow_v4l2(bool allow) { allow_v4l2_ = allow; }
+ #endif
+@@ -68,7 +68,7 @@ class RTC_EXPORT VideoCaptureOptions {
+ #endif
+ 
+  private:
+-#if defined(WEBRTC_LINUX)
++#if defined(WEBRTC_LINUX) || defined(WEBRTC_BSD)
+   bool allow_v4l2_ = false;
+ #endif
+ #if defined(WEBRTC_USE_PIPEWIRE)

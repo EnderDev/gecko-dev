@@ -17,13 +17,13 @@ RESPONSE_COMPLETED_EVENT = "network.responseCompleted"
 
 
 @pytest.mark.asyncio
-async def test_subscribe_status(bidi_session, top_context, wait_for_event, url, fetch):
-    await bidi_session.session.subscribe(events=[RESPONSE_COMPLETED_EVENT])
+async def test_subscribe_status(bidi_session, subscribe_events, top_context, wait_for_event, url, fetch):
+    await subscribe_events(events=[RESPONSE_COMPLETED_EVENT])
 
     # Track all received network.responseCompleted events in the events array
     events = []
 
-    async def on_event(_, data):
+    async def on_event(method, data):
         events.append(data)
 
     remove_listener = bidi_session.add_event_listener(
@@ -97,7 +97,7 @@ async def test_load_page_twice(
     events = network_events[RESPONSE_COMPLETED_EVENT]
 
     on_response_completed = wait_for_event(RESPONSE_COMPLETED_EVENT)
-    await bidi_session.browsing_context.navigate(
+    result = await bidi_session.browsing_context.navigate(
         context=top_context["context"],
         url=html_url,
         wait="complete",
@@ -118,13 +118,14 @@ async def test_load_page_twice(
         events[0],
         expected_request=expected_request,
         expected_response=expected_response,
+        navigation=result["navigation"],
         redirect_count=0,
     )
 
 
 @pytest.mark.parametrize(
     "status, status_text",
-    HTTP_STATUS_AND_STATUS_TEXT,
+    [(status, text) for (status, text) in HTTP_STATUS_AND_STATUS_TEXT if status not in [101, 407]],
 )
 @pytest.mark.asyncio
 async def test_response_status(
@@ -153,15 +154,14 @@ async def test_response_status(
     }
     assert_response_event(
         events[0],
+        expected_request=expected_request,
         expected_response=expected_response,
         redirect_count=0,
     )
 
 
 @pytest.mark.asyncio
-async def test_response_headers(
-    wait_for_event, url, fetch, setup_network_test
-):
+async def test_response_headers(wait_for_event, url, fetch, setup_network_test):
     headers_url = url(
         "/webdriver/tests/support/http_handlers/headers.py?header=foo:bar&header=baz:biz"
     )
@@ -183,14 +183,15 @@ async def test_response_headers(
         "status": 200,
         "statusText": "OK",
         "headers": (
-            {"name": "foo", "value": "bar"},
-            {"name": "baz", "value": "biz"},
+            {"name": "foo", "value": {"type": "string", "value": "bar"}},
+            {"name": "baz", "value": {"type": "string", "value": "biz"}},
         ),
         "protocol": "http/1.1",
     }
     assert_response_event(
         events[0],
         expected_request=expected_request,
+        expected_response=expected_response,
         redirect_count=0,
     )
 
@@ -207,7 +208,7 @@ async def test_response_headers(
 )
 @pytest.mark.asyncio
 async def test_response_mime_type_file(
-     url, wait_for_event, fetch, setup_network_test, page_url, mime_type
+    url, wait_for_event, fetch, setup_network_test, page_url, mime_type
 ):
     network_events = await setup_network_test(events=[RESPONSE_COMPLETED_EVENT])
     events = network_events[RESPONSE_COMPLETED_EVENT]
@@ -285,7 +286,7 @@ async def test_redirect_document(
         protocol=protocol,
         parameters=parameters,
     )
-    await bidi_session.browsing_context.navigate(
+    first_navigate = await bidi_session.browsing_context.navigate(
         context=new_tab["context"],
         url=initial_url,
         wait="complete",
@@ -296,7 +297,7 @@ async def test_redirect_document(
     redirect_url = url(
         f"/webdriver/tests/support/http_handlers/redirect.py?location={quote(initial_url)}"
     )
-    await bidi_session.browsing_context.navigate(
+    second_navigate = await bidi_session.browsing_context.navigate(
         context=new_tab["context"],
         url=redirect_url,
         wait="complete",
@@ -311,15 +312,24 @@ async def test_redirect_document(
 
     expected_request = {"method": "GET", "url": initial_url}
     assert_response_event(
-        events[0], expected_request=expected_request, redirect_count=0
+        events[0],
+        expected_request=expected_request,
+        redirect_count=0,
+        navigation=first_navigate["navigation"],
     )
     expected_request = {"method": "GET", "url": redirect_url}
     assert_response_event(
-        events[1], expected_request=expected_request, redirect_count=0
+        events[1],
+        expected_request=expected_request,
+        redirect_count=0,
+        navigation=second_navigate["navigation"],
     )
     expected_request = {"method": "GET", "url": initial_url}
     assert_response_event(
-        events[2], expected_request=expected_request, redirect_count=1
+        events[2],
+        expected_request=expected_request,
+        redirect_count=1,
+        navigation=second_navigate["navigation"],
     )
 
     # Check that the last 2 requests share the same request id

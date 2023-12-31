@@ -18,11 +18,13 @@ import type {Readable} from 'stream';
 
 import type {Protocol} from 'devtools-protocol';
 
+import {map, NEVER, Observable, timer} from '../../third_party/rxjs/rxjs.js';
 import type {ElementHandle} from '../api/ElementHandle.js';
 import type {JSHandle} from '../api/JSHandle.js';
 import {Page} from '../api/Page.js';
 import {isNode} from '../environment.js';
 import {assert} from '../util/assert.js';
+import {Deferred} from '../util/Deferred.js';
 import {isErrorLike} from '../util/ErrorLike.js';
 
 import type {CDPSession} from './Connection.js';
@@ -30,8 +32,9 @@ import {debug} from './Debug.js';
 import {CDPElementHandle} from './ElementHandle.js';
 import {TimeoutError} from './Errors.js';
 import type {CommonEventEmitter} from './EventEmitter.js';
-import type {ExecutionContext} from './ExecutionContext.js';
+import {IsolatedWorld} from './IsolatedWorld.js';
 import {CDPJSHandle} from './JSHandle.js';
+import {Awaitable} from './types.js';
 
 /**
  * @internal
@@ -41,29 +44,218 @@ export const debugError = debug('puppeteer:error');
 /**
  * @internal
  */
-export function getExceptionMessage(
-  exceptionDetails: Protocol.Runtime.ExceptionDetails
-): string {
-  if (exceptionDetails.exception) {
-    return (
-      exceptionDetails.exception.description || exceptionDetails.exception.value
-    );
+export function createEvaluationError(
+  details: Protocol.Runtime.ExceptionDetails
+): unknown {
+  let name: string;
+  let message: string;
+  if (!details.exception) {
+    name = 'Error';
+    message = details.text;
+  } else if (
+    (details.exception.type !== 'object' ||
+      details.exception.subtype !== 'error') &&
+    !details.exception.objectId
+  ) {
+    return valueFromRemoteObject(details.exception);
+  } else {
+    const detail = getErrorDetails(details);
+    name = detail.name;
+    message = detail.message;
   }
-  let message = exceptionDetails.text;
-  if (exceptionDetails.stackTrace) {
-    for (const callframe of exceptionDetails.stackTrace.callFrames) {
-      const location =
-        callframe.url +
-        ':' +
-        callframe.lineNumber +
-        ':' +
-        callframe.columnNumber;
-      const functionName = callframe.functionName || '<anonymous>';
-      message += `\n    at ${functionName} (${location})`;
+  const messageHeight = message.split('\n').length;
+  const error = new Error(message);
+  error.name = name;
+  const stackLines = error.stack!.split('\n');
+  const messageLines = stackLines.splice(0, messageHeight);
+
+  // The first line is this function which we ignore.
+  stackLines.shift();
+  if (details.stackTrace && stackLines.length < Error.stackTraceLimit) {
+    for (const frame of details.stackTrace.callFrames.reverse()) {
+      if (
+        PuppeteerURL.isPuppeteerURL(frame.url) &&
+        frame.url !== PuppeteerURL.INTERNAL_URL
+      ) {
+        const url = PuppeteerURL.parse(frame.url);
+        stackLines.unshift(
+          `    at ${frame.functionName || url.functionName} (${
+            url.functionName
+          } at ${url.siteString}, <anonymous>:${frame.lineNumber}:${
+            frame.columnNumber
+          })`
+        );
+      } else {
+        stackLines.push(
+          `    at ${frame.functionName || '<anonymous>'} (${frame.url}:${
+            frame.lineNumber
+          }:${frame.columnNumber})`
+        );
+      }
+      if (stackLines.length >= Error.stackTraceLimit) {
+        break;
+      }
     }
   }
-  return message;
+
+  error.stack = [...messageLines, ...stackLines].join('\n');
+  return error;
 }
+
+/**
+ * @internal
+ */
+export function createClientError(
+  details: Protocol.Runtime.ExceptionDetails
+): unknown {
+  let name: string;
+  let message: string;
+  if (!details.exception) {
+    name = 'Error';
+    message = details.text;
+  } else if (
+    (details.exception.type !== 'object' ||
+      details.exception.subtype !== 'error') &&
+    !details.exception.objectId
+  ) {
+    return valueFromRemoteObject(details.exception);
+  } else {
+    const detail = getErrorDetails(details);
+    name = detail.name;
+    message = detail.message;
+  }
+  const messageHeight = message.split('\n').length;
+  const error = new Error(message);
+  error.name = name;
+
+  const stackLines = [];
+  const messageLines = error.stack!.split('\n').splice(0, messageHeight);
+  if (details.stackTrace && stackLines.length < Error.stackTraceLimit) {
+    for (const frame of details.stackTrace.callFrames.reverse()) {
+      stackLines.push(
+        `    at ${frame.functionName || '<anonymous>'} (${frame.url}:${
+          frame.lineNumber
+        }:${frame.columnNumber})`
+      );
+      if (stackLines.length >= Error.stackTraceLimit) {
+        break;
+      }
+    }
+  }
+
+  error.stack = [...messageLines, ...stackLines].join('\n');
+  return error;
+}
+
+const getErrorDetails = (details: Protocol.Runtime.ExceptionDetails) => {
+  let name = '';
+  let message: string;
+  const lines = details.exception?.description?.split('\n    at ') ?? [];
+  const size = Math.min(
+    details.stackTrace?.callFrames.length ?? 0,
+    lines.length - 1
+  );
+  lines.splice(-size, size);
+  if (details.exception?.className) {
+    name = details.exception.className;
+  }
+  message = lines.join('\n');
+  if (name && message.startsWith(`${name}: `)) {
+    message = message.slice(name.length + 2);
+  }
+  return {message, name};
+};
+
+/**
+ * @internal
+ */
+const SOURCE_URL = Symbol('Source URL for Puppeteer evaluation scripts');
+
+/**
+ * @internal
+ */
+export class PuppeteerURL {
+  static INTERNAL_URL = 'pptr:internal';
+
+  static fromCallSite(
+    functionName: string,
+    site: NodeJS.CallSite
+  ): PuppeteerURL {
+    const url = new PuppeteerURL();
+    url.#functionName = functionName;
+    url.#siteString = site.toString();
+    return url;
+  }
+
+  static parse = (url: string): PuppeteerURL => {
+    url = url.slice('pptr:'.length);
+    const [functionName = '', siteString = ''] = url.split(';');
+    const puppeteerUrl = new PuppeteerURL();
+    puppeteerUrl.#functionName = functionName;
+    puppeteerUrl.#siteString = decodeURIComponent(siteString);
+    return puppeteerUrl;
+  };
+
+  static isPuppeteerURL = (url: string): boolean => {
+    return url.startsWith('pptr:');
+  };
+
+  #functionName!: string;
+  #siteString!: string;
+
+  get functionName(): string {
+    return this.#functionName;
+  }
+
+  get siteString(): string {
+    return this.#siteString;
+  }
+
+  toString(): string {
+    return `pptr:${[
+      this.#functionName,
+      encodeURIComponent(this.#siteString),
+    ].join(';')}`;
+  }
+}
+
+/**
+ * @internal
+ */
+export const withSourcePuppeteerURLIfNone = <T extends NonNullable<unknown>>(
+  functionName: string,
+  object: T
+): T => {
+  if (Object.prototype.hasOwnProperty.call(object, SOURCE_URL)) {
+    return object;
+  }
+  const original = Error.prepareStackTrace;
+  Error.prepareStackTrace = (_, stack) => {
+    // First element is the function. Second element is the caller of this
+    // function. Third element is the caller of the caller of this function
+    // which is precisely what we want.
+    return stack[2];
+  };
+  const site = new Error().stack as unknown as NodeJS.CallSite;
+  Error.prepareStackTrace = original;
+  return Object.assign(object, {
+    [SOURCE_URL]: PuppeteerURL.fromCallSite(functionName, site),
+  });
+};
+
+/**
+ * @internal
+ */
+export const getSourcePuppeteerURLIfAvailable = <
+  T extends NonNullable<unknown>,
+>(
+  object: T
+): PuppeteerURL | undefined => {
+  if (Object.prototype.hasOwnProperty.call(object, SOURCE_URL)) {
+    return object[SOURCE_URL as keyof T] as PuppeteerURL;
+  }
+  return undefined;
+};
 
 /**
  * @internal
@@ -192,62 +384,45 @@ export const isDate = (obj: unknown): obj is Date => {
 export async function waitForEvent<T>(
   emitter: CommonEventEmitter,
   eventName: string | symbol,
-  predicate: (event: T) => Promise<boolean> | boolean,
+  predicate: (event: T) => Awaitable<boolean>,
   timeout: number,
-  abortPromise: Promise<Error>
+  abortPromise: Promise<Error> | Deferred<Error>
 ): Promise<T> {
-  let eventTimeout: NodeJS.Timeout;
-  let resolveCallback: (value: T | PromiseLike<T>) => void;
-  let rejectCallback: (value: Error) => void;
-  const promise = new Promise<T>((resolve, reject) => {
-    resolveCallback = resolve;
-    rejectCallback = reject;
+  const deferred = Deferred.create<T>({
+    message: `Timeout exceeded while waiting for event ${String(eventName)}`,
+    timeout,
   });
   const listener = addEventListener(emitter, eventName, async event => {
-    if (!(await predicate(event))) {
-      return;
+    if (await predicate(event)) {
+      deferred.resolve(event);
     }
-    resolveCallback(event);
   });
-  if (timeout) {
-    eventTimeout = setTimeout(() => {
-      rejectCallback(
-        new TimeoutError('Timeout exceeded while waiting for event')
-      );
-    }, timeout);
-  }
-  function cleanup(): void {
-    removeEventListeners([listener]);
-    clearTimeout(eventTimeout);
-  }
-  const result = await Promise.race([promise, abortPromise]).then(
-    r => {
-      cleanup();
-      return r;
-    },
-    error => {
-      cleanup();
-      throw error;
-    }
-  );
-  if (isErrorLike(result)) {
-    throw result;
-  }
 
-  return result;
+  try {
+    const response = await Deferred.race<T | Error>([deferred, abortPromise]);
+    if (isErrorLike(response)) {
+      throw response;
+    }
+
+    return response;
+  } catch (error) {
+    throw error;
+  } finally {
+    removeEventListeners([listener]);
+  }
 }
 
 /**
  * @internal
  */
-export function createJSHandle(
-  context: ExecutionContext,
+export function createCdpHandle(
+  realm: IsolatedWorld,
   remoteObject: Protocol.Runtime.RemoteObject
 ): JSHandle | ElementHandle<Node> {
-  if (remoteObject.subtype === 'node' && context._world) {
-    return new CDPElementHandle(context, remoteObject, context._world.frame());
+  if (remoteObject.subtype === 'node') {
+    return new CDPElementHandle(realm, remoteObject);
   }
-  return new CDPJSHandle(context, remoteObject);
+  return new CDPJSHandle(realm, remoteObject);
 }
 
 /**
@@ -336,26 +511,12 @@ export async function waitWithTimeout<T>(
   taskName: string,
   timeout: number
 ): Promise<T> {
-  let reject: (reason?: Error) => void;
-  const timeoutError = new TimeoutError(
-    `waiting for ${taskName} failed: timeout ${timeout}ms exceeded`
-  );
-  const timeoutPromise = new Promise<never>((_, rej) => {
-    return (reject = rej);
+  const deferred = Deferred.create<never>({
+    message: `waiting for ${taskName} failed: timeout ${timeout}ms exceeded`,
+    timeout,
   });
-  let timeoutTimer = null;
-  if (timeout) {
-    timeoutTimer = setTimeout(() => {
-      return reject(timeoutError);
-    }, timeout);
-  }
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timeoutTimer) {
-      clearTimeout(timeoutTimer);
-    }
-  }
+
+  return await Deferred.race([promise, deferred]);
 }
 
 /**
@@ -464,9 +625,101 @@ export async function setPageContent(
 ): Promise<void> {
   // We rely upon the fact that document.open() will reset frame lifecycle with "init"
   // lifecycle event. @see https://crrev.com/608658
-  return page.evaluate(html => {
+  return await page.evaluate(html => {
     document.open();
     document.write(html);
     document.close();
   }, content);
+}
+
+/**
+ * @internal
+ */
+export function getPageContent(): string {
+  let content = '';
+  for (const node of document.childNodes) {
+    switch (node) {
+      case document.documentElement:
+        content += document.documentElement.outerHTML;
+        break;
+      default:
+        content += new XMLSerializer().serializeToString(node);
+        break;
+    }
+  }
+
+  return content;
+}
+
+/**
+ * @internal
+ */
+export function validateDialogType(
+  type: string
+): 'alert' | 'confirm' | 'prompt' | 'beforeunload' {
+  let dialogType = null;
+  const validDialogTypes = new Set([
+    'alert',
+    'confirm',
+    'prompt',
+    'beforeunload',
+  ]);
+
+  if (validDialogTypes.has(type)) {
+    dialogType = type;
+  }
+  assert(dialogType, `Unknown javascript dialog type: ${type}`);
+  return dialogType as 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+}
+
+/**
+ * @internal
+ */
+export class Mutex {
+  static Guard = class Guard {
+    #mutex: Mutex;
+    constructor(mutex: Mutex) {
+      this.#mutex = mutex;
+    }
+    [Symbol.dispose](): void {
+      return this.#mutex.release();
+    }
+  };
+
+  #locked = false;
+  #acquirers: Array<() => void> = [];
+
+  // This is FIFO.
+  async acquire(): Promise<InstanceType<typeof Mutex.Guard>> {
+    if (!this.#locked) {
+      this.#locked = true;
+      return new Mutex.Guard(this);
+    }
+    const deferred = Deferred.create<void>();
+    this.#acquirers.push(deferred.resolve.bind(deferred));
+    await deferred.valueOrThrow();
+    return new Mutex.Guard(this);
+  }
+
+  release(): void {
+    const resolve = this.#acquirers.shift();
+    if (!resolve) {
+      this.#locked = false;
+      return;
+    }
+    resolve();
+  }
+}
+
+/**
+ * @internal
+ */
+export function timeout(ms: number): Observable<never> {
+  return ms === 0
+    ? NEVER
+    : timer(ms).pipe(
+        map(() => {
+          throw new TimeoutError(`Timed out after waiting ${ms}ms`);
+        })
+      );
 }

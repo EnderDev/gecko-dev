@@ -15,7 +15,7 @@
 
 #include "gc/GC.h"
 #include "gc/PublicIterators.h"
-#include "jit/JitRealm.h"
+#include "jit/JitZone.h"
 #include "js/HeapAPI.h"
 #include "js/Value.h"
 #include "util/DifferentialTesting.h"
@@ -98,11 +98,8 @@ void js::ReleaseAllJITCode(JS::GCContext* gcx) {
 
   for (ZonesIter zone(gcx->runtime(), SkipAtoms); !zone.done(); zone.next()) {
     zone->forceDiscardJitCode(gcx);
-  }
-
-  for (RealmsIter realm(gcx->runtime()); !realm.done(); realm.next()) {
-    if (jit::JitRealm* jitRealm = realm->jitRealm()) {
-      jitRealm->discardStubs();
+    if (jit::JitZone* jitZone = zone->jitZone()) {
+      jitZone->discardStubs();
     }
   }
 }
@@ -160,10 +157,13 @@ JS::AutoAssertNoGC::AutoAssertNoGC(JSContext* maybecx) {
   }
 }
 
-JS::AutoAssertNoGC::~AutoAssertNoGC() {
+JS::AutoAssertNoGC::~AutoAssertNoGC() { reset(); }
+
+void JS::AutoAssertNoGC::reset() {
   if (cx_) {
     MOZ_ASSERT(cx_->inUnsafeRegion > 0);
     cx_->inUnsafeRegion--;
+    cx_ = nullptr;
   }
 }
 
@@ -417,10 +417,14 @@ JS_PUBLIC_API JS::DoCycleCollectionCallback JS::SetDoCycleCollectionCallback(
   return cx->runtime()->gc.setDoCycleCollectionCallback(callback);
 }
 
-JS_PUBLIC_API JS::GCNurseryCollectionCallback
-JS::SetGCNurseryCollectionCallback(JSContext* cx,
-                                   GCNurseryCollectionCallback callback) {
-  return cx->runtime()->gc.setNurseryCollectionCallback(callback);
+JS_PUBLIC_API bool JS::AddGCNurseryCollectionCallback(
+    JSContext* cx, GCNurseryCollectionCallback callback, void* data) {
+  return cx->runtime()->gc.addNurseryCollectionCallback(callback, data);
+}
+
+JS_PUBLIC_API void JS::RemoveGCNurseryCollectionCallback(
+    JSContext* cx, GCNurseryCollectionCallback callback, void* data) {
+  return cx->runtime()->gc.removeNurseryCollectionCallback(callback, data);
 }
 
 JS_PUBLIC_API void JS::SetLowMemoryState(JSContext* cx, bool newState) {
@@ -795,4 +799,33 @@ JS_PUBLIC_API void js::gc::SetPerformanceHint(JSContext* cx,
   MOZ_ASSERT(!JS::RuntimeHeapIsCollecting());
 
   cx->runtime()->gc.setPerformanceHint(hint);
+}
+
+AutoSelectGCHeap::AutoSelectGCHeap(JSContext* cx,
+                                   size_t allowedNurseryCollections)
+    : cx_(cx), allowedNurseryCollections_(allowedNurseryCollections) {
+  JS::AddGCNurseryCollectionCallback(cx, &NurseryCollectionCallback, this);
+}
+
+AutoSelectGCHeap::~AutoSelectGCHeap() {
+  JS::RemoveGCNurseryCollectionCallback(cx_, &NurseryCollectionCallback, this);
+}
+
+/* static */
+void AutoSelectGCHeap::NurseryCollectionCallback(JSContext* cx,
+                                                 JS::GCNurseryProgress progress,
+                                                 JS::GCReason reason,
+                                                 void* data) {
+  if (progress == JS::GCNurseryProgress::GC_NURSERY_COLLECTION_END) {
+    static_cast<AutoSelectGCHeap*>(data)->onNurseryCollectionEnd();
+  }
+}
+
+void AutoSelectGCHeap::onNurseryCollectionEnd() {
+  if (allowedNurseryCollections_ != 0) {
+    allowedNurseryCollections_--;
+    return;
+  }
+
+  heap_ = gc::Heap::Tenured;
 }

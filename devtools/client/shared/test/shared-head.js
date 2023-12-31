@@ -580,7 +580,7 @@ async function navigateTo(
   if (uri === browser.currentURI.spec) {
     gBrowser.reloadTab(gBrowser.getTabForBrowser(browser));
   } else {
-    BrowserTestUtils.loadURIString(browser, uri);
+    BrowserTestUtils.startLoadingURIString(browser, uri);
   }
 
   if (waitForLoad) {
@@ -656,7 +656,7 @@ async function _watchForToolboxReload(
 ) {
   const tab = gBrowser.getTabForBrowser(browser);
 
-  const toolbox = await gDevTools.getToolboxForTab(tab);
+  const toolbox = gDevTools.getToolboxForTab(tab);
 
   if (!toolbox) {
     // No toolbox to wait for
@@ -957,8 +957,8 @@ async function openInspectorForURL(url, hostType) {
   return { tab, inspector, toolbox, highlighterTestFront };
 }
 
-async function getActiveInspector() {
-  const toolbox = await gDevTools.getToolboxForTab(gBrowser.selectedTab);
+function getActiveInspector() {
+  const toolbox = gDevTools.getToolboxForTab(gBrowser.selectedTab);
   return toolbox.getPanel("inspector");
 }
 
@@ -1177,10 +1177,8 @@ function loadHelperScript(filePath) {
 async function openToolboxForTab(tab, toolId, hostType) {
   info("Opening the toolbox");
 
-  let toolbox;
-
   // Check if the toolbox is already loaded.
-  toolbox = await gDevTools.getToolboxForTab(tab);
+  let toolbox = gDevTools.getToolboxForTab(tab);
   if (toolbox) {
     if (!toolId || (toolId && toolbox.getPanel(toolId))) {
       info("Toolbox is already opened");
@@ -1387,8 +1385,8 @@ function isWindows() {
  * @returns {HttpServer}
  */
 function createTestHTTPServer() {
-  const { HttpServer } = ChromeUtils.import(
-    "resource://testing-common/httpd.js"
+  const { HttpServer } = ChromeUtils.importESModule(
+    "resource://testing-common/httpd.sys.mjs"
   );
   const server = new HttpServer();
 
@@ -2208,4 +2206,25 @@ function logCssCompatDataPropertiesWithoutMDNUrl() {
     }
   }
   walk(cssPropertiesCompatData);
+}
+
+/**
+ * Craft a CssProperties instance without involving RDP for tests
+ * manually spawning OutputParser, CssCompleter, Editor...
+ *
+ * Otherwise this should instead be fetched from CssPropertiesFront.
+ *
+ * @return {CssProperties}
+ */
+function getClientCssProperties() {
+  const {
+    generateCssProperties,
+  } = require("resource://devtools/server/actors/css-properties.js");
+  const {
+    CssProperties,
+    normalizeCssData,
+  } = require("resource://devtools/client/fronts/css-properties.js");
+  return new CssProperties(
+    normalizeCssData({ properties: generateCssProperties() })
+  );
 }

@@ -477,7 +477,7 @@ impl NestedParseResult {
         lazy_static! {
             static ref AMPERSAND: SelectorList<SelectorImpl> = {
                 let list = SelectorList::ampersand();
-                list.0
+                list.slice()
                     .iter()
                     .for_each(|selector| selector.mark_as_intentionally_leaked());
                 list
@@ -501,15 +501,6 @@ impl NestedParseResult {
 }
 
 impl<'a, 'i> NestedRuleParser<'a, 'i> {
-    /// When nesting is disabled, we prevent parsing at rules and qualified rules inside style
-    /// rules.
-    fn allow_at_and_qualified_rules(&self) -> bool {
-        if !self.in_style_rule() {
-            return true;
-        }
-        static_prefs::pref!("layout.css.nesting.enabled")
-    }
-
     #[inline]
     fn in_style_rule(&self) -> bool {
         self.context.rule_types.contains(CssRuleType::Style)
@@ -581,7 +572,7 @@ impl<'a, 'i> NestedRuleParser<'a, 'i> {
         use cssparser::ToCss;
         debug_assert!(self.context.error_reporting_enabled());
         self.error_reporting_state.push(selectors.clone());
-        'selector_loop: for selector in selectors.0.iter() {
+        'selector_loop: for selector in selectors.slice().iter() {
             let mut current = selector.iter();
             loop {
                 let mut found_host = false;
@@ -622,9 +613,6 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
         name: CowRcStr<'i>,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::Prelude, ParseError<'i>> {
-        if self.in_style_rule() && !static_prefs::pref!("layout.css.nesting.enabled") {
-            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
-        }
         Ok(match_ignore_ascii_case! { &*name,
             "media" => {
                 let media_queries = MediaList::parse(&self.context, input);
@@ -786,13 +774,13 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                 })))
             },
             AtRulePrelude::Property(name) => self.nest_for_rule(CssRuleType::Property, |p| {
-                CssRule::Property(Arc::new(parse_property_block(
+                let rule_data = parse_property_block(
                     &p.context,
                     input,
                     name,
-                    start.source_location(),
-                )))
-            }),
+                    start.source_location())?;
+                Ok::<CssRule, ParseError<'i>>(CssRule::Property(Arc::new(rule_data)))
+            })?,
             AtRulePrelude::Document(condition) => {
                 if !cfg!(feature = "gecko") {
                     unreachable!()
@@ -934,9 +922,7 @@ impl<'a, 'i> DeclarationParser<'i> for NestedRuleParser<'a, 'i> {
 }
 
 impl<'a, 'i> RuleBodyItemParser<'i, (), StyleParseErrorKind<'i>> for NestedRuleParser<'a, 'i> {
-    fn parse_qualified(&self) -> bool {
-        self.allow_at_and_qualified_rules()
-    }
+    fn parse_qualified(&self) -> bool { true }
 
     /// If nesting is disabled, we can't get there for a non-style-rule. If it's enabled, we parse
     /// raw declarations there.

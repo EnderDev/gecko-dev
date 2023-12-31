@@ -26,6 +26,7 @@
 #include "mozilla/AnimationTarget.h"
 #include "mozilla/AsyncEventDispatcher.h"
 #include "mozilla/CORSMode.h"
+#include "mozilla/Components.h"
 #include "mozilla/ComputedStyle.h"
 #include "mozilla/ContentEvents.h"
 #include "mozilla/DebugOnly.h"
@@ -61,6 +62,7 @@
 #include "mozilla/StaticPrefs_full_screen_api.h"
 #include "mozilla/TextControlElement.h"
 #include "mozilla/TextEvents.h"
+#include "mozilla/Try.h"
 #include "mozilla/TypedEnumBits.h"
 #include "mozilla/Unused.h"
 #include "mozilla/dom/AnimatableBinding.h"
@@ -231,7 +233,7 @@ ASSERT_NODE_SIZE(HTMLParagraphElement, 128, 80);
 ASSERT_NODE_SIZE(HTMLPreElement, 128, 80);
 ASSERT_NODE_SIZE(HTMLSpanElement, 128, 80);
 ASSERT_NODE_SIZE(HTMLTableCellElement, 128, 80);
-ASSERT_NODE_SIZE(Text, 120, 64);
+ASSERT_NODE_SIZE(Text, 120, 80);
 
 #undef ASSERT_NODE_SIZE
 #undef EXTRA_DOM_NODE_BYTES
@@ -355,40 +357,11 @@ Element::QueryInterface(REFNSIID aIID, void** aInstancePtr) {
   return NS_NOINTERFACE;
 }
 
-ElementState Element::IntrinsicState() const {
-  return IsEditable() ? ElementState::READWRITE : ElementState::READONLY;
-}
-
 void Element::NotifyStateChange(ElementState aStates) {
-  if (aStates.IsEmpty()) {
-    return;
-  }
-
+  MOZ_ASSERT(!aStates.IsEmpty());
   if (Document* doc = GetComposedDoc()) {
     nsAutoScriptBlocker scriptBlocker;
     doc->ElementStateChanged(this, aStates);
-  }
-}
-
-void Element::UpdateLinkState(ElementState aState) {
-  MOZ_ASSERT(!aState.HasAtLeastOneOfStates(~ElementState::VISITED_OR_UNVISITED),
-             "Unexpected link state bits");
-  mState = (mState & ~ElementState::VISITED_OR_UNVISITED) | aState;
-}
-
-void Element::UpdateState(bool aNotify) {
-  ElementState oldState = mState;
-  mState =
-      IntrinsicState() | (oldState & ElementState::EXTERNALLY_MANAGED_STATES);
-  if (aNotify) {
-    ElementState changedStates = oldState ^ mState;
-    if (!changedStates.IsEmpty()) {
-      Document* doc = GetComposedDoc();
-      if (doc) {
-        nsAutoScriptBlocker scriptBlocker;
-        doc->ElementStateChanged(this, changedStates);
-      }
-    }
   }
 }
 
@@ -421,20 +394,26 @@ namespace mozilla::dom {
 
 void Element::UpdateEditableState(bool aNotify) {
   nsIContent::UpdateEditableState(aNotify);
-  if (aNotify) {
-    UpdateState(aNotify);
+  UpdateReadOnlyState(aNotify);
+}
+
+bool Element::IsReadOnlyInternal() const { return !IsEditable(); }
+
+void Element::UpdateReadOnlyState(bool aNotify) {
+  auto oldState = State();
+  if (IsReadOnlyInternal()) {
+    RemoveStatesSilently(ElementState::READWRITE);
+    AddStatesSilently(ElementState::READONLY);
   } else {
-    // Avoid calling UpdateState in this very common case, because
-    // this gets called for pretty much every single element on
-    // insertion into the document and UpdateState can be slow for
-    // some kinds of elements even when not notifying.
-    if (IsEditable()) {
-      RemoveStatesSilently(ElementState::READONLY);
-      AddStatesSilently(ElementState::READWRITE);
-    } else {
-      RemoveStatesSilently(ElementState::READWRITE);
-      AddStatesSilently(ElementState::READONLY);
-    }
+    RemoveStatesSilently(ElementState::READONLY);
+    AddStatesSilently(ElementState::READWRITE);
+  }
+  if (!aNotify) {
+    return;
+  }
+  const auto newState = State();
+  if (newState != oldState) {
+    NotifyStateChange(newState ^ oldState);
   }
 }
 
@@ -833,10 +812,12 @@ void Element::Scroll(const ScrollToOptions& aOptions) {
   if (sf) {
     CSSIntPoint scrollPos = sf->GetScrollPositionCSSPixels();
     if (aOptions.mLeft.WasPassed()) {
-      scrollPos.x = mozilla::ToZeroIfNonfinite(aOptions.mLeft.Value());
+      scrollPos.x = static_cast<int32_t>(
+          mozilla::ToZeroIfNonfinite(aOptions.mLeft.Value()));
     }
     if (aOptions.mTop.WasPassed()) {
-      scrollPos.y = mozilla::ToZeroIfNonfinite(aOptions.mTop.Value());
+      scrollPos.y = static_cast<int32_t>(
+          mozilla::ToZeroIfNonfinite(aOptions.mTop.Value()));
     }
     Scroll(scrollPos, aOptions);
   }
@@ -863,10 +844,12 @@ void Element::ScrollBy(const ScrollToOptions& aOptions) {
   if (sf) {
     CSSIntPoint scrollDelta;
     if (aOptions.mLeft.WasPassed()) {
-      scrollDelta.x = mozilla::ToZeroIfNonfinite(aOptions.mLeft.Value());
+      scrollDelta.x = static_cast<int32_t>(
+          mozilla::ToZeroIfNonfinite(aOptions.mLeft.Value()));
     }
     if (aOptions.mTop.WasPassed()) {
-      scrollDelta.y = mozilla::ToZeroIfNonfinite(aOptions.mTop.Value());
+      scrollDelta.y = static_cast<int32_t>(
+          mozilla::ToZeroIfNonfinite(aOptions.mTop.Value()));
     }
 
     ScrollMode scrollMode = sf->IsSmoothScroll(aOptions.mBehavior)
@@ -1120,6 +1103,30 @@ already_AddRefed<DOMRectList> Element::GetClientRects() {
   return rectList.forget();
 }
 
+// https://html.spec.whatwg.org/multipage/urls-and-fetching.html#lazy-loading-attribute
+static constexpr nsAttrValue::EnumTable kLoadingTable[] = {
+    {"eager", Element::Loading::Eager},
+    {"lazy", Element::Loading::Lazy},
+    {nullptr, 0}};
+
+void Element::GetLoading(nsAString& aValue) const {
+  GetEnumAttr(nsGkAtoms::loading, kLoadingTable[0].tag, aValue);
+}
+
+bool Element::ParseLoadingAttribute(const nsAString& aValue,
+                                    nsAttrValue& aResult) {
+  return aResult.ParseEnumValue(aValue, kLoadingTable,
+                                /* aCaseSensitive = */ false, kLoadingTable);
+}
+
+Element::Loading Element::LoadingState() const {
+  const nsAttrValue* val = mAttrs.GetAttr(nsGkAtoms::loading);
+  if (!val) {
+    return Loading::Eager;
+  }
+  return static_cast<Loading>(val->GetEnumValue());
+}
+
 //----------------------------------------------------------------------
 
 void Element::AddToIdTable(nsAtom* aId) {
@@ -1197,7 +1204,7 @@ bool Element::CanAttachShadowDOM() const {
    * If context object's local name is not
    *    a valid custom element name, "article", "aside", "blockquote",
    *    "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
-   *    "header", "main" "nav", "p", "section", or "span",
+   *    "header", "main" "nav", "p", "section", "search", or "span",
    *  return false.
    */
   nsAtom* nameAtom = NodeInfo()->NameAtom();
@@ -1211,7 +1218,8 @@ bool Element::CanAttachShadowDOM() const {
         nameAtom == nsGkAtoms::h5 || nameAtom == nsGkAtoms::h6 ||
         nameAtom == nsGkAtoms::header || nameAtom == nsGkAtoms::main ||
         nameAtom == nsGkAtoms::nav || nameAtom == nsGkAtoms::p ||
-        nameAtom == nsGkAtoms::section || nameAtom == nsGkAtoms::span)) {
+        nameAtom == nsGkAtoms::section || nameAtom == nsGkAtoms::search ||
+        nameAtom == nsGkAtoms::span)) {
     return false;
   }
 
@@ -2446,10 +2454,11 @@ bool Element::OnlyNotifySameValueSet(int32_t aNamespaceID, nsAtom* aName,
   return true;
 }
 
-nsresult Element::SetSingleClassFromParser(nsAtom* aSingleClassName) {
+nsresult Element::SetClassAttrFromParser(nsAtom* aValue) {
   // Keep this in sync with SetAttr and SetParsedAttr below.
 
-  nsAttrValue value(aSingleClassName);
+  nsAttrValue value;
+  value.ParseAtomArray(aValue);
 
   Document* document = GetComposedDoc();
   mozAutoDocUpdate updateBatch(document, false);
@@ -2637,7 +2646,7 @@ nsresult Element::SetAttrAndNotify(
       nsNameSpaceManager::GetInstance()->GetNameSpaceURI(aNamespaceID, ns);
 
       LifecycleCallbackArgs args;
-      aName->ToString(args.mName);
+      args.mName = aName;
       if (aModType == MutationEvent_Binding::ADDITION) {
         args.mOldValue = VoidString();
       } else {
@@ -2666,8 +2675,6 @@ nsresult Element::SetAttrAndNotify(
                    aNotify);
     }
   }
-
-  UpdateState(aNotify);
 
   if (aNotify) {
     // Don't pass aOldValue to AttributeChanged since it may not be reliable.
@@ -2703,6 +2710,10 @@ nsresult Element::SetAttrAndNotify(
   }
 
   return NS_OK;
+}
+
+void Element::TryReserveAttributeCount(uint32_t aAttributeCount) {
+  (void)mAttrs.GrowTo(aAttributeCount);
 }
 
 bool Element::ParseAttribute(int32_t aNamespaceID, nsAtom* aAttribute,
@@ -2821,7 +2832,7 @@ void Element::OnAttrSetButNotChanged(int32_t aNamespaceID, nsAtom* aName,
 
       nsAutoString value(aValue.String());
       LifecycleCallbackArgs args;
-      aName->ToString(args.mName);
+      args.mName = aName;
       args.mOldValue = value;
       args.mNewValue = value;
       args.mNamespaceURI = ns.IsEmpty() ? VoidString() : ns;
@@ -2839,18 +2850,24 @@ EventListenerManager* Element::GetEventListenerManagerForAttr(nsAtom* aAttrName,
 }
 
 bool Element::GetAttr(const nsAtom* aName, nsAString& aResult) const {
-  DOMString str;
-  bool haveAttr = GetAttr(aName, str);
-  str.ToString(aResult);
-  return haveAttr;
+  const nsAttrValue* val = mAttrs.GetAttr(aName);
+  if (!val) {
+    aResult.Truncate();
+    return false;
+  }
+  val->ToString(aResult);
+  return true;
 }
 
 bool Element::GetAttr(int32_t aNameSpaceID, const nsAtom* aName,
                       nsAString& aResult) const {
-  DOMString str;
-  bool haveAttr = GetAttr(aNameSpaceID, aName, str);
-  str.ToString(aResult);
-  return haveAttr;
+  const nsAttrValue* val = mAttrs.GetAttr(aName, aNameSpaceID);
+  if (!val) {
+    aResult.Truncate();
+    return false;
+  }
+  val->ToString(aResult);
+  return true;
 }
 
 int32_t Element::FindAttrValueIn(int32_t aNameSpaceID, const nsAtom* aName,
@@ -2930,7 +2947,7 @@ nsresult Element::UnsetAttr(int32_t aNameSpaceID, nsAtom* aName, bool aNotify) {
       nsAutoString ns;
       nsNameSpaceManager::GetInstance()->GetNameSpaceURI(aNameSpaceID, ns);
       LifecycleCallbackArgs args;
-      aName->ToString(args.mName);
+      args.mName = aName;
       oldValue.ToString(args.mOldValue);
       args.mNewValue = VoidString();
       args.mNamespaceURI = ns.IsEmpty() ? VoidString() : ns;
@@ -2940,8 +2957,6 @@ nsresult Element::UnsetAttr(int32_t aNameSpaceID, nsAtom* aName, bool aNotify) {
   }
 
   AfterSetAttr(aNameSpaceID, aName, nullptr, &oldValue, nullptr, aNotify);
-
-  UpdateState(aNotify);
 
   if (aNotify) {
     // We can always pass oldValue here since there is no new value which could
@@ -3015,6 +3030,8 @@ void Element::List(FILE* out, int32_t aIndent, const nsCString& aPrefix) const {
   fprintf(out, " state=[%llx]",
           static_cast<unsigned long long>(State().GetInternalValue()));
   fprintf(out, " flags=[%08x]", static_cast<unsigned int>(GetFlags()));
+  fprintf(out, " selectorflags=[%08x]",
+          static_cast<unsigned int>(GetSelectorFlags()));
   if (IsClosestCommonInclusiveAncestorForRangeInSelection()) {
     const LinkedList<AbstractRange>* ranges =
         GetExistingClosestCommonInclusiveAncestorRanges();
@@ -3199,7 +3216,7 @@ void Element::DispatchChromeOnlyLinkClickEvent(
       /* Cancelable */ true, nsGlobalWindowInner::Cast(doc->GetInnerWindow()),
       0, mouseEvent->CtrlKey(), mouseEvent->AltKey(), mouseEvent->ShiftKey(),
       mouseEvent->MetaKey(), mouseEvent->Button(), mouseDOMEvent,
-      mouseEvent->MozInputSource(), IgnoreErrors());
+      mouseEvent->InputSource(), IgnoreErrors());
   // Note: we're always trusted, but the event we pass as the `sourceEvent`
   // might not be. Frontend code will check that event's trusted property to
   // make that determination; doing it this way means we don't also start
@@ -3272,10 +3289,11 @@ nsresult Element::PostHandleEventForLinks(EventChainPostVisitor& aVisitor) {
         // connection to be sure we have one ready when we open the channel.
         if (nsIDocShell* shell = OwnerDoc()->GetDocShell()) {
           if (nsCOMPtr<nsIURI> absURI = GetHrefURI()) {
-            nsCOMPtr<nsISpeculativeConnect> sc =
-                do_QueryInterface(nsContentUtils::GetIOService());
-            nsCOMPtr<nsIInterfaceRequestor> ir = do_QueryInterface(shell);
-            sc->SpeculativeConnect(absURI, NodePrincipal(), ir, false);
+            if (nsCOMPtr<nsISpeculativeConnect> sc =
+                    mozilla::components::IO::Service()) {
+              nsCOMPtr<nsIInterfaceRequestor> ir = do_QueryInterface(shell);
+              sc->SpeculativeConnect(absURI, NodePrincipal(), ir, false);
+            }
           }
         }
       }
@@ -3286,16 +3304,32 @@ nsresult Element::PostHandleEventForLinks(EventChainPostVisitor& aVisitor) {
       if (mouseEvent->IsLeftClickEvent()) {
         if (!mouseEvent->IsControl() && !mouseEvent->IsMeta() &&
             !mouseEvent->IsAlt() && !mouseEvent->IsShift()) {
-          // The default action is simply to dispatch DOMActivate
-          nsEventStatus status = nsEventStatus_eIgnore;
-          // DOMActivate event should be trusted since the activation is
-          // actually occurred even if the cause is an untrusted click event.
-          InternalUIEvent actEvent(true, eLegacyDOMActivate, mouseEvent);
-          actEvent.mDetail = 1;
-
-          rv = EventDispatcher::Dispatch(this, aVisitor.mPresContext, &actEvent,
-                                         nullptr, &status);
-          if (NS_SUCCEEDED(rv)) {
+          if (OwnerDoc()->MayHaveDOMActivateListeners()) {
+            // The default action is simply to dispatch DOMActivate.
+            // But dispatch that only if needed.
+            nsEventStatus status = nsEventStatus_eIgnore;
+            // DOMActivate event should be trusted since the activation is
+            // actually occurred even if the cause is an untrusted click event.
+            InternalUIEvent actEvent(true, eLegacyDOMActivate, mouseEvent);
+            actEvent.mDetail = 1;
+            rv = EventDispatcher::Dispatch(this, aVisitor.mPresContext,
+                                           &actEvent, nullptr, &status);
+            if (NS_SUCCEEDED(rv)) {
+              aVisitor.mEventStatus = nsEventStatus_eConsumeNoDefault;
+            }
+          } else {
+            if (nsCOMPtr<nsIURI> absURI = GetHrefURI()) {
+              // If you modify this code, tweak also the code handling
+              // eLegacyDOMActivate.
+              nsAutoString target;
+              GetLinkTarget(target);
+              nsContentUtils::TriggerLink(this, absURI, target,
+                                          /* click */ true,
+                                          mouseEvent->IsTrusted());
+            }
+            // Since we didn't dispatch DOMActivate because there were no
+            // listeners, do still set mEventStatus as if it was dispatched
+            // successfully.
             aVisitor.mEventStatus = nsEventStatus_eConsumeNoDefault;
           }
         }
@@ -3309,6 +3343,8 @@ nsresult Element::PostHandleEventForLinks(EventChainPostVisitor& aVisitor) {
       break;
     }
     case eLegacyDOMActivate: {
+      // If you modify this code, tweak also the code handling
+      // eMouseClick.
       if (aVisitor.mEvent->mOriginalTarget == this) {
         if (nsCOMPtr<nsIURI> absURI = GetHrefURI()) {
           nsAutoString target;
@@ -4272,7 +4308,7 @@ bool Element::IsPopoverOpen() const {
   return htmlElement && htmlElement->PopoverOpen();
 }
 
-Element* Element::GetTopmostPopoverAncestor() const {
+Element* Element::GetTopmostPopoverAncestor(const Element* aInvoker) const {
   const Element* newPopover = this;
 
   nsTHashMap<nsPtrHashKey<const Element>, size_t> popoverPositions;
@@ -4304,10 +4340,7 @@ Element* Element::GetTopmostPopoverAncestor() const {
   };
 
   checkAncestor(newPopover->GetFlattenedTreeParentElement());
-
-  // https://github.com/whatwg/html/issues/9160
-  RefPtr<Element> invoker = newPopover->GetPopoverData()->GetInvoker();
-  checkAncestor(invoker);
+  checkAncestor(aInvoker);
 
   return topmostPopoverAncestor;
 }
@@ -4366,6 +4399,12 @@ void Element::SetCustomElementData(UniquePtr<CustomElementData> aData) {
   }
 #endif
   slots->mCustomElementData = std::move(aData);
+}
+
+nsTArray<RefPtr<nsAtom>>& Element::EnsureCustomStates() {
+  MOZ_ASSERT(IsHTMLElement());
+  nsExtendedDOMSlots* slots = ExtendedDOMSlots();
+  return slots->mCustomStates;
 }
 
 CustomElementDefinition* Element::GetCustomElementDefinition() const {

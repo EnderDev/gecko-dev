@@ -47,6 +47,7 @@
 #include "nsContentUtils.h"
 #include "nsScriptError.h"
 #include "nsJSUtils.h"
+#include "nsRFPService.h"
 #include "prsystem.h"
 
 #include "xpcprivate.h"
@@ -195,7 +196,7 @@ void xpc::ErrorBase::Init(JSErrorBase* aReport) {
 
   mSourceId = aReport->sourceId;
   mLineNumber = aReport->lineno;
-  mColumn = aReport->column;
+  mColumn = aReport->column.oneOriginValue();
 }
 
 void xpc::ErrorNote::Init(JSErrorNotes::Note* aNote) {
@@ -482,23 +483,27 @@ JSObject* CreateGlobalObject(JSContext* cx, const JSClass* clasp,
 }
 
 void InitGlobalObjectOptions(JS::RealmOptions& aOptions,
-                             bool aIsSystemPrincipal, bool aForceUTC,
-                             bool aAlwaysUseFdlibm) {
-  bool shouldDiscardSystemSource = ShouldDiscardSystemSource();
-
+                             bool aIsSystemPrincipal, bool aSecureContext,
+                             bool aForceUTC, bool aAlwaysUseFdlibm,
+                             bool aLocaleEnUS) {
   if (aIsSystemPrincipal) {
     // Make toSource functions [ChromeOnly]
     aOptions.creationOptions().setToSourceEnabled(true);
     // Make sure [SecureContext] APIs are visible:
     aOptions.creationOptions().setSecureContext(true);
     aOptions.behaviors().setClampAndJitterTime(false);
+    aOptions.behaviors().setDiscardSource(ShouldDiscardSystemSource());
+    MOZ_ASSERT(aSecureContext,
+               "aIsSystemPrincipal should imply aSecureContext");
+  } else {
+    aOptions.creationOptions().setSecureContext(aSecureContext);
   }
 
   aOptions.creationOptions().setForceUTC(aForceUTC);
   aOptions.creationOptions().setAlwaysUseFdlibm(aAlwaysUseFdlibm);
-
-  if (shouldDiscardSystemSource) {
-    aOptions.behaviors().setDiscardSource(aIsSystemPrincipal);
+  if (aLocaleEnUS) {
+    nsCString locale = nsRFPService::GetSpoofedJSLocale();
+    aOptions.creationOptions().setLocaleCopyZ(locale.get());
   }
 }
 
@@ -547,8 +552,14 @@ nsresult InitClassesWithNewWrappedGlobal(JSContext* aJSContext,
   // If this changes, ShouldRFP needs to be updated accordingly.
   MOZ_RELEASE_ASSERT(aPrincipal->IsSystemPrincipal());
 
+  // Similarly we can thus hardcode the RTPCallerType.
+  aOptions.behaviors().setReduceTimerPrecisionCallerType(
+      RTPCallerTypeToToken(RTPCallerType::SystemPrincipal));
+
   InitGlobalObjectOptions(aOptions, /* aSystemPrincipal */ true,
-                          /* aForceUTC */ false, /* aAlwaysUseFdlibm */ false);
+                          /* aSecureContext */ true,
+                          /* aForceUTC */ false, /* aAlwaysUseFdlibm */ false,
+                          /* aLocaleEnUS */ false);
 
   // Call into XPCWrappedNative to make a new global object, scope, and global
   // prototype.
@@ -620,7 +631,7 @@ nsCString GetFunctionName(JSContext* cx, HandleObject obj) {
     return GetFunctionName(cx, vobj);
   }
 
-  RootedString funName(cx, JS_GetFunctionDisplayId(fun));
+  RootedString funName(cx, JS_GetMaybePartialFunctionDisplayId(fun));
   RootedScript script(cx, JS_GetFunctionScript(cx, fun));
   const char* filename = script ? JS_GetScriptFilename(script) : "anonymous";
   const char* filenameSuffix = strrchr(filename, '/');

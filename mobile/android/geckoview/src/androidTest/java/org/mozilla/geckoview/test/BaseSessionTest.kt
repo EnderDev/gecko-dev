@@ -20,13 +20,18 @@ import org.junit.rules.RuleChain
 import org.mozilla.geckoview.GeckoRuntimeSettings
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule
+import org.mozilla.geckoview.test.util.TestServer
 import kotlin.reflect.KClass
 
 /**
  * Common base class for tests using GeckoSessionTestRule,
  * providing the test rule and other utilities.
  */
-open class BaseSessionTest(noErrorCollector: Boolean = false) {
+open class BaseSessionTest(
+    noErrorCollector: Boolean = false,
+    serverCustomHeaders: Map<String, String>? = null,
+    responseModifiers: Map<String, TestServer.ResponseModifier>? = null,
+) {
     companion object {
         const val RESUBMIT_CONFIRM = "/assets/www/resubmit.html"
         const val BEFORE_UNLOAD = "/assets/www/beforeunload.html"
@@ -49,7 +54,7 @@ open class BaseSessionTest(noErrorCollector: Boolean = false) {
         const val FORMS_ID_VALUE_HTML_PATH = "/assets/www/forms_id_value.html"
         const val CC_FORM_HTML_PATH = "/assets/www/cc_form.html"
         const val FEDCM_RP_HTML_PATH = "/assets/www/fedcm_rp.html"
-        const val FEDCM_IDP_MANIFEST_PATH = "/assets/www/fedcm_ipd_manifest.json"
+        const val FEDCM_IDP_MANIFEST_PATH = "/assets/www/fedcm_idp_manifest.json"
         const val HELLO_HTML_PATH = "/assets/www/hello.html"
         const val HELLO2_HTML_PATH = "/assets/www/hello2.html"
         const val HELLO_IFRAME_HTML_PATH = "/assets/www/iframe_hello.html"
@@ -128,14 +133,17 @@ open class BaseSessionTest(noErrorCollector: Boolean = false) {
         const val COLOR_ORANGE_BACKGROUND_HTML_PATH = "/assets/www/color_orange_background.html"
         const val TRACEMONKEY_PDF_PATH = "/assets/www/tracemonkey.pdf"
         const val HELLO_PDF_WORLD_PDF_PATH = "/assets/www/helloPDFWorld.pdf"
+        const val ORANGE_PDF_PATH = "/assets/www/orange.pdf"
         const val NO_META_VIEWPORT_HTML_PATH = "/assets/www/no-meta-viewport.html"
+        const val TRANSLATIONS_EN = "/assets/www/translations-tester-en.html"
+        const val TRANSLATIONS_ES = "/assets/www/translations-tester-es.html"
 
         const val TEST_ENDPOINT = GeckoSessionTestRule.TEST_ENDPOINT
         const val TEST_HOST = GeckoSessionTestRule.TEST_HOST
         const val TEST_PORT = GeckoSessionTestRule.TEST_PORT
     }
 
-    val sessionRule = GeckoSessionTestRule()
+    val sessionRule = GeckoSessionTestRule(serverCustomHeaders, responseModifiers)
 
     // Override this to include more `evaluate` rules in the chain
     @get:Rule
@@ -270,6 +278,11 @@ open class BaseSessionTest(noErrorCollector: Boolean = false) {
     fun GeckoSession.triggerCookieBannerHandled() =
         sessionRule.triggerCookieBannerHandled(this)
 
+    fun GeckoSession.triggerTranslationsOffer() =
+        sessionRule.triggerTranslationsOffer(this)
+
+    fun GeckoSession.triggerLanguageStateChange(languageState: JSONObject) =
+        sessionRule.triggerLanguageStateChange(this, languageState)
     var GeckoSession.active: Boolean
         get() = sessionRule.getActive(this)
         set(value) = setActive(value)

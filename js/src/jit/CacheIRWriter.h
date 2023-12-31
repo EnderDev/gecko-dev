@@ -19,6 +19,7 @@
 #include "NamespaceImports.h"
 
 #include "gc/AllocKind.h"
+#include "jit/ABIFunctions.h"
 #include "jit/CacheIR.h"
 #include "jit/CacheIROpsGenerated.h"
 #include "jit/CompactBuffer.h"
@@ -65,10 +66,6 @@ class AllocSite;
 namespace jit {
 
 class ICScript;
-
-#ifdef JS_SIMULATOR
-bool CallAnyNative(JSContext* cx, unsigned argc, Value* vp);
-#endif
 
 // Class to record CacheIR + some additional metadata for code generation.
 class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
@@ -120,7 +117,7 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
 #endif
 
   void writeOp(CacheOp op) {
-    buffer_.writeUnsigned15Bit(uint32_t(op));
+    buffer_.writeFixedUint16_t(uint16_t(op));
     nextInstructionId_++;
 #ifdef DEBUG
     MOZ_ASSERT(currentOp_.isNothing(), "Missing call to assertLengthMatches?");
@@ -196,14 +193,24 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
     assertSameZone(shape);
     addStubField(uintptr_t(shape), StubField::Type::Shape);
   }
-  void writeGetterSetterField(GetterSetter* gs) {
+  void writeWeakShapeField(Shape* shape) {
+    MOZ_ASSERT(shape);
+    assertSameZone(shape);
+    addStubField(uintptr_t(shape), StubField::Type::WeakShape);
+  }
+  void writeWeakGetterSetterField(GetterSetter* gs) {
     MOZ_ASSERT(gs);
-    addStubField(uintptr_t(gs), StubField::Type::GetterSetter);
+    addStubField(uintptr_t(gs), StubField::Type::WeakGetterSetter);
   }
   void writeObjectField(JSObject* obj) {
     MOZ_ASSERT(obj);
     assertSameCompartment(obj);
     addStubField(uintptr_t(obj), StubField::Type::JSObject);
+  }
+  void writeWeakObjectField(JSObject* obj) {
+    MOZ_ASSERT(obj);
+    assertSameCompartment(obj);
+    addStubField(uintptr_t(obj), StubField::Type::WeakObject);
   }
   void writeStringField(JSString* str) {
     MOZ_ASSERT(str);
@@ -213,9 +220,9 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
     MOZ_ASSERT(sym);
     addStubField(uintptr_t(sym), StubField::Type::Symbol);
   }
-  void writeBaseScriptField(BaseScript* script) {
+  void writeWeakBaseScriptField(BaseScript* script) {
     MOZ_ASSERT(script);
-    addStubField(uintptr_t(script), StubField::Type::BaseScript);
+    addStubField(uintptr_t(script), StubField::Type::WeakBaseScript);
   }
   void writeJitCodeField(JitCode* code) {
     MOZ_ASSERT(code);
@@ -466,7 +473,7 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
       slotIndex += argc;
     }
     MOZ_ASSERT(slotIndex >= 0);
-    MOZ_ASSERT(slotIndex <= UINT8_MAX);
+    MOZ_RELEASE_ASSERT(slotIndex <= UINT8_MAX);
     return loadArgumentFixedSlot_(slotIndex);
   }
 
@@ -546,14 +553,7 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
                              CallFlags flags, uint32_t argcFixed) {
     MOZ_ASSERT(!flags.isSameRealm());
 #ifdef JS_SIMULATOR
-    // The simulator requires native calls to be redirected to a
-    // special swi instruction. If we are calling an arbitrary native
-    // function, we can't wrap the real target ahead of time, so we
-    // call a wrapper function (CallAnyNative) that calls the target
-    // itself, and redirect that wrapper.
-    JSNative target = CallAnyNative;
-    void* rawPtr = JS_FUNC_TO_DATA_PTR(void*, target);
-    void* redirected = Simulator::RedirectNativeFunction(rawPtr, Args_General3);
+    const void* redirected = RedirectedCallAnyNative();
     callNativeFunction_(calleeId, argc, flags, argcFixed, redirected);
 #else
     callNativeFunction_(calleeId, argc, flags, argcFixed,
@@ -621,6 +621,28 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
     uint32_t nargsAndFlags = setter->flagsAndArgCountRaw();
     callNativeSetter_(receiver, setter, rhs, sameRealm, nargsAndFlags);
   }
+
+#ifdef JS_PUNBOX64
+  void callScriptedProxyGetResult(ValOperandId target, ObjOperandId receiver,
+                                  ObjOperandId handler, JSFunction* trap,
+                                  HandleId property) {
+    MOZ_ASSERT(trap->hasJitEntry());
+    uint32_t nargsAndFlags = trap->flagsAndArgCountRaw();
+    callScriptedProxyGetResult_(target, receiver, handler, trap, property,
+                                nargsAndFlags);
+  }
+
+  void callScriptedProxyGetByValueResult(ValOperandId target,
+                                         ObjOperandId receiver,
+                                         ObjOperandId handler,
+                                         ValOperandId property,
+                                         JSFunction* trap) {
+    MOZ_ASSERT(trap->hasJitEntry());
+    uint32_t nargsAndFlags = trap->flagsAndArgCountRaw();
+    callScriptedProxyGetByValueResult_(target, receiver, handler, property,
+                                       trap, nargsAndFlags);
+  }
+#endif
 
   void metaScriptedThisShape(Shape* thisShape) {
     metaScriptedThisShape_(thisShape);

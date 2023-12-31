@@ -18,13 +18,14 @@ import {get} from 'https';
 
 import {Tree} from '@angular-devkit/schematics';
 
-import {getNgCommandName, getScriptFromOptions} from './files.js';
+import {getNgCommandName} from './files.js';
 import {
   getAngularConfig,
+  getApplicationProjects,
   getJsonFileAsObject,
   getObjectAsJson,
 } from './json.js';
-import {SchematicsOptions, TestingFramework} from './types.js';
+import {SchematicsOptions, TestRunner} from './types.js';
 export interface NodePackage {
   name: string;
   version: string;
@@ -115,24 +116,18 @@ export function getDependenciesFromOptions(
   options: SchematicsOptions
 ): string[] {
   const dependencies = ['puppeteer'];
-  const babelPackages = [
-    '@babel/core',
-    '@babel/register',
-    '@babel/preset-env',
-    '@babel/preset-typescript',
-  ];
 
-  switch (options.testingFramework) {
-    case TestingFramework.Jasmine:
-      dependencies.push('jasmine', ...babelPackages);
+  switch (options.testRunner) {
+    case TestRunner.Jasmine:
+      dependencies.push('jasmine');
       break;
-    case TestingFramework.Jest:
-      dependencies.push('jest', '@types/jest', 'ts-jest');
+    case TestRunner.Jest:
+      dependencies.push('jest', '@types/jest');
       break;
-    case TestingFramework.Mocha:
-      dependencies.push('mocha', '@types/mocha', ...babelPackages);
+    case TestRunner.Mocha:
+      dependencies.push('mocha', '@types/mocha');
       break;
-    case TestingFramework.Node:
+    case TestRunner.Node:
       dependencies.push('@types/node');
       break;
   }
@@ -168,18 +163,18 @@ export function updateAngularJsonScripts(
   overwrite = true
 ): Tree {
   const angularJson = getAngularConfig(tree);
-  const commands = getScriptFromOptions(options);
-  const name = getNgCommandName(options);
+  const projects = getApplicationProjects(tree);
+  const name = getNgCommandName(projects);
 
-  Object.keys(angularJson['projects']).forEach(project => {
+  Object.keys(projects).forEach(project => {
     const e2eScript = [
       {
         name,
         value: {
           builder: '@puppeteer/ng-schematics:puppeteer',
           options: {
-            commands,
             devServerTarget: `${project}:serve`,
+            testRunner: options.testRunner,
           },
           configurations: {
             production: {
@@ -191,7 +186,7 @@ export function updateAngularJsonScripts(
     ];
 
     updateJsonValues(
-      angularJson['projects'][project],
+      angularJson['projects'][project]!,
       'architect',
       e2eScript,
       overwrite

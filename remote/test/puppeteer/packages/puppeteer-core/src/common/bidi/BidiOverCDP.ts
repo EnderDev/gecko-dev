@@ -19,7 +19,8 @@ import * as Bidi from 'chromium-bidi/lib/cjs/protocol/protocol.js';
 import type {ProtocolMapping} from 'devtools-protocol/types/protocol-mapping.js';
 
 import {CDPSession, Connection as CDPPPtrConnection} from '../Connection.js';
-import {Handler} from '../EventEmitter.js';
+import {TargetCloseError} from '../Errors.js';
+import {EventEmitter, Handler} from '../EventEmitter.js';
 
 import {Connection as BidiPPtrConnection} from './Connection.js';
 
@@ -52,7 +53,7 @@ export async function connectBidiOverCDP(
     // Forwards a BiDi event sent by BidiServer to Puppeteer.
     pptrTransport.onmessage(JSON.stringify(message));
   });
-  const pptrBiDiConnection = new BidiPPtrConnection(pptrTransport);
+  const pptrBiDiConnection = new BidiPPtrConnection(cdp.url(), pptrTransport);
   const bidiServer = await BidiMapper.BidiServer.createAndStart(
     transportBiDi,
     cdpConnectionAdapter,
@@ -85,7 +86,7 @@ class CDPConnectionAdapter {
       throw new Error('Unknown CDP session with id' + id);
     }
     if (!this.#adapters.has(session)) {
-      const adapter = new CDPClientAdapter(session);
+      const adapter = new CDPClientAdapter(session, id, this.#browser);
       this.#adapters.set(session, adapter);
       return adapter;
     }
@@ -106,17 +107,29 @@ class CDPConnectionAdapter {
  *
  * @internal
  */
-class CDPClientAdapter<T extends Pick<CDPPPtrConnection, 'send' | 'on' | 'off'>>
+class CDPClientAdapter<T extends EventEmitter & Pick<CDPPPtrConnection, 'send'>>
   extends BidiMapper.EventEmitter<CdpEvents>
   implements BidiMapper.CdpClient
 {
   #closed = false;
   #client: T;
+  sessionId: string | undefined = undefined;
+  #browserClient?: BidiMapper.CdpClient;
 
-  constructor(client: T) {
+  constructor(
+    client: T,
+    sessionId?: string,
+    browserClient?: BidiMapper.CdpClient
+  ) {
     super();
     this.#client = client;
+    this.sessionId = sessionId;
+    this.#browserClient = browserClient;
     this.#client.on('*', this.#forwardMessage as Handler<any>);
+  }
+
+  browserClient(): BidiMapper.CdpClient {
+    return this.#browserClient!;
   }
 
   #forwardMessage = <T extends keyof CdpEvents>(
@@ -147,6 +160,10 @@ class CDPClientAdapter<T extends Pick<CDPPPtrConnection, 'send' | 'on' | 'off'>>
     this.#client.off('*', this.#forwardMessage as Handler<any>);
     this.#closed = true;
   }
+
+  isCloseError(error: any): boolean {
+    return error instanceof TargetCloseError;
+  }
 }
 
 /**
@@ -158,32 +175,27 @@ class NoOpTransport
   extends BidiMapper.EventEmitter<any>
   implements BidiMapper.BidiTransport
 {
-  #onMessage: (
-    message: Bidi.Message.RawCommandRequest
-  ) => Promise<void> | void = async (
-    _m: Bidi.Message.RawCommandRequest
-  ): Promise<void> => {
-    return;
-  };
+  #onMessage: (message: Bidi.ChromiumBidi.Command) => Promise<void> | void =
+    async (_m: Bidi.ChromiumBidi.Command): Promise<void> => {
+      return;
+    };
 
-  emitMessage(message: Bidi.Message.RawCommandRequest) {
+  emitMessage(message: Bidi.ChromiumBidi.Command) {
     void this.#onMessage(message);
   }
 
   setOnMessage(
-    onMessage: (message: Bidi.Message.RawCommandRequest) => Promise<void> | void
+    onMessage: (message: Bidi.ChromiumBidi.Command) => Promise<void> | void
   ): void {
     this.#onMessage = onMessage;
   }
 
-  async sendMessage(message: Bidi.Message.OutgoingMessage): Promise<void> {
+  async sendMessage(message: Bidi.ChromiumBidi.Message): Promise<void> {
     this.emit('bidiResponse', message);
   }
 
   close() {
-    this.#onMessage = async (
-      _m: Bidi.Message.RawCommandRequest
-    ): Promise<void> => {
+    this.#onMessage = async (_m: Bidi.ChromiumBidi.Command): Promise<void> => {
       return;
     };
   }

@@ -8,6 +8,7 @@ import copy
 import json
 import os
 import pipes
+import platform
 import random
 import re
 import shutil
@@ -68,6 +69,7 @@ if sys.platform == "win32":
 
 EXPECTED_LOG_ACTIONS = set(
     [
+        "crash_reporter_init",
         "test_status",
         "log",
     ]
@@ -156,7 +158,13 @@ def markGotSIGINT(signum, stackFrame):
 
 class XPCShellTestThread(Thread):
     def __init__(
-        self, test_object, retry=True, verbose=False, usingTSan=False, **kwargs
+        self,
+        test_object,
+        retry=True,
+        verbose=False,
+        usingTSan=False,
+        usingCrashReporter=False,
+        **kwargs
     ):
         Thread.__init__(self)
         self.daemon = True
@@ -165,6 +173,7 @@ class XPCShellTestThread(Thread):
         self.retry = retry
         self.verbose = verbose
         self.usingTSan = usingTSan
+        self.usingCrashReporter = usingCrashReporter
 
         self.appPath = kwargs.get("appPath")
         self.xrePath = kwargs.get("xrePath")
@@ -216,6 +225,7 @@ class XPCShellTestThread(Thread):
         # Context for output processing
         self.output_lines = []
         self.has_failure_output = False
+        self.saw_crash_reporter_init = False
         self.saw_proc_start = False
         self.saw_proc_end = False
         self.command = None
@@ -721,6 +731,10 @@ class XPCShellTestThread(Thread):
             self.report_message(line_string)
             return
 
+        if line_object["action"] == "crash_reporter_init":
+            self.saw_crash_reporter_init = True
+            return
+
         action = line_object["action"]
 
         self.has_failure_output = (
@@ -891,7 +905,32 @@ class XPCShellTestThread(Thread):
             return_code_ok = return_code == 0 or (
                 self.usingTSan and return_code == TSAN_EXIT_CODE_WITH_RACES
             )
-            passed = (not self.has_failure_output) and return_code_ok
+
+            # Due to the limitation on the remote xpcshell test, the process
+            # return code does not represent the process crash.
+            # If crash_reporter_init log has not been seen and the return code
+            # is 0, it means the process crashed before setting up the crash
+            # reporter.
+            #
+            # NOTE: Crash reporter is not enabled on some configuration, such
+            #       as ASAN and TSAN. Those configuration shouldn't be using
+            #       remote xpcshell test, and the crash should be caught by
+            #       the process return code.
+            # NOTE: self.saw_crash_reporter_init is False also when adb failed
+            #       to launch process, and in that case the return code is
+            #       not 0.
+            #       (see launchProcess in remotexpcshelltests.py)
+            ended_before_crash_reporter_init = (
+                return_code_ok
+                and self.usingCrashReporter
+                and not self.saw_crash_reporter_init
+            )
+
+            passed = (
+                (not self.has_failure_output)
+                and not ended_before_crash_reporter_init
+                and return_code_ok
+            )
 
             status = "PASS" if passed else "FAIL"
             expected = "PASS" if expect_pass else "FAIL"
@@ -900,8 +939,15 @@ class XPCShellTestThread(Thread):
             if self.timedout:
                 return
 
-            if status != expected:
-                if self.retry:
+            if status != expected or ended_before_crash_reporter_init:
+                if ended_before_crash_reporter_init:
+                    self.log.test_end(
+                        name,
+                        "CRASH",
+                        expected=expected,
+                        message="Test ended before setting up the crash reporter",
+                    )
+                elif self.retry:
                     self.log.test_end(
                         name,
                         status,
@@ -912,8 +958,8 @@ class XPCShellTestThread(Thread):
                     if self.verboseIfFails and not self.verbose:
                         self.log_full_output()
                     return
-
-                self.log.test_end(name, status, expected=expected, message=message)
+                else:
+                    self.log.test_end(name, status, expected=expected, message=message)
                 self.log_full_output()
 
                 self.failCount += 1
@@ -978,6 +1024,8 @@ class XPCShellTests(object):
         self.nodeProc = {}
         self.http3Server = None
         self.conditioned_profile_dir = None
+        self.outthread = {}
+        self.errthread = {}
 
     def getTestManifest(self, manifest):
         if isinstance(manifest, TestManifest):
@@ -1340,6 +1388,17 @@ class XPCShellTests(object):
 
         self.log.info("Found node at %s" % (nodeBin,))
 
+        def read_streams(name, proc, pipe):
+            while True:
+                line = pipe.readline()
+                output = "stdout" if pipe == proc.stdout else "stderr"
+                if line:
+                    self.log.info("node %s [%s] %s" % (name, output, line))
+
+                # Check if process is dead
+                if proc.poll() is not None:
+                    break
+
         def startServer(name, serverJs):
             if not os.path.exists(serverJs):
                 error = "%s not found at %s" % (name, serverJs)
@@ -1360,6 +1419,7 @@ class XPCShellTests(object):
                         env=self.env,
                         cwd=os.getcwd(),
                         universal_newlines=True,
+                        start_new_session=True,
                     )
                 self.nodeProc[name] = process
 
@@ -1373,6 +1433,12 @@ class XPCShellTests(object):
                     if searchObj:
                         self.env["MOZHTTP2_PORT"] = searchObj.group(1)
                         self.env["MOZNODE_EXEC_PORT"] = searchObj.group(2)
+                t1 = Thread(target=read_streams, args=(name, process, process.stdout))
+                t1.start()
+                t2 = Thread(target=read_streams, args=(name, process, process.stderr))
+                t2.start()
+                self.outthread[name] = t1
+                self.errthread[name] = t2
             except OSError as e:
                 # This occurs if the subprocess couldn't be started
                 self.log.error("Could not run %s server: %s" % (name, str(e)))
@@ -1389,19 +1455,19 @@ class XPCShellTests(object):
             self.log.info("Node %s server shutting down ..." % name)
             if proc.poll() is not None:
                 self.log.info("Node server %s already dead %s" % (name, proc.poll()))
+            elif sys.platform != "win32":
+                # Kill process and all its spawned children.
+                os.killpg(proc.pid, signal.SIGTERM)
             else:
                 proc.terminate()
 
-            def dumpOutput(fd, label):
-                firstTime = True
-                for msg in fd:
-                    if firstTime:
-                        firstTime = False
-                        self.log.info("Process %s" % label)
-                    self.log.info(msg)
+            if self.outthread[name] is not None:
+                self.outthread[name].join()
+                del self.outthread[name]
+            if self.errthread[name] is not None:
+                self.errthread[name].join()
+                del self.errthread[name]
 
-            dumpOutput(proc.stdout, "stdout")
-            dumpOutput(proc.stderr, "stderr")
         self.nodeProc = {}
 
     def startHttp3Server(self):
@@ -1498,6 +1564,8 @@ class XPCShellTests(object):
         self.mozInfo["msix"] = options.get(
             "app_binary"
         ) is not None and "WindowsApps" in options.get("app_binary", "")
+
+        self.mozInfo["is_ubuntu"] = "Ubuntu" in platform.version()
 
         mozinfo.update(self.mozInfo)
 
@@ -1705,7 +1773,7 @@ class XPCShellTests(object):
         self.timeoutAsPass = options.get("timeoutAsPass")
         self.crashAsPass = options.get("crashAsPass")
         self.conditionedProfile = options.get("conditionedProfile")
-        self.repeat = options.get("repeat")
+        self.repeat = options.get("repeat", 0)
 
         self.testCount = 0
         self.passCount = 0
@@ -1871,13 +1939,17 @@ class XPCShellTests(object):
         # that has an effect on interpretation of the process return value.
         usingTSan = "tsan" in self.mozInfo and self.mozInfo["tsan"]
 
+        usingCrashReporter = (
+            "crashreporter" in self.mozInfo and self.mozInfo["crashreporter"]
+        )
+
         # create a queue of all tests that will run
         tests_queue = deque()
         # also a list for the tests that need to be run sequentially
         sequential_tests = []
         status = None
 
-        if options.get("repeat") > 0:
+        if options.get("repeat", 0) > 0:
             self.sequential = True
 
         if not options.get("verify"):
@@ -1892,13 +1964,14 @@ class XPCShellTests(object):
                     continue
 
                 # if we have --repeat, duplicate the tests as needed
-                for i in range(0, options.get("repeat") + 1):
+                for i in range(0, options.get("repeat", 0) + 1):
                     self.testCount += 1
 
                     test = testClass(
                         test_object,
                         verbose=self.verbose or test_object.get("verbose") == "true",
                         usingTSan=usingTSan,
+                        usingCrashReporter=usingCrashReporter,
                         mobileArgs=mobileArgs,
                         **kwargs,
                     )
@@ -1962,10 +2035,10 @@ class XPCShellTests(object):
             maxTime = timedelta(seconds=options["verifyMaxTime"])
             for test_object in self.alltests:
                 stepResults = {}
-                for (descr, step) in steps:
+                for descr, step in steps:
                     stepResults[descr] = "not run / incomplete"
                 finalResult = "PASSED"
-                for (descr, step) in steps:
+                for descr, step in steps:
                     if (datetime.now() - startTime) > maxTime:
                         self.log.info(
                             "::: Test verification is taking too long: Giving up!"

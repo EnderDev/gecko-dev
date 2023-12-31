@@ -17,18 +17,18 @@
 #include <vector>
 
 #include "lib/jxl/ans_params.h"
+#include "lib/jxl/base/common.h"
 #include "lib/jxl/base/compiler_specific.h"
 #include "lib/jxl/base/override.h"
 #include "lib/jxl/base/random.h"
 #include "lib/jxl/base/status.h"
 #include "lib/jxl/chroma_from_luma.h"
-#include "lib/jxl/color_management.h"
-#include "lib/jxl/common.h"
 #include "lib/jxl/dec_cache.h"
 #include "lib/jxl/dec_frame.h"
 #include "lib/jxl/enc_ans.h"
 #include "lib/jxl/enc_aux_out.h"
 #include "lib/jxl/enc_cache.h"
+#include "lib/jxl/enc_debug_image.h"
 #include "lib/jxl/enc_dot_dictionary.h"
 #include "lib/jxl/enc_frame.h"
 #include "lib/jxl/entropy_coder.h"
@@ -36,6 +36,7 @@
 #include "lib/jxl/image.h"
 #include "lib/jxl/image_bundle.h"
 #include "lib/jxl/image_ops.h"
+#include "lib/jxl/pack_signed.h"
 #include "lib/jxl/patch_dictionary_internal.h"
 
 namespace jxl {
@@ -157,7 +158,8 @@ void PatchDictionaryEncoder::SubtractFrom(const PatchDictionary& pdic,
           } else if (mode == PatchBlendMode::kNone) {
             // Nothing to do.
           } else {
-            JXL_ABORT("Blending mode %u not yet implemented", (uint32_t)mode);
+            JXL_UNREACHABLE("Blending mode %u not yet implemented",
+                            (uint32_t)mode);
           }
         }
       }
@@ -207,8 +209,9 @@ struct PatchColorspaceInfo {
 };
 
 std::vector<PatchInfo> FindTextLikePatches(
-    const Image3F& opsin, const PassesEncoderState* JXL_RESTRICT state,
-    ThreadPool* pool, AuxOut* aux_out, bool is_xyb) {
+    const CompressParams& cparams, const Image3F& opsin,
+    const PassesEncoderState* JXL_RESTRICT state, ThreadPool* pool,
+    AuxOut* aux_out, bool is_xyb) {
   if (state->cparams.patches == Override::kOff) return {};
 
   PatchColorspaceInfo pci(is_xyb);
@@ -297,8 +300,8 @@ std::vector<PatchInfo> FindTextLikePatches(
                       process_row, "IsScreenshotLike"));
 
   // TODO(veluca): also parallelize the rest of this function.
-  if (WantDebugOutput(aux_out)) {
-    aux_out->DumpPlaneNormalized("screenshot_like", is_screenshot_like);
+  if (WantDebugOutput(cparams)) {
+    DumpPlaneNormalized(cparams, "screenshot_like", is_screenshot_like);
   }
 
   constexpr int kSearchRadius = 1;
@@ -378,12 +381,12 @@ std::vector<PatchInfo> FindTextLikePatches(
   ImageF ccs;
   Rng rng(0);
   bool paint_ccs = false;
-  if (WantDebugOutput(aux_out)) {
-    aux_out->DumpPlaneNormalized("is_background", is_background);
+  if (WantDebugOutput(cparams)) {
+    DumpPlaneNormalized(cparams, "is_background", is_background);
     if (is_xyb) {
-      aux_out->DumpXybImage("background", background);
+      DumpXybImage(cparams, "background", background);
     } else {
-      aux_out->DumpImage("background", background);
+      DumpImage(cparams, "background", background);
     }
     ccs = ImageF(opsin.xsize(), opsin.ysize());
     ZeroFillImage(&ccs);
@@ -519,8 +522,8 @@ std::vector<PatchInfo> FindTextLikePatches(
   }
 
   if (paint_ccs) {
-    JXL_ASSERT(WantDebugOutput(aux_out));
-    aux_out->DumpPlaneNormalized("ccs", ccs);
+    JXL_ASSERT(WantDebugOutput(cparams));
+    DumpPlaneNormalized(cparams, "ccs", ccs);
   }
   if (info.empty()) {
     return {};
@@ -567,7 +570,7 @@ void FindBestPatchDictionary(const Image3F& opsin,
                              const JxlCmsInterface& cms, ThreadPool* pool,
                              AuxOut* aux_out, bool is_xyb) {
   std::vector<PatchInfo> info =
-      FindTextLikePatches(opsin, state, pool, aux_out, is_xyb);
+      FindTextLikePatches(state->cparams, opsin, state, pool, aux_out, is_xyb);
 
   // TODO(veluca): this doesn't work if both dots and patches are enabled.
   // For now, since dots and patches are not likely to occur in the same kind of

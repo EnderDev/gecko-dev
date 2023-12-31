@@ -20,11 +20,14 @@ import {ChildProcess} from 'child_process';
 
 import {Protocol} from 'devtools-protocol';
 
+import {Symbol} from '../../third_party/disposablestack/disposablestack.js';
 import {EventEmitter} from '../common/EventEmitter.js';
-import type {Target} from '../common/Target.js'; // TODO: move to ./api
+import {debugError, waitWithTimeout} from '../common/util.js';
+import {Deferred} from '../util/Deferred.js';
 
 import type {BrowserContext} from './BrowserContext.js';
-import type {Page} from './Page.js'; // TODO: move to ./api
+import type {Page} from './Page.js';
+import type {Target} from './Target.js';
 
 /**
  * BrowserContext options.
@@ -51,16 +54,12 @@ export type BrowserCloseCallback = () => Promise<void> | void;
 /**
  * @public
  */
-export type TargetFilterCallback = (
-  target: Protocol.Target.TargetInfo
-) => boolean;
+export type TargetFilterCallback = (target: Target) => boolean;
 
 /**
  * @internal
  */
-export type IsPageTargetCallback = (
-  target: Protocol.Target.TargetInfo
-) => boolean;
+export type IsPageTargetCallback = (target: Target) => boolean;
 
 /**
  * @internal
@@ -84,6 +83,7 @@ export const WEB_PERMISSION_TO_PROTOCOL_PERMISSION = new Map<
   ['accessibility-events', 'accessibilityEvents'],
   ['clipboard-read', 'clipboardReadWrite'],
   ['clipboard-write', 'clipboardReadWrite'],
+  ['clipboard-sanitized-write', 'clipboardSanitizedWrite'],
   ['payment-handler', 'paymentHandler'],
   ['persistent-storage', 'durableStorage'],
   ['idle-detection', 'idleDetection'],
@@ -108,6 +108,7 @@ export type Permission =
   | 'accessibility-events'
   | 'clipboard-read'
   | 'clipboard-write'
+  | 'clipboard-sanitized-write'
   | 'payment-handler'
   | 'persistent-storage'
   | 'idle-detection'
@@ -217,7 +218,10 @@ export const enum BrowserEmittedEvents {
  *
  * @public
  */
-export class Browser extends EventEmitter {
+export class Browser
+  extends EventEmitter
+  implements AsyncDisposable, Disposable
+{
   /**
    * @internal
    */
@@ -378,12 +382,35 @@ export class Browser extends EventEmitter {
    * );
    * ```
    */
-  waitForTarget(
+  async waitForTarget(
     predicate: (x: Target) => boolean | Promise<boolean>,
-    options?: WaitForTargetOptions
-  ): Promise<Target>;
-  waitForTarget(): Promise<Target> {
-    throw new Error('Not implemented');
+    options: WaitForTargetOptions = {}
+  ): Promise<Target> {
+    const {timeout = 30000} = options;
+    const targetDeferred = Deferred.create<Target | PromiseLike<Target>>();
+
+    this.on(BrowserEmittedEvents.TargetCreated, check);
+    this.on(BrowserEmittedEvents.TargetChanged, check);
+    try {
+      this.targets().forEach(check);
+      if (!timeout) {
+        return await targetDeferred.valueOrThrow();
+      }
+      return await waitWithTimeout(
+        targetDeferred.valueOrThrow(),
+        'target',
+        timeout
+      );
+    } finally {
+      this.off(BrowserEmittedEvents.TargetCreated, check);
+      this.off(BrowserEmittedEvents.TargetChanged, check);
+    }
+
+    async function check(target: Target): Promise<void> {
+      if ((await predicate(target)) && !targetDeferred.resolved()) {
+        targetDeferred.resolve(target);
+      }
+    }
   }
 
   /**
@@ -395,8 +422,16 @@ export class Browser extends EventEmitter {
    * browser contexts. Non-visible pages, such as `"background_page"`, will not be listed
    * here. You can find them using {@link Target.page}.
    */
-  pages(): Promise<Page[]> {
-    throw new Error('Not implemented');
+  async pages(): Promise<Page[]> {
+    const contextPages = await Promise.all(
+      this.browserContexts().map(context => {
+        return context.pages();
+      })
+    );
+    // Flatten array.
+    return contextPages.reduce((acc, x) => {
+      return acc.concat(x);
+    }, []);
   }
 
   /**
@@ -405,9 +440,11 @@ export class Browser extends EventEmitter {
    * @remarks
    *
    * For headless browser, this is similar to `HeadlessChrome/61.0.3153.0`. For
-   * non-headless, this is similar to `Chrome/61.0.3153.0`.
+   * non-headless or new-headless, this is similar to `Chrome/61.0.3153.0`. For
+   * Firefox, it is similar to `Firefox/116.0a1`.
    *
-   * The format of browser.version() might change with future releases of browsers.
+   * The format of browser.version() might change with future releases of
+   * browsers.
    */
   version(): Promise<string> {
     throw new Error('Not implemented');
@@ -444,6 +481,14 @@ export class Browser extends EventEmitter {
    */
   isConnected(): boolean {
     throw new Error('Not implemented');
+  }
+
+  [Symbol.dispose](): void {
+    return void this.close().catch(debugError);
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
   }
 }
 /**

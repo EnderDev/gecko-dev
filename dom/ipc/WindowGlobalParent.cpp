@@ -8,6 +8,7 @@
 
 #include <algorithm>
 
+#include "mozilla/AntiTrackingUtils.h"
 #include "mozilla/AsyncEventDispatcher.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/ContentBlockingAllowList.h"
@@ -25,8 +26,10 @@
 #include "mozilla/dom/MediaController.h"
 #include "mozilla/dom/WindowGlobalChild.h"
 #include "mozilla/dom/ChromeUtils.h"
+#include "mozilla/dom/UseCounterMetrics.h"
 #include "mozilla/dom/ipc/IdType.h"
 #include "mozilla/dom/ipc/StructuredCloneData.h"
+#include "mozilla/glean/GleanMetrics.h"
 #include "mozilla/Components.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/ServoCSSParser.h"
@@ -35,13 +38,15 @@
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/Variant.h"
+#include "mozilla/ipc/ProtocolUtils.h"
 #include "nsContentUtils.h"
 #include "nsDocShell.h"
 #include "nsDocShellLoadState.h"
 #include "nsError.h"
 #include "nsFrameLoader.h"
 #include "nsFrameLoaderOwner.h"
-#include "nsGlobalWindowInner.h"
+#include "nsICookieManager.h"
+#include "nsICookieService.h"
 #include "nsQueryObject.h"
 #include "nsNetUtil.h"
 #include "nsSandboxFlags.h"
@@ -54,6 +59,7 @@
 #include "nsITransportSecurityInfo.h"
 #include "nsISharePicker.h"
 #include "nsIURIMutator.h"
+#include "nsIWebProgressListener.h"
 
 #include "mozilla/dom/DOMException.h"
 #include "mozilla/dom/DOMExceptionBinding.h"
@@ -62,9 +68,14 @@
 #include "mozilla/dom/JSWindowActorBinding.h"
 #include "mozilla/dom/JSWindowActorParent.h"
 
+#include "mozilla/net/NeckoParent.h"
+#include "mozilla/net/PCookieServiceParent.h"
+#include "mozilla/net/CookieServiceParent.h"
+
 #include "SessionStoreFunctions.h"
 #include "nsIXPConnect.h"
 #include "nsImportModule.h"
+#include "nsIXULRuntime.h"
 
 #include "mozilla/dom/PBackgroundSessionStorageCache.h"
 
@@ -319,7 +330,7 @@ mozilla::ipc::IPCResult WindowGlobalParent::RecvLoadURI(
     return IPC_FAIL(this, "Illegal cross-process javascript: load attempt");
   }
 
-  CanonicalBrowsingContext* targetBC = aTargetBC.get_canonical();
+  RefPtr<CanonicalBrowsingContext> targetBC = aTargetBC.get_canonical();
 
   // FIXME: For cross-process loads, we should double check CanAccess() for the
   // source browsing context in the parent process.
@@ -352,7 +363,7 @@ mozilla::ipc::IPCResult WindowGlobalParent::RecvInternalLoad(
     return IPC_FAIL(this, "Illegal cross-process javascript: load attempt");
   }
 
-  CanonicalBrowsingContext* targetBC =
+  RefPtr<CanonicalBrowsingContext> targetBC =
       aLoadState->TargetBrowsingContext().get_canonical();
 
   // FIXME: For cross-process loads, we should double check CanAccess() for the
@@ -538,13 +549,14 @@ void WindowGlobalParent::NotifyContentBlockingEvent(
     const nsACString& aTrackingOrigin,
     const nsTArray<nsCString>& aTrackingFullHashes,
     const Maybe<ContentBlockingNotifier::StorageAccessPermissionGrantedReason>&
-        aReason) {
+        aReason,
+    const Maybe<ContentBlockingNotifier::CanvasFingerprinter>&
+        aCanvasFingerprinter,
+    const Maybe<bool> aCanvasFingerprinterKnownText) {
   MOZ_ASSERT(NS_IsMainThread());
   DebugOnly<bool> isCookiesBlocked =
       aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_TRACKER ||
-      aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_SOCIALTRACKER ||
-      (aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_FOREIGN &&
-       StaticPrefs::network_cookie_rejectForeignWithExceptions_enabled());
+      aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_SOCIALTRACKER;
   MOZ_ASSERT_IF(aBlocked, aReason.isNothing());
   MOZ_ASSERT_IF(!isCookiesBlocked, aReason.isNothing());
   MOZ_ASSERT_IF(isCookiesBlocked && !aBlocked, aReason.isSome());
@@ -558,7 +570,8 @@ void WindowGlobalParent::NotifyContentBlockingEvent(
   }
 
   Maybe<uint32_t> event = GetContentBlockingLog()->RecordLogParent(
-      aTrackingOrigin, aEvent, aBlocked, aReason, aTrackingFullHashes);
+      aTrackingOrigin, aEvent, aBlocked, aReason, aTrackingFullHashes,
+      aCanvasFingerprinter, aCanvasFingerprinterKnownText);
 
   // Notify the OnContentBlockingEvent if necessary.
   if (event) {
@@ -600,6 +613,11 @@ already_AddRefed<JSActor> WindowGlobalParent::InitJSActor(
 }
 
 bool WindowGlobalParent::IsCurrentGlobal() {
+  if (mozilla::SessionHistoryInParent() && BrowsingContext() &&
+      BrowsingContext()->IsInBFCache()) {
+    return false;
+  }
+
   return CanSend() && BrowsingContext()->GetCurrentWindowGlobal() == this;
 }
 
@@ -1101,13 +1119,15 @@ void WindowGlobalParent::FinishAccumulatingPageUseCounters() {
     }
 
     Telemetry::Accumulate(Telemetry::TOP_LEVEL_CONTENT_DOCUMENTS_DESTROYED, 1);
+    glean::use_counter::top_level_content_documents_destroyed.Add();
 
+    bool any = false;
     for (int32_t c = 0; c < eUseCounter_Count; ++c) {
       auto uc = static_cast<UseCounter>(c);
       if (!mPageUseCounters->mUseCounters[uc]) {
         continue;
       }
-
+      any = true;
       auto id = static_cast<Telemetry::HistogramID>(
           Telemetry::HistogramFirstUseCounter + uc * 2 + 1);
       if (dumpCounters) {
@@ -1115,6 +1135,12 @@ void WindowGlobalParent::FinishAccumulatingPageUseCounters() {
                       Telemetry::GetHistogramName(id), urlForLogging->get());
       }
       Telemetry::Accumulate(id, 1);
+      IncrementUseCounter(uc, /* aIsPage = */ true);
+    }
+
+    if (!any) {
+      MOZ_LOG(gUseCountersLog, LogLevel::Debug,
+              (" > page use counter data was received, but was empty"));
     }
   } else {
     MOZ_LOG(gUseCountersLog, LogLevel::Debug,
@@ -1287,6 +1313,10 @@ mozilla::ipc::IPCResult WindowGlobalParent::RecvReloadWithHttpsOnlyException() {
   nsresult rv;
   nsCOMPtr<nsIURI> currentUri = BrowsingContext()->Top()->GetCurrentURI();
 
+  if (!currentUri) {
+    return IPC_FAIL(this, "HTTPS-only mode: Failed to get current URI");
+  }
+
   bool isViewSource = currentUri->SchemeIs("view-source");
 
   nsCOMPtr<nsINestedURI> nestedURI = do_QueryInterface(currentUri);
@@ -1354,7 +1384,8 @@ mozilla::ipc::IPCResult WindowGlobalParent::RecvReloadWithHttpsOnlyException() {
   loadState->SetTriggeringPrincipal(nsContentUtils::GetSystemPrincipal());
   loadState->SetLoadType(LOAD_NORMAL_REPLACE);
 
-  BrowsingContext()->Top()->LoadURI(loadState, /* setNavigating */ true);
+  RefPtr<CanonicalBrowsingContext> topBC = BrowsingContext()->Top();
+  topBC->LoadURI(loadState, /* setNavigating */ true);
 
   return IPC_OK();
 }
@@ -1370,6 +1401,26 @@ IPCResult WindowGlobalParent::RecvDiscoverIdentityCredentialFromExternalSource(
             return aResolver(Some(aResult));
           },
           [aResolver](nsresult aErr) { aResolver(Nothing()); });
+  return IPC_OK();
+}
+
+IPCResult WindowGlobalParent::RecvGetStorageAccessPermission(
+    GetStorageAccessPermissionResolver&& aResolve) {
+  WindowGlobalParent* top = TopWindowContext();
+  if (!top) {
+    return IPC_FAIL_NO_REASON(this);
+  }
+  nsIPrincipal* topPrincipal = top->DocumentPrincipal();
+  nsIPrincipal* principal = DocumentPrincipal();
+  uint32_t result;
+  nsresult rv = AntiTrackingUtils::TestStoragePermissionInParent(
+      topPrincipal, principal, &result);
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    aResolve(nsIPermissionManager::UNKNOWN_ACTION);
+    return IPC_OK();
+  }
+
+  aResolve(result);
   return IPC_OK();
 }
 
@@ -1458,6 +1509,10 @@ void WindowGlobalParent::ActorDestroy(ActorDestroyReason aWhy) {
 
         if (mDocumentURI && (net::SchemeIsHTTP(mDocumentURI) ||
                              net::SchemeIsHTTPS(mDocumentURI))) {
+          GetContentBlockingLog()->ReportCanvasFingerprintingLog(
+              DocumentPrincipal());
+          GetContentBlockingLog()->ReportFontFingerprintingLog(
+              DocumentPrincipal());
           GetContentBlockingLog()->ReportEmailTrackingLog(DocumentPrincipal());
         }
       }
@@ -1531,7 +1586,8 @@ void WindowGlobalParent::AddSecurityState(uint32_t aStateFlags) {
                nsIWebProgressListener::STATE_BLOCKED_MIXED_DISPLAY_CONTENT |
                nsIWebProgressListener::STATE_BLOCKED_MIXED_ACTIVE_CONTENT |
                nsIWebProgressListener::STATE_HTTPS_ONLY_MODE_UPGRADED |
-               nsIWebProgressListener::STATE_HTTPS_ONLY_MODE_UPGRADE_FAILED)) ==
+               nsIWebProgressListener::STATE_HTTPS_ONLY_MODE_UPGRADE_FAILED |
+               nsIWebProgressListener::STATE_HTTPS_ONLY_MODE_UPGRADED_FIRST)) ==
                  aStateFlags,
              "Invalid flags specified!");
 
@@ -1579,6 +1635,26 @@ void WindowGlobalParent::SetShouldReportHasBlockedOpaqueResponse(
       mShouldReportHasBlockedOpaqueResponse = true;
     }
   }
+}
+
+IPCResult WindowGlobalParent::RecvSetCookies(
+    const nsCString& aBaseDomain, const OriginAttributes& aOriginAttributes,
+    nsIURI* aHost, bool aFromHttp, const nsTArray<CookieStruct>& aCookies) {
+  // Get CookieServiceParent via
+  // ContentParent->NeckoParent->CookieServiceParent.
+  ContentParent* contentParent = GetContentParent();
+  NS_ENSURE_TRUE(contentParent, IPC_OK());
+
+  net::PNeckoParent* neckoParent =
+      LoneManagedOrNullAsserts(contentParent->ManagedPNeckoParent());
+  NS_ENSURE_TRUE(neckoParent, IPC_OK());
+  net::PCookieServiceParent* csParent =
+      LoneManagedOrNullAsserts(neckoParent->ManagedPCookieServiceParent());
+  NS_ENSURE_TRUE(csParent, IPC_OK());
+  auto* cs = static_cast<net::CookieServiceParent*>(csParent);
+
+  return cs->SetCookies(aBaseDomain, aOriginAttributes, aHost, aFromHttp,
+                        aCookies, GetBrowsingContext());
 }
 
 NS_IMPL_CYCLE_COLLECTION_INHERITED(WindowGlobalParent, WindowContext,

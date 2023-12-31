@@ -278,8 +278,8 @@ void HTMLSelectEventListener::Detach() {
             if (!element->IsCombobox() ||
                 !element->GetPrimaryFrame(FlushType::Frames)) {
               nsContentUtils::DispatchChromeEvent(
-                  element->OwnerDoc(), ToSupports(element.get()),
-                  u"mozhidedropdown"_ns, CanBubble::eYes, Cancelable::eNo);
+                  element->OwnerDoc(), element, u"mozhidedropdown"_ns,
+                  CanBubble::eYes, Cancelable::eNo);
             }
           }));
     }
@@ -383,7 +383,7 @@ void HTMLSelectEventListener::FireOnInputAndOnChange() {
                        "Failed to dispatch input event");
 
   // Dispatch the change event.
-  nsContentUtils::DispatchTrustedEvent(element->OwnerDoc(), ToSupports(element),
+  nsContentUtils::DispatchTrustedEvent(element->OwnerDoc(), element,
                                        u"change"_ns, CanBubble::eYes,
                                        Cancelable::eNo);
 }
@@ -397,8 +397,7 @@ static void FireDropDownEvent(HTMLSelectElement* aElement, bool aShow,
     }
     return u"mozhidedropdown"_ns;
   }();
-  nsContentUtils::DispatchChromeEvent(aElement->OwnerDoc(),
-                                      ToSupports(aElement), eventName,
+  nsContentUtils::DispatchChromeEvent(aElement->OwnerDoc(), aElement, eventName,
                                       CanBubble::eYes, Cancelable::eNo);
 }
 
@@ -421,7 +420,7 @@ nsresult HTMLSelectEventListener::MouseDown(dom::Event* aMouseEvent) {
   }
 
   if (mIsCombobox) {
-    uint16_t inputSource = mouseEvent->MozInputSource();
+    uint16_t inputSource = mouseEvent->InputSource();
     if (mElement->OpenInParentProcess()) {
       nsCOMPtr<nsIContent> target = do_QueryInterface(aMouseEvent->GetTarget());
       if (target && target->IsHTMLElement(nsGkAtoms::option)) {
@@ -524,7 +523,14 @@ nsresult HTMLSelectEventListener::KeyPress(dom::Event* aKeyEvent) {
     mControlSelectMode = false;
   }
 
-  bool isControlOrMeta = keyEvent->IsControl() || keyEvent->IsMeta();
+  const bool isControlOrMeta =
+      keyEvent->IsControl()
+#if !defined(XP_WIN) && !defined(MOZ_WIDGET_GTK)
+      // Ignore Windows Logo key press in Win/Linux because it's not a usual
+      // modifier for applications.  Here wants to check "Accel" like modifier.
+      || keyEvent->IsMeta()
+#endif
+      ;
   if (isControlOrMeta && keyEvent->mCharCode != ' ') {
     return NS_OK;
   }
@@ -707,7 +713,14 @@ nsresult HTMLSelectEventListener::KeyDown(dom::Event* aKeyEvent) {
   // this is the new index to set
   int32_t newIndex = kNothingSelected;
 
-  bool isControlOrMeta = keyEvent->IsControl() || keyEvent->IsMeta();
+  bool isControlOrMeta =
+      keyEvent->IsControl()
+#if !defined(XP_WIN) && !defined(MOZ_WIDGET_GTK)
+      // Ignore Windows Logo key press in Win/Linux because it's not a usual
+      // modifier for applications.  Here wants to check "Accel" like modifier.
+      || keyEvent->IsMeta()
+#endif
+      ;
   // Don't try to handle multiple-select pgUp/pgDown in single-select lists.
   if (isControlOrMeta && !mElement->Multiple() &&
       (keyEvent->mKeyCode == NS_VK_PAGE_UP ||

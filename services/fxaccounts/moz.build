@@ -7,9 +7,9 @@
 with Files("**"):
     BUG_COMPONENT = ("Firefox", "Firefox Accounts")
 
-MOCHITEST_CHROME_MANIFESTS += ["tests/mochitest/chrome.ini"]
+MOCHITEST_CHROME_MANIFESTS += ["tests/mochitest/chrome.toml"]
 
-BROWSER_CHROME_MANIFESTS += ["tests/browser/browser.ini"]
+BROWSER_CHROME_MANIFESTS += ["tests/browser/browser.toml"]
 
 XPCSHELL_TESTS_MANIFESTS += ["tests/xpcshell/xpcshell.ini"]
 
@@ -18,7 +18,7 @@ EXTRA_JS_MODULES += [
     "FxAccounts.sys.mjs",
     "FxAccountsClient.sys.mjs",
     "FxAccountsCommands.sys.mjs",
-    "FxAccountsCommon.js",
+    "FxAccountsCommon.sys.mjs",
     "FxAccountsConfig.sys.mjs",
     "FxAccountsDevice.sys.mjs",
     "FxAccountsKeys.sys.mjs",

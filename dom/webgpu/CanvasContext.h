@@ -81,7 +81,7 @@ class CanvasContext final : public nsICanvasRenderingContextInternal,
  public:
   void GetCanvas(dom::OwningHTMLCanvasElementOrOffscreenCanvas&) const;
 
-  void Configure(const dom::GPUCanvasConfiguration& aDesc);
+  void Configure(const dom::GPUCanvasConfiguration& aConfig);
   void Unconfigure();
 
   RefPtr<Texture> GetCurrentTexture(ErrorResult& aRv);
@@ -100,6 +100,8 @@ class CanvasContext final : public nsICanvasRenderingContextInternal,
 
   Maybe<layers::RemoteTextureId> mLastRemoteTextureId;
   Maybe<layers::RemoteTextureOwnerId> mRemoteTextureOwnerId;
+  bool mUseExternalTextureInSwapChain = false;
+  bool mNewTextureRequested = false;
 };
 
 }  // namespace webgpu

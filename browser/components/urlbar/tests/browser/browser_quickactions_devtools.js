@@ -114,7 +114,7 @@ add_task(async function test_inspector() {
 
     info("Check the button status");
     const onLoad = BrowserTestUtils.browserLoaded(gBrowser.selectedBrowser);
-    BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, page);
+    BrowserTestUtils.startLoadingURIString(gBrowser.selectedBrowser, page);
     await onLoad;
     await UrlbarTestUtils.promiseAutocompleteResultPopup({
       window,
@@ -148,7 +148,7 @@ add_task(async function test_inspector() {
       () => DevToolsShim.hasToolboxForTab(gBrowser.selectedTab),
       "Wait for opening inspector for current selected tab"
     );
-    const toolbox = await DevToolsShim.getToolboxForTab(gBrowser.selectedTab);
+    const toolbox = DevToolsShim.getToolboxForTab(gBrowser.selectedTab);
     await BrowserTestUtils.waitForCondition(
       () => toolbox.getPanel("inspector"),
       "Wait until the inspector is ready"

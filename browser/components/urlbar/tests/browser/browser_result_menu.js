@@ -1,12 +1,6 @@
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
-add_setup(async function () {
-  await SpecialPowers.pushPrefEnv({
-    set: [["browser.urlbar.resultMenu", true]],
-  });
-});
-
 add_task(async function test_history() {
   const TEST_URL = "https://remove.me/from_urlbar/";
   await PlacesTestUtils.addVisits(TEST_URL);
@@ -209,9 +203,9 @@ add_task(async function firefoxSuggest() {
 
   // Implement the provider's `onEngagement()` so it removes the result.
   let onEngagementCallCount = 0;
-  provider.onEngagement = (isPrivate, state, queryContext, details) => {
+  provider.onEngagement = (state, queryContext, details, controller) => {
     onEngagementCallCount++;
-    queryContext.view.controller.removeResult(details.result);
+    controller.removeResult(details.result);
   };
 
   UrlbarProvidersManager.registerProvider(provider);

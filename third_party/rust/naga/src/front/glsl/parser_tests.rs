@@ -509,7 +509,8 @@ fn functions() {
 
 #[test]
 fn constants() {
-    use crate::{Constant, ConstantInner, ScalarValue};
+    use crate::{Constant, Expression, Type, TypeInner};
+
     let mut frontend = Frontend::default();
 
     let module = frontend
@@ -526,28 +527,39 @@ fn constants() {
         )
         .unwrap();
 
+    let mut types = module.types.iter();
     let mut constants = module.constants.iter();
+    let mut const_expressions = module.const_expressions.iter();
+
+    let (ty_handle, ty) = types.next().unwrap();
+    assert_eq!(
+        ty,
+        &Type {
+            name: None,
+            inner: TypeInner::Scalar(crate::Scalar::F32)
+        }
+    );
+
+    let (init_handle, init) = const_expressions.next().unwrap();
+    assert_eq!(init, &Expression::Literal(crate::Literal::F32(1.0)));
 
     assert_eq!(
         constants.next().unwrap().1,
         &Constant {
             name: Some("a".to_owned()),
-            specialization: None,
-            inner: ConstantInner::Scalar {
-                width: 4,
-                value: ScalarValue::Float(1.0)
-            }
+            r#override: crate::Override::None,
+            ty: ty_handle,
+            init: init_handle
         }
     );
+
     assert_eq!(
         constants.next().unwrap().1,
         &Constant {
             name: Some("b".to_owned()),
-            specialization: None,
-            inner: ConstantInner::Scalar {
-                width: 4,
-                value: ScalarValue::Float(1.0)
-            }
+            r#override: crate::Override::None,
+            ty: ty_handle,
+            init: init_handle
         }
     );
 

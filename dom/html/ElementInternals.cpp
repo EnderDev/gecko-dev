@@ -9,6 +9,7 @@
 #include "mozAutoDocUpdate.h"
 #include "mozilla/dom/CustomElementRegistry.h"
 #include "mozilla/dom/CustomEvent.h"
+#include "mozilla/dom/CustomStateSet.h"
 #include "mozilla/dom/ElementInternalsBinding.h"
 #include "mozilla/dom/FormData.h"
 #include "mozilla/dom/HTMLElement.h"
@@ -28,13 +29,14 @@ NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE_CLASS(ElementInternals)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(ElementInternals)
   tmp->Unlink();
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mTarget, mSubmissionValue, mState, mValidity,
-                                  mValidationAnchor);
+                                  mValidationAnchor, mCustomStateSet);
   NS_IMPL_CYCLE_COLLECTION_UNLINK_PRESERVED_WRAPPER
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(ElementInternals)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mTarget, mSubmissionValue, mState,
-                                    mValidity, mValidationAnchor);
+                                    mValidity, mValidationAnchor,
+                                    mCustomStateSet);
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
 NS_IMPL_CYCLE_COLLECTING_ADDREF(ElementInternals)
@@ -191,7 +193,7 @@ void ElementInternals::SetValidity(
   SetValidityState(VALIDITY_STATE_STEP_MISMATCH, aFlags.mStepMismatch);
   SetValidityState(VALIDITY_STATE_BAD_INPUT, aFlags.mBadInput);
   SetValidityState(VALIDITY_STATE_CUSTOM_ERROR, aFlags.mCustomError);
-  mTarget->UpdateState(true);
+  mTarget->UpdateValidityElementStates(true);
 
   /**
    * 5. Set element's validation message to the empty string if message is not
@@ -305,8 +307,6 @@ bool ElementInternals::ReportValidity(ErrorResult& aRv) {
     return false;
   }
 
-  mTarget->UpdateState(true);
-
   RefPtr<CustomEvent> event =
       NS_NewDOMCustomEvent(mTarget->OwnerDoc(), nullptr, nullptr);
   event->InitCustomEvent(jsapi.cx(), u"MozInvalidForm"_ns,
@@ -342,6 +342,13 @@ nsGenericHTMLElement* ElementInternals::GetValidationAnchor(
     return nullptr;
   }
   return mValidationAnchor;
+}
+
+CustomStateSet* ElementInternals::States() {
+  if (!mCustomStateSet) {
+    mCustomStateSet = new CustomStateSet(mTarget);
+  }
+  return mCustomStateSet;
 }
 
 void ElementInternals::SetForm(HTMLFormElement* aForm) { mForm = aForm; }
@@ -402,9 +409,8 @@ void ElementInternals::UpdateBarredFromConstraintValidation() {
   if (mTarget) {
     MOZ_ASSERT(mTarget->IsFormAssociatedElement());
     SetBarredFromConstraintValidation(
-        mTarget->HasAttr(nsGkAtoms::readonly) ||
-        mTarget->HasFlag(ELEMENT_IS_DATALIST_OR_HAS_DATALIST_ANCESTOR) ||
-        mTarget->IsDisabled());
+        mTarget->IsDisabled() || mTarget->HasAttr(nsGkAtoms::readonly) ||
+        mTarget->HasFlag(ELEMENT_IS_DATALIST_OR_HAS_DATALIST_ANCESTOR));
   }
 }
 
@@ -447,8 +453,6 @@ nsresult ElementInternals::SetAttr(nsAtom* aName, const nsAString& aValue) {
   nsMutationGuard::DidMutate();
 
   MutationObservers::NotifyARIAAttributeDefaultChanged(mTarget, aName, modType);
-
-  mTarget->UpdateState(true);
 
   return rs;
 }

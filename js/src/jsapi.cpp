@@ -34,7 +34,6 @@
 #include "builtin/JSON.h"
 #include "builtin/Promise.h"
 #include "builtin/Symbol.h"
-#include "frontend/BytecodeCompiler.h"
 #include "frontend/FrontendContext.h"  // AutoReportFrontendContext
 #include "gc/GC.h"
 #include "gc/GCContext.h"
@@ -43,10 +42,13 @@
 #include "jit/JitSpewer.h"
 #include "js/CallAndConstruct.h"  // JS::IsCallable
 #include "js/CharacterEncoding.h"
+#include "js/ColumnNumber.h"  // JS::TaggedColumnNumberOneOrigin, JS::ColumnNumberOneOrigin
 #include "js/CompileOptions.h"
 #include "js/ContextOptions.h"  // JS::ContextOptions{,Ref}
 #include "js/Conversions.h"
+#include "js/Date.h"  // JS::GetReduceMicrosecondTimePrecisionCallback
 #include "js/ErrorInterceptor.h"
+#include "js/ErrorReport.h"           // JSErrorBase
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/friend/StackLimits.h"    // js::AutoCheckRecursionLimit
 #include "js/GlobalObject.h"
@@ -71,6 +73,7 @@
 #include "js/Wrapper.h"
 #include "js/WrapperCallbacks.h"
 #include "proxy/DOMProxy.h"
+#include "util/Identifier.h"  // IsIdentifier
 #include "util/StringBuffer.h"
 #include "util/Text.h"
 #include "vm/BoundFunctionObject.h"
@@ -79,8 +82,8 @@
 #include "vm/ErrorReporting.h"
 #include "vm/FunctionPrefixKind.h"
 #include "vm/Interpreter.h"
-#include "vm/JSAtom.h"
 #include "vm/JSAtomState.h"
+#include "vm/JSAtomUtils.h"  // Atomize, AtomizeWithoutActiveZone, AtomizeChars, PinAtom, ClassName
 #include "vm/JSContext.h"
 #include "vm/JSFunction.h"
 #include "vm/JSObject.h"
@@ -101,7 +104,7 @@
 #include "vm/Compartment-inl.h"
 #include "vm/Interpreter-inl.h"
 #include "vm/IsGivenTypeObject-inl.h"  // js::IsGivenTypeObject
-#include "vm/JSAtom-inl.h"
+#include "vm/JSAtomUtils-inl.h"  // AtomToId, PrimitiveValueToId, IndexToId, ClassName
 #include "vm/JSFunction-inl.h"
 #include "vm/JSScript-inl.h"
 #include "vm/NativeObject-inl.h"
@@ -1302,6 +1305,17 @@ JS_PUBLIC_API void JS::MaybeRunNurseryCollection(JSRuntime* rt,
   }
 }
 
+JS_PUBLIC_API void JS::RunNurseryCollection(
+    JSRuntime* rt, JS::GCReason reason,
+    mozilla::TimeDuration aSinceLastMinorGC) {
+  gc::GCRuntime& gc = rt->gc;
+  if (!gc.nursery().lastCollectionEndTime() ||
+      (mozilla::TimeStamp::Now() - gc.nursery().lastCollectionEndTime() >
+       aSinceLastMinorGC)) {
+    gc.minorGC(reason);
+  }
+}
+
 JS_PUBLIC_API void JS_GC(JSContext* cx, JS::GCReason reason) {
   AssertHeapIsIdle();
   JS::PrepareForFullGC(cx);
@@ -1487,7 +1501,6 @@ JS_PUBLIC_API void JS_SetNativeStackQuota(
     JS::NativeStackSize trustedScriptStackSize,
     JS::NativeStackSize untrustedScriptStackSize) {
   MOZ_ASSERT(!cx->activation());
-  MOZ_ASSERT(cx->isMainThreadContext());
 
   if (!trustedScriptStackSize) {
     trustedScriptStackSize = systemCodeStackSize;
@@ -1721,6 +1734,24 @@ JS::RealmCreationOptions& JS::RealmCreationOptions::setCoopAndCoepEnabled(
   return *this;
 }
 
+JS::RealmCreationOptions& JS::RealmCreationOptions::setLocaleCopyZ(
+    const char* locale) {
+  const size_t size = strlen(locale) + 1;
+
+  AutoEnterOOMUnsafeRegion oomUnsafe;
+  char* memoryPtr = js_pod_malloc<char>(sizeof(LocaleString) + size);
+  if (!memoryPtr) {
+    oomUnsafe.crash("RealmCreationOptions::setLocaleCopyZ");
+  }
+
+  char* localePtr = memoryPtr + sizeof(LocaleString);
+  memcpy(localePtr, locale, size);
+
+  locale_ = new (memoryPtr) LocaleString(localePtr);
+
+  return *this;
+}
+
 const JS::RealmBehaviors& JS::RealmBehaviorsRef(JS::Realm* realm) {
   return realm->behaviors();
 }
@@ -1730,6 +1761,11 @@ const JS::RealmBehaviors& JS::RealmBehaviorsRef(JSContext* cx) {
 }
 
 void JS::SetRealmNonLive(Realm* realm) { realm->setNonLive(); }
+
+void JS::SetRealmReduceTimerPrecisionCallerType(Realm* realm,
+                                                JS::RTPCallerTypeToken type) {
+  realm->setReduceTimerPrecisionCallerType(type);
+}
 
 JS_PUBLIC_API JSObject* JS_NewGlobalObject(JSContext* cx, const JSClass* clasp,
                                            JSPrincipals* principals,
@@ -1787,7 +1823,18 @@ JS_PUBLIC_API void JS_FireOnNewGlobalObject(JSContext* cx,
   // This infallibility will eat OOM and slow script, but if that happens
   // we'll likely run up into them again soon in a fallible context.
   cx->check(global);
+
   Rooted<js::GlobalObject*> globalObject(cx, &global->as<GlobalObject>());
+#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
+  if (JS::GetReduceMicrosecondTimePrecisionCallback()) {
+    MOZ_DIAGNOSTIC_ASSERT(globalObject->realm()
+                              ->behaviors()
+                              .reduceTimerPrecisionCallerType()
+                              .isSome(),
+                          "Trying to create a global without setting an "
+                          "explicit RTPCallerType!");
+  }
+#endif
   DebugAPI::onNewGlobalObject(cx, globalObject);
   cx->runtime()->ensureRealmIsRecordingAllocations(globalObject);
 }
@@ -2041,13 +2088,13 @@ JS_PUBLIC_API bool JS::PropertySpecNameToPermanentId(JSContext* cx,
   return true;
 }
 
-JS_PUBLIC_API bool JS::ObjectToCompletePropertyDescriptor(
-    JSContext* cx, HandleObject obj, HandleValue descObj,
+JS_PUBLIC_API bool JS::ToCompletePropertyDescriptor(
+    JSContext* cx, HandleValue descriptor,
     MutableHandle<PropertyDescriptor> desc) {
-  // |obj| can be in a different compartment here. The caller is responsible
-  // for wrapping it (see JS_WrapPropertyDescriptor).
-  cx->check(descObj);
-  if (!ToPropertyDescriptor(cx, descObj, true, desc)) {
+  AssertHeapIsIdle();
+  CHECK_THREAD(cx);
+  cx->check(descriptor);
+  if (!ToPropertyDescriptor(cx, descriptor, /* checkAccessors */ true, desc)) {
     return false;
   }
   CompletePropertyDescriptor(desc);
@@ -2261,12 +2308,33 @@ JS_PUBLIC_API JSFunction* JS::NewFunctionFromSpec(JSContext* cx,
 
 JS_PUBLIC_API JSObject* JS_GetFunctionObject(JSFunction* fun) { return fun; }
 
-JS_PUBLIC_API JSString* JS_GetFunctionId(JSFunction* fun) {
-  return fun->explicitName();
+JS_PUBLIC_API bool JS_GetFunctionId(JSContext* cx, JS::Handle<JSFunction*> fun,
+                                    JS::MutableHandle<JSString*> name) {
+  JS::Rooted<JSAtom*> atom(cx);
+  if (!fun->getExplicitName(cx, &atom)) {
+    return false;
+  }
+  name.set(atom);
+  return true;
 }
 
-JS_PUBLIC_API JSString* JS_GetFunctionDisplayId(JSFunction* fun) {
-  return fun->displayAtom();
+JS_PUBLIC_API JSString* JS_GetMaybePartialFunctionId(JSFunction* fun) {
+  return fun->maybePartialExplicitName();
+}
+
+JS_PUBLIC_API bool JS_GetFunctionDisplayId(JSContext* cx,
+                                           JS::Handle<JSFunction*> fun,
+                                           JS::MutableHandle<JSString*> name) {
+  JS::Rooted<JSAtom*> atom(cx);
+  if (!fun->getDisplayAtom(cx, &atom)) {
+    return false;
+  }
+  name.set(atom);
+  return true;
+}
+
+JS_PUBLIC_API JSString* JS_GetMaybePartialFunctionDisplayId(JSFunction* fun) {
+  return fun->maybePartialDisplayAtom();
 }
 
 JS_PUBLIC_API uint16_t JS_GetFunctionArity(JSFunction* fun) {
@@ -2302,28 +2370,24 @@ void JS::TransitiveCompileOptions::copyPODTransitiveOptions(
   mutedErrors_ = rhs.mutedErrors_;
   forceStrictMode_ = rhs.forceStrictMode_;
   alwaysUseFdlibm_ = rhs.alwaysUseFdlibm_;
-  sourcePragmas_ = rhs.sourcePragmas_;
   skipFilenameValidation_ = rhs.skipFilenameValidation_;
   hideScriptFromDebugger_ = rhs.hideScriptFromDebugger_;
   deferDebugMetadata_ = rhs.deferDebugMetadata_;
   eagerDelazificationStrategy_ = rhs.eagerDelazificationStrategy_;
 
   selfHostingMode = rhs.selfHostingMode;
-  asmJSOption = rhs.asmJSOption;
-  throwOnAsmJSValidationFailureOption = rhs.throwOnAsmJSValidationFailureOption;
-  forceAsync = rhs.forceAsync;
   discardSource = rhs.discardSource;
   sourceIsLazy = rhs.sourceIsLazy;
   allowHTMLComments = rhs.allowHTMLComments;
   nonSyntacticScope = rhs.nonSyntacticScope;
 
   topLevelAwait = rhs.topLevelAwait;
-  importAssertions = rhs.importAssertions;
 
   borrowBuffer = rhs.borrowBuffer;
   usePinnedBytecode = rhs.usePinnedBytecode;
-  allocateInstantiationStorage = rhs.allocateInstantiationStorage;
   deoptimizeModuleGlobalVars = rhs.deoptimizeModuleGlobalVars;
+
+  prefableOptions_ = rhs.prefableOptions_;
 
   introductionType = rhs.introductionType;
   introductionLineno = rhs.introductionLineno;
@@ -2340,8 +2404,7 @@ void JS::ReadOnlyCompileOptions::copyPODNonTransitiveOptions(
   noScriptRval = rhs.noScriptRval;
 }
 
-JS::OwningCompileOptions::OwningCompileOptions(JSContext* cx)
-    : ReadOnlyCompileOptions() {}
+JS::OwningCompileOptions::OwningCompileOptions(JSContext* cx) {}
 
 void JS::OwningCompileOptions::release() {
   // OwningCompileOptions always owns these, so these casts are okay.
@@ -2360,6 +2423,31 @@ size_t JS::OwningCompileOptions::sizeOfExcludingThis(
     mozilla::MallocSizeOf mallocSizeOf) const {
   return mallocSizeOf(filename_.c_str()) + mallocSizeOf(sourceMapURL_) +
          mallocSizeOf(introducerFilename_.c_str());
+}
+
+void JS::OwningCompileOptions::steal(JS::OwningCompileOptions&& rhs) {
+  // Release existing string allocations.
+  release();
+
+  copyPODNonTransitiveOptions(rhs);
+  copyPODTransitiveOptions(rhs);
+
+  filename_ = rhs.filename_;
+  rhs.filename_ = JS::ConstUTF8CharsZ();
+  introducerFilename_ = rhs.introducerFilename_;
+  rhs.introducerFilename_ = JS::ConstUTF8CharsZ();
+  sourceMapURL_ = rhs.sourceMapURL_;
+  rhs.sourceMapURL_ = nullptr;
+}
+
+void JS::OwningCompileOptions::steal(JS::OwningDecodeOptions&& rhs) {
+  // Release existing string allocations.
+  release();
+
+  rhs.copyPODOptionsTo(*this);
+
+  introducerFilename_ = rhs.introducerFilename_;
+  rhs.introducerFilename_ = JS::ConstUTF8CharsZ();
 }
 
 template <typename ContextT>
@@ -2408,27 +2496,17 @@ bool JS::OwningCompileOptions::copy(JS::FrontendContext* fc,
   return copyImpl(fc, rhs);
 }
 
-JS::CompileOptions::CompileOptions(JSContext* cx) : ReadOnlyCompileOptions() {
-  if (!js::IsAsmJSCompilationAvailable(cx)) {
-    // Distinguishing the cases is just for error reporting.
-    asmJSOption = !cx->options().asmJS()
-                      ? AsmJSOption::DisabledByAsmJSPref
-                      : AsmJSOption::DisabledByNoWasmCompiler;
-  } else if (cx->realm() && (cx->realm()->debuggerObservesWasm() ||
-                             cx->realm()->debuggerObservesAsmJS())) {
-    asmJSOption = AsmJSOption::DisabledByDebugger;
-  } else {
-    asmJSOption = AsmJSOption::Enabled;
+JS::CompileOptions::CompileOptions(JSContext* cx) {
+  prefableOptions_ = cx->options().compileOptions();
+
+  if (cx->options().asmJSOption() == AsmJSOption::Enabled) {
+    if (!js::IsAsmJSCompilationAvailable(cx)) {
+      prefableOptions_.setAsmJSOption(AsmJSOption::DisabledByNoWasmCompiler);
+    } else if (cx->realm() && (cx->realm()->debuggerObservesWasm() ||
+                               cx->realm()->debuggerObservesAsmJS())) {
+      prefableOptions_.setAsmJSOption(AsmJSOption::DisabledByDebugger);
+    }
   }
-  throwOnAsmJSValidationFailureOption =
-      cx->options().throwOnAsmJSValidationFailure();
-
-  importAssertions = cx->options().importAssertions();
-
-  sourcePragmas_ = cx->options().sourcePragmas();
-
-  // Certain modes of operation force strict-mode in general.
-  forceStrictMode_ = cx->options().strictMode();
 
   // Certain modes of operation disallow syntax parsing in general.
   if (coverage::IsLCovEnabled()) {
@@ -2448,7 +2526,7 @@ CompileOptions& CompileOptions::setIntroductionInfoToCaller(
     MutableHandle<JSScript*> introductionScript) {
   RootedScript maybeScript(cx);
   const char* filename;
-  unsigned lineno;
+  uint32_t lineno;
   uint32_t pcOffset;
   bool mutedErrors;
   DescribeScriptedCallerForCompilation(cx, &maybeScript, &filename, &lineno,
@@ -2458,6 +2536,43 @@ CompileOptions& CompileOptions::setIntroductionInfoToCaller(
     return setIntroductionInfo(filename, introductionType, lineno, pcOffset);
   }
   return setIntroductionType(introductionType);
+}
+
+JS::OwningDecodeOptions::~OwningDecodeOptions() { release(); }
+
+void JS::OwningDecodeOptions::release() {
+  js_free(const_cast<char*>(introducerFilename_.c_str()));
+
+  introducerFilename_ = JS::ConstUTF8CharsZ();
+}
+
+bool JS::OwningDecodeOptions::copy(JS::FrontendContext* maybeFc,
+                                   const JS::ReadOnlyDecodeOptions& rhs) {
+  copyPODOptionsFrom(rhs);
+
+  if (rhs.introducerFilename()) {
+    MOZ_ASSERT(maybeFc);
+    const char* str =
+        DuplicateString(maybeFc, rhs.introducerFilename().c_str()).release();
+    if (!str) {
+      return false;
+    }
+    introducerFilename_ = JS::ConstUTF8CharsZ(str);
+  }
+
+  return true;
+}
+
+void JS::OwningDecodeOptions::infallibleCopy(
+    const JS::ReadOnlyDecodeOptions& rhs) {
+  copyPODOptionsFrom(rhs);
+
+  MOZ_ASSERT(!rhs.introducerFilename());
+}
+
+size_t JS::OwningDecodeOptions::sizeOfExcludingThis(
+    mozilla::MallocSizeOf mallocSizeOf) const {
+  return mallocSizeOf(introducerFilename_.c_str());
 }
 
 JS_PUBLIC_API JSObject* JS_GetGlobalFromScript(JSScript* script) {
@@ -3071,7 +3186,7 @@ JS_PUBLIC_API JSString* JS_NewUCStringCopyN(JSContext* cx, const char16_t* s,
   AssertHeapIsIdle();
   CHECK_THREAD(cx);
   if (!n) {
-    return cx->names().empty;
+    return cx->names().empty_;
   }
   return NewStringCopyN<CanGC>(cx, s, n);
 }
@@ -3878,15 +3993,15 @@ void JSErrorBase::freeMessage() {
   message_ = JS::ConstUTF8CharsZ();
 }
 
-JSErrorNotes::JSErrorNotes() : notes_() {}
+JSErrorNotes::JSErrorNotes() = default;
 
 JSErrorNotes::~JSErrorNotes() = default;
 
 static UniquePtr<JSErrorNotes::Note> CreateErrorNoteVA(
     FrontendContext* fc, const char* filename, unsigned sourceId,
-    unsigned lineno, unsigned column, JSErrorCallback errorCallback,
-    void* userRef, const unsigned errorNumber, ErrorArgumentsType argumentsType,
-    va_list ap) {
+    uint32_t lineno, JS::ColumnNumberOneOrigin column,
+    JSErrorCallback errorCallback, void* userRef, const unsigned errorNumber,
+    ErrorArgumentsType argumentsType, va_list ap) {
   auto note = MakeUnique<JSErrorNotes::Note>();
   if (!note) {
     ReportOutOfMemory(fc);
@@ -3908,9 +4023,10 @@ static UniquePtr<JSErrorNotes::Note> CreateErrorNoteVA(
 }
 
 bool JSErrorNotes::addNoteVA(FrontendContext* fc, const char* filename,
-                             unsigned sourceId, unsigned lineno,
-                             unsigned column, JSErrorCallback errorCallback,
-                             void* userRef, const unsigned errorNumber,
+                             unsigned sourceId, uint32_t lineno,
+                             JS::ColumnNumberOneOrigin column,
+                             JSErrorCallback errorCallback, void* userRef,
+                             const unsigned errorNumber,
                              ErrorArgumentsType argumentsType, va_list ap) {
   auto note =
       CreateErrorNoteVA(fc, filename, sourceId, lineno, column, errorCallback,
@@ -3927,10 +4043,10 @@ bool JSErrorNotes::addNoteVA(FrontendContext* fc, const char* filename,
 }
 
 bool JSErrorNotes::addNoteASCII(JSContext* cx, const char* filename,
-                                unsigned sourceId, unsigned lineno,
-                                unsigned column, JSErrorCallback errorCallback,
-                                void* userRef, const unsigned errorNumber,
-                                ...) {
+                                unsigned sourceId, uint32_t lineno,
+                                JS::ColumnNumberOneOrigin column,
+                                JSErrorCallback errorCallback, void* userRef,
+                                const unsigned errorNumber, ...) {
   AutoReportFrontendContext fc(cx);
   va_list ap;
   va_start(ap, errorNumber);
@@ -3941,10 +4057,10 @@ bool JSErrorNotes::addNoteASCII(JSContext* cx, const char* filename,
 }
 
 bool JSErrorNotes::addNoteASCII(FrontendContext* fc, const char* filename,
-                                unsigned sourceId, unsigned lineno,
-                                unsigned column, JSErrorCallback errorCallback,
-                                void* userRef, const unsigned errorNumber,
-                                ...) {
+                                unsigned sourceId, uint32_t lineno,
+                                JS::ColumnNumberOneOrigin column,
+                                JSErrorCallback errorCallback, void* userRef,
+                                const unsigned errorNumber, ...) {
   va_list ap;
   va_start(ap, errorNumber);
   bool ok = addNoteVA(fc, filename, sourceId, lineno, column, errorCallback,
@@ -3954,10 +4070,10 @@ bool JSErrorNotes::addNoteASCII(FrontendContext* fc, const char* filename,
 }
 
 bool JSErrorNotes::addNoteLatin1(JSContext* cx, const char* filename,
-                                 unsigned sourceId, unsigned lineno,
-                                 unsigned column, JSErrorCallback errorCallback,
-                                 void* userRef, const unsigned errorNumber,
-                                 ...) {
+                                 unsigned sourceId, uint32_t lineno,
+                                 JS::ColumnNumberOneOrigin column,
+                                 JSErrorCallback errorCallback, void* userRef,
+                                 const unsigned errorNumber, ...) {
   AutoReportFrontendContext fc(cx);
   va_list ap;
   va_start(ap, errorNumber);
@@ -3968,10 +4084,10 @@ bool JSErrorNotes::addNoteLatin1(JSContext* cx, const char* filename,
 }
 
 bool JSErrorNotes::addNoteLatin1(FrontendContext* fc, const char* filename,
-                                 unsigned sourceId, unsigned lineno,
-                                 unsigned column, JSErrorCallback errorCallback,
-                                 void* userRef, const unsigned errorNumber,
-                                 ...) {
+                                 unsigned sourceId, uint32_t lineno,
+                                 JS::ColumnNumberOneOrigin column,
+                                 JSErrorCallback errorCallback, void* userRef,
+                                 const unsigned errorNumber, ...) {
   va_list ap;
   va_start(ap, errorNumber);
   bool ok = addNoteVA(fc, filename, sourceId, lineno, column, errorCallback,
@@ -3981,9 +4097,10 @@ bool JSErrorNotes::addNoteLatin1(FrontendContext* fc, const char* filename,
 }
 
 bool JSErrorNotes::addNoteUTF8(JSContext* cx, const char* filename,
-                               unsigned sourceId, unsigned lineno,
-                               unsigned column, JSErrorCallback errorCallback,
-                               void* userRef, const unsigned errorNumber, ...) {
+                               unsigned sourceId, uint32_t lineno,
+                               JS::ColumnNumberOneOrigin column,
+                               JSErrorCallback errorCallback, void* userRef,
+                               const unsigned errorNumber, ...) {
   AutoReportFrontendContext fc(cx);
   va_list ap;
   va_start(ap, errorNumber);
@@ -3994,9 +4111,10 @@ bool JSErrorNotes::addNoteUTF8(JSContext* cx, const char* filename,
 }
 
 bool JSErrorNotes::addNoteUTF8(FrontendContext* fc, const char* filename,
-                               unsigned sourceId, unsigned lineno,
-                               unsigned column, JSErrorCallback errorCallback,
-                               void* userRef, const unsigned errorNumber, ...) {
+                               unsigned sourceId, uint32_t lineno,
+                               JS::ColumnNumberOneOrigin column,
+                               JSErrorCallback errorCallback, void* userRef,
+                               const unsigned errorNumber, ...) {
   va_list ap;
   va_start(ap, errorNumber);
   bool ok = addNoteVA(fc, filename, sourceId, lineno, column, errorCallback,
@@ -4081,6 +4199,22 @@ JS_PUBLIC_API void JS_SetGlobalJitCompilerOption(JSContext* cx,
                                                  uint32_t value) {
   JSRuntime* rt = cx->runtime();
   switch (opt) {
+#ifdef ENABLE_PORTABLE_BASELINE_INTERP
+    case JSJITCOMPILER_PORTABLE_BASELINE_ENABLE:
+      if (value == 1) {
+        jit::JitOptions.portableBaselineInterpreter = true;
+      } else if (value == 0) {
+        jit::JitOptions.portableBaselineInterpreter = false;
+      }
+      break;
+    case JSJITCOMPILER_PORTABLE_BASELINE_WARMUP_THRESHOLD:
+      if (value == uint32_t(-1)) {
+        jit::DefaultJitOptions defaultValues;
+        value = defaultValues.portableBaselineInterpreterWarmUpThreshold;
+      }
+      jit::JitOptions.portableBaselineInterpreterWarmUpThreshold = value;
+      break;
+#endif
     case JSJITCOMPILER_BASELINE_INTERPRETER_WARMUP_TRIGGER:
       if (value == uint32_t(-1)) {
         jit::DefaultJitOptions defaultValues;
@@ -4352,7 +4486,18 @@ JS_PUBLIC_API bool JS_GetGlobalJitCompilerOption(JSContext* cx,
       return false;
   }
 #else
-  *valueOut = 0;
+  switch (opt) {
+#  ifdef ENABLE_PORTABLE_BASELINE_INTERP
+    case JSJITCOMPILER_PORTABLE_BASELINE_ENABLE:
+      *valueOut = jit::JitOptions.portableBaselineInterpreter;
+      break;
+    case JSJITCOMPILER_PORTABLE_BASELINE_WARMUP_THRESHOLD:
+      *valueOut = jit::JitOptions.portableBaselineInterpreterWarmUpThreshold;
+      break;
+#  endif
+    default:
+      *valueOut = 0;
+  }
 #endif
   return true;
 }
@@ -4420,12 +4565,12 @@ JS_PUBLIC_API bool JS_IsIdentifier(JSContext* cx, HandleString str,
     return false;
   }
 
-  *isIdentifier = js::frontend::IsIdentifier(linearStr);
+  *isIdentifier = IsIdentifier(linearStr);
   return true;
 }
 
 JS_PUBLIC_API bool JS_IsIdentifier(const char16_t* chars, size_t length) {
-  return js::frontend::IsIdentifier(chars, length);
+  return IsIdentifier(chars, length);
 }
 
 namespace JS {
@@ -4470,7 +4615,8 @@ const char* AutoFilename::get() const {
 }
 
 JS_PUBLIC_API bool DescribeScriptedCaller(JSContext* cx, AutoFilename* filename,
-                                          unsigned* lineno, unsigned* column) {
+                                          uint32_t* lineno,
+                                          JS::ColumnNumberOneOrigin* column) {
   if (filename) {
     filename->reset();
   }
@@ -4478,7 +4624,7 @@ JS_PUBLIC_API bool DescribeScriptedCaller(JSContext* cx, AutoFilename* filename,
     *lineno = 0;
   }
   if (column) {
-    *column = 0;
+    *column = JS::ColumnNumberOneOrigin();
   }
 
   if (!cx->compartment()) {
@@ -4512,9 +4658,15 @@ JS_PUBLIC_API bool DescribeScriptedCaller(JSContext* cx, AutoFilename* filename,
   }
 
   if (lineno) {
-    *lineno = i.computeLine(column);
+    JS::TaggedColumnNumberOneOrigin columnNumber;
+    *lineno = i.computeLine(&columnNumber);
+    if (column) {
+      *column = JS::ColumnNumberOneOrigin(columnNumber.oneOriginValue());
+    }
   } else if (column) {
-    i.computeLine(column);
+    JS::TaggedColumnNumberOneOrigin columnNumber;
+    i.computeLine(&columnNumber);
+    *column = JS::ColumnNumberOneOrigin(columnNumber.oneOriginValue());
   }
 
   return true;

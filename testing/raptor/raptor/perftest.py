@@ -16,7 +16,6 @@ import traceback
 from abc import ABCMeta, abstractmethod
 
 import mozinfo
-import mozprocess
 import mozproxy.utils as mpu
 import mozversion
 import six
@@ -32,7 +31,14 @@ for path in paths:
         raise IOError("%s does not exist. " % path)
     sys.path.insert(0, path)
 
-from cmdline import FIREFOX_ANDROID_APPS
+from chrome_trace import ChromeTrace
+from cmdline import (
+    CHROME_ANDROID_APPS,
+    FIREFOX_ANDROID_APPS,
+    FIREFOX_APPS,
+    GECKO_PROFILER_APPS,
+    TRACE_APPS,
+)
 from condprof.client import ProfileNotFoundError, get_profile
 from condprof.util import get_current_platform
 from gecko_profile import GeckoProfile
@@ -167,7 +173,13 @@ class Perftest(object):
         # To differentiate between chrome/firefox failures, we
         # set an app variable in the logger which prefixes messages
         # with the app name
-        if self.config["app"] in ("chrome", "chrome-m", "chromium", "custom-car"):
+        if self.config["app"] in (
+            "chrome",
+            "chrome-m",
+            "chromium",
+            "custom-car",
+            "cstm-car-m",
+        ):
             LOG.set_app(self.config["app"])
 
         self.browser_name = None
@@ -178,6 +190,7 @@ class Perftest(object):
         self.playback = None
         self.benchmark = None
         self.gecko_profiler = None
+        self.chrome_trace = None
         self.device = None
         self.runtime_error = None
         self.profile_class = profile_class or app
@@ -381,19 +394,17 @@ class Perftest(object):
         return self.conditioned_profile_copy
 
     def build_browser_profile(self):
-        if self.config["app"] in ["safari"]:
+        if self.config["app"] in FIREFOX_APPS:
+            if self.config.get("conditioned_profile") is None:
+                self.profile = create_profile(self.profile_class)
+            else:
+                # use mozprofile to create a profile for us, from our conditioned profile's path
+                self.profile = create_profile(
+                    self.profile_class, profile=self.get_conditioned_profile()
+                )
+        else:
             self.profile = None
             return
-        elif (
-            self.config["app"] in ["chrome", "chromium", "chrome-m", "custom-car"]
-            or self.config.get("conditioned_profile") is None
-        ):
-            self.profile = create_profile(self.profile_class)
-        else:
-            # use mozprofile to create a profile for us, from our conditioned profile's path
-            self.profile = create_profile(
-                self.profile_class, profile=self.get_conditioned_profile()
-            )
         # Merge extra profile data from testing/profiles
         with open(os.path.join(self.profile_data_dir, "profiles.json"), "r") as fh:
             base_profiles = json.load(fh)["raptor"]
@@ -447,7 +458,7 @@ class Perftest(object):
         if test.get("playback") is not None and self.playback is None:
             self.start_playback(test)
 
-        if test.get("preferences") is not None and self.config["app"] not in "safari":
+        if test.get("preferences") is not None and self.config["app"] in FIREFOX_APPS:
             self.set_browser_test_prefs(test["preferences"])
 
     @abstractmethod
@@ -503,10 +514,15 @@ class Perftest(object):
         # gecko_profile flag form the command line or when an extra profiler-enabled
         # run is added with extra_profiler_run flag.
         if self.config["gecko_profile"] or self.config.get("extra_profiler_run"):
-            self.gecko_profiler.symbolicate()
-            # clean up the temp gecko profiling folders
-            LOG.info("cleaning up after gecko profiling")
-            self.gecko_profiler.clean()
+            if self.config["app"] in GECKO_PROFILER_APPS:
+                self.gecko_profiler.symbolicate()
+                # clean up the temp gecko profiling folders
+                LOG.info("cleaning up after gecko profiling")
+                self.gecko_profiler.clean()
+            elif self.config["app"] in TRACE_APPS:
+                self.chrome_trace.output_trace()
+                LOG.info("cleaning up after gathering chrome trace")
+                self.chrome_trace.clean()
 
         return res
 
@@ -560,13 +576,16 @@ class Perftest(object):
         # creating the playback tool
 
         playback_dir = os.path.join(here, "tooltool-manifests", "playback")
+        playback_manifest = test.get("playback_pageset_manifest")
+        playback_manifests = playback_manifest.split(",")
 
         self.config.update(
             {
                 "playback_tool": test.get("playback"),
                 "playback_version": test.get("playback_version", "8.1.1"),
                 "playback_files": [
-                    os.path.join(playback_dir, test.get("playback_pageset_manifest"))
+                    os.path.join(playback_dir, manifest)
+                    for manifest in playback_manifests
                 ],
             }
         )
@@ -585,6 +604,14 @@ class Perftest(object):
             LOG.critical("Profiling ignored because MOZ_UPLOAD_DIR was not set")
         else:
             self.gecko_profiler = GeckoProfile(upload_dir, self.config, test)
+
+    def _init_chrome_trace(self, test):
+        LOG.info("initializing Chrome Trace handler")
+        upload_dir = os.getenv("MOZ_UPLOAD_DIR")
+        if not upload_dir:
+            LOG.critical("Chrome Trace ignored because MOZ_UPLOAD_DIR was not set")
+        else:
+            self.chrome_trace = ChromeTrace(upload_dir, self.config, test)
 
     def disable_non_local_connections(self):
         # For Firefox we need to set MOZ_DISABLE_NONLOCAL_CONNECTIONS=1 env var before startup
@@ -631,8 +658,7 @@ class PerftestAndroid(Perftest):
                     "Failed to get android browser meta data through mozversion: %s-%s"
                     % (e.__class__.__name__, e)
                 )
-
-        if self.config["app"] == "chrome-m" or browser_version is None:
+        elif self.config["app"] in CHROME_ANDROID_APPS or browser_version is None:
             # We absolutely need to determine the chrome
             # version here so that we can select the correct
             # chromedriver for browsertime
@@ -642,7 +668,7 @@ class PerftestAndroid(Perftest):
 
             # Chrome uses a specific binary that we don't set as a command line option
             binary = "com.android.chrome"
-            if self.config["app"] not in ("chrome-m",):
+            if self.config["app"] not in CHROME_ANDROID_APPS:
                 binary = self.config["binary"]
 
             pkg_info = device.shell_output("dumpsys package %s" % binary)
@@ -657,9 +683,7 @@ class PerftestAndroid(Perftest):
                     break
 
             if not browser_version:
-                raise Exception(
-                    "Could not determine version for Google Chrome for Android"
-                )
+                raise Exception("Could not determine version for apk %s" % binary)
 
         if not browser_name:
             LOG.warning("Could not find a browser name")
@@ -679,7 +703,6 @@ class PerftestAndroid(Perftest):
 
     def set_reverse_ports(self):
         if self.is_localhost:
-
             if self.playback:
                 LOG.info("making the raptor playback server port available to device")
                 self.set_reverse_port(self.playback.port)
@@ -693,13 +716,14 @@ class PerftestAndroid(Perftest):
     def build_browser_profile(self):
         super(PerftestAndroid, self).build_browser_profile()
 
-        # Merge in the Android profile.
-        path = os.path.join(self.profile_data_dir, "raptor-android")
-        LOG.info("Merging profile: {}".format(path))
-        self.profile.merge(path)
-        self.profile.set_preferences(
-            {"browser.tabs.remote.autostart": self.config["e10s"]}
-        )
+        if self.config["app"] in FIREFOX_ANDROID_APPS:
+            # Merge in the Android profile.
+            path = os.path.join(self.profile_data_dir, "raptor-android")
+            LOG.info("Merging profile: {}".format(path))
+            self.profile.merge(path)
+            self.profile.set_preferences(
+                {"browser.tabs.remote.autostart": self.config["e10s"]}
+            )
 
     def clear_app_data(self):
         LOG.info("clearing %s app data" % self.config["binary"])
@@ -821,14 +845,14 @@ class PerftestDesktop(Perftest):
                     browser_version = plist.get("CFBundleShortVersionString")
                 elif "linux" in self.config["platform"]:
                     command = [self.config["binary"], "--version"]
-                    proc = mozprocess.ProcessHandler(command)
-                    proc.run(timeout=10, outputTimeout=10)
-                    proc.wait()
+                    proc = subprocess.run(
+                        command, timeout=10, capture_output=True, text=True
+                    )
 
-                    bmeta = proc.output
+                    bmeta = proc.stdout.split("\n")
                     meta_re = re.compile(r"([A-z\s]+)\s+([\w.]*)")
                     if len(bmeta) != 0:
-                        match = meta_re.match(bmeta[0].decode("utf-8"))
+                        match = meta_re.match(bmeta[0])
                         if match:
                             browser_name = self.config["app"]
                             browser_version = match.group(2)

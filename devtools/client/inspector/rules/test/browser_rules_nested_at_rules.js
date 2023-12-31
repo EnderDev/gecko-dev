@@ -43,11 +43,11 @@ add_task(async function () {
     {
       selector: `h1, [test-hint="nested"]`,
       ancestorRulesData: [
-        `@layer mylayer`,
-        `@supports (container-name: mycontainer)`,
-        `@container mycontainer (min-width: 1px)`,
-        `@media screen`,
-        `@container mycontainer (min-width: 2rem)`,
+        `@layer mylayer {`,
+        `  @supports (container-name: mycontainer) {`,
+        `    @container mycontainer (min-width: 1px) {`,
+        `      @media screen {`,
+        `        @container mycontainer (min-width: 2rem) {`,
       ],
     },
   ];
@@ -64,7 +64,7 @@ add_task(async function () {
     info(`Checking rule #${i}: ${expectedRule.selector}`);
 
     const selector = rulesInView[i].querySelector(
-      ".ruleview-selectorcontainer"
+      ".ruleview-selectors-container"
     ).innerText;
     is(selector, expectedRule.selector, `Expected selector for ${selector}`);
 

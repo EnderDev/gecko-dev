@@ -48,6 +48,7 @@ fn test_validate() {
 mod component;
 mod core;
 mod func;
+pub mod names;
 mod operators;
 pub mod types;
 
@@ -244,9 +245,39 @@ pub struct WasmFeatures {
     pub function_references: bool,
     /// The WebAssembly memory control proposal
     pub memory_control: bool,
+    /// The WebAssembly gc proposal
+    pub gc: bool,
+    /// Support for the `value` type in the component model proposal.
+    pub component_model_values: bool,
 }
 
 impl WasmFeatures {
+    /// Returns [`WasmFeatures`] with all features enabled.
+    pub fn all() -> Self {
+        WasmFeatures {
+            mutable_global: true,
+            saturating_float_to_int: true,
+            sign_extension: true,
+            reference_types: true,
+            multi_value: true,
+            bulk_memory: true,
+            simd: true,
+            relaxed_simd: true,
+            threads: true,
+            tail_call: true,
+            floats: true,
+            multi_memory: true,
+            exceptions: true,
+            memory64: true,
+            extended_const: true,
+            component_model: true,
+            function_references: true,
+            memory_control: true,
+            gc: true,
+            component_model_values: true,
+        }
+    }
+
     /// NOTE: This only checks that the value type corresponds to the feature set!!
     ///
     /// To check that reference types are valid, we need access to the module
@@ -262,22 +293,50 @@ impl WasmFeatures {
                 }
             }
             ValType::Ref(r) => {
-                if self.reference_types {
-                    if !self.function_references {
-                        match (r.heap_type, r.nullable) {
-                            (_, false) => {
-                                Err("function references required for non-nullable types")
-                            }
-                            (HeapType::TypedFunc(_), _) => {
-                                Err("function references required for index reference types")
-                            }
-                            _ => Ok(()),
+                if !self.reference_types {
+                    return Err("reference types support is not enabled");
+                }
+                match (r.heap_type(), r.is_nullable()) {
+                    // funcref/externref only require `reference-types`
+                    (HeapType::Func, true) | (HeapType::Extern, true) => Ok(()),
+
+                    // non-nullable func/extern references requires the
+                    // `function-references` proposal
+                    (HeapType::Func | HeapType::Extern, false) => {
+                        if self.function_references {
+                            Ok(())
+                        } else {
+                            Err("function references required for non-nullable types")
                         }
-                    } else {
-                        Ok(())
                     }
-                } else {
-                    Err("reference types support is not enabled")
+                    // indexed types require at least the function-references
+                    // proposal
+                    (HeapType::Indexed(_), _) => {
+                        if self.function_references {
+                            Ok(())
+                        } else {
+                            Err("function references required for index reference types")
+                        }
+                    }
+
+                    // types added in the gc proposal
+                    (
+                        HeapType::Any
+                        | HeapType::None
+                        | HeapType::Eq
+                        | HeapType::Struct
+                        | HeapType::Array
+                        | HeapType::I31
+                        | HeapType::NoExtern
+                        | HeapType::NoFunc,
+                        _,
+                    ) => {
+                        if self.gc {
+                            Ok(())
+                        } else {
+                            Err("heap types not supported without the gc feature")
+                        }
+                    }
                 }
             }
             ValType::V128 => {
@@ -304,6 +363,8 @@ impl Default for WasmFeatures {
             component_model: false,
             function_references: false,
             memory_control: false,
+            gc: false,
+            component_model_values: false,
 
             // On-by-default features (phase 4 or greater).
             mutable_global: true,
@@ -540,7 +601,8 @@ impl Validator {
                     );
                 }
                 if num == WASM_COMPONENT_VERSION {
-                    self.components.push(ComponentState::default());
+                    self.components
+                        .push(ComponentState::new(ComponentKind::Component));
                     State::Component
                 } else if num < WASM_COMPONENT_VERSION {
                     bail!(range.start, "unsupported component version: {num:#x}");
@@ -575,7 +637,8 @@ impl Validator {
                 state
                     .module
                     .assert_mut()
-                    .add_type(def, features, types, offset, false /* checked above */)
+                    .add_types(&def, features, types, offset, true)?;
+                Ok(())
             },
         )
     }
@@ -1029,11 +1092,11 @@ impl Validator {
                 current.instances.reserve(count as usize);
                 Ok(())
             },
-            |components, types, _, instance, offset| {
+            |components, types, features, instance, offset| {
                 components
                     .last_mut()
                     .unwrap()
-                    .add_instance(instance, types, offset)
+                    .add_instance(instance, features, types, offset)
             },
         )
     }
@@ -1049,8 +1112,8 @@ impl Validator {
             section,
             "alias",
             |_, _, _, _| Ok(()), // maximums checked via `add_alias`
-            |components, types, _, alias, offset| -> Result<(), BinaryReaderError> {
-                ComponentState::add_alias(components, alias, types, offset)
+            |components, types, features, alias, offset| -> Result<(), BinaryReaderError> {
+                ComponentState::add_alias(components, alias, features, types, offset)
             },
         )
     }
@@ -1120,6 +1183,15 @@ impl Validator {
                         func_index,
                         options,
                     } => current.lower_function(func_index, options.into_vec(), types, offset),
+                    crate::CanonicalFunction::ResourceNew { resource } => {
+                        current.resource_new(resource, types, offset)
+                    }
+                    crate::CanonicalFunction::ResourceDrop { resource } => {
+                        current.resource_drop(resource, types, offset)
+                    }
+                    crate::CanonicalFunction::ResourceRep { resource } => {
+                        current.resource_rep(resource, types, offset)
+                    }
                 }
             },
         )
@@ -1135,20 +1207,11 @@ impl Validator {
     ) -> Result<()> {
         self.state.ensure_component("start", range.start)?;
 
-        // let mut section = section.clone();
-        // let f = section.read()?;
-
-        // if !section.eof() {
-        //     return Err(BinaryReaderError::new(
-        //         "trailing data at the end of the start section",
-        //         section.original_position(),
-        //     ));
-        // }
-
         self.components.last_mut().unwrap().add_start(
             f.func_index,
             &f.arguments,
             f.results,
+            &self.features,
             &self.types,
             range.start,
         )
@@ -1165,11 +1228,11 @@ impl Validator {
             section,
             "import",
             |_, _, _, _| Ok(()), // add_import will check limits
-            |components, types, _, import, offset| {
+            |components, types, features, import, offset| {
                 components
                     .last_mut()
                     .unwrap()
-                    .add_import(import, types, offset)
+                    .add_import(import, features, types, offset)
             },
         )
     }
@@ -1187,22 +1250,23 @@ impl Validator {
             |components, _, count, offset| {
                 let current = components.last_mut().unwrap();
                 check_max(
-                    current.externs.len(),
+                    current.exports.len(),
                     count,
                     MAX_WASM_EXPORTS,
-                    "imports and exports",
+                    "exports",
                     offset,
                 )?;
-                current.externs.reserve(count as usize);
+                current.exports.reserve(count as usize);
                 Ok(())
             },
-            |components, types, _, export, offset| {
+            |components, types, features, export, offset| {
                 let current = components.last_mut().unwrap();
-                let ty = current.export_to_entity_type(&export, types, offset)?;
+                let ty = current.export_to_entity_type(&export, features, types, offset)?;
                 current.add_export(
                     export.name,
-                    export.url,
                     ty,
+                    features,
+                    types,
                     offset,
                     false, /* checked above */
                 )
@@ -1251,16 +1315,18 @@ impl Validator {
 
                 // Validate that all values were used for the component
                 if let Some(index) = component.values.iter().position(|(_, used)| !*used) {
-                    return Err(
-                        format_err!(offset,"value index {index} was not used as part of an instantiation, start function, or export"
-                            )
+                    bail!(
+                        offset,
+                        "value index {index} was not used as part of an \
+                         instantiation, start function, or export"
                     );
                 }
 
                 // If there's a parent component, pop the stack, add it to the parent,
                 // and continue to validate the component
+                let ty = component.finish(&mut self.types, offset)?;
                 if let Some(parent) = self.components.last_mut() {
-                    parent.add_component(&mut component, &mut self.types);
+                    parent.add_component(ty, &mut self.types)?;
                     self.state = State::Component;
                 }
 
@@ -1407,66 +1473,52 @@ mod tests {
         assert_eq!(types.instance_count(), 0);
         assert_eq!(types.value_count(), 0);
 
-        match types.func_type_at(0) {
-            Some(ty) => {
-                assert_eq!(ty.params(), [ValType::I32, ValType::I64]);
-                assert_eq!(ty.results(), [ValType::I32]);
-            }
-            _ => unreachable!(),
-        }
+        let ty = types[types.core_type_at(0)].unwrap_func();
+        assert_eq!(ty.params(), [ValType::I32, ValType::I64]);
+        assert_eq!(ty.results(), [ValType::I32]);
 
-        match types.func_type_at(1) {
-            Some(ty) => {
-                assert_eq!(ty.params(), [ValType::I64, ValType::I32]);
-                assert_eq!(ty.results(), []);
-            }
-            _ => unreachable!(),
-        }
+        let ty = types[types.core_type_at(1)].unwrap_func();
+        assert_eq!(ty.params(), [ValType::I64, ValType::I32]);
+        assert_eq!(ty.results(), []);
 
         assert_eq!(
             types.memory_at(0),
-            Some(MemoryType {
+            MemoryType {
                 memory64: false,
                 shared: false,
                 initial: 1,
                 maximum: Some(5)
-            })
+            }
         );
 
         assert_eq!(
             types.table_at(0),
-            Some(TableType {
+            TableType {
                 initial: 10,
                 maximum: None,
                 element_type: RefType::FUNCREF,
-            })
+            }
         );
 
         assert_eq!(
             types.global_at(0),
-            Some(GlobalType {
+            GlobalType {
                 content_type: ValType::I32,
                 mutable: true
-            })
+            }
         );
 
-        match types.function_at(0) {
-            Some(ty) => {
-                assert_eq!(ty.params(), [ValType::I32, ValType::I64]);
-                assert_eq!(ty.results(), [ValType::I32]);
-            }
-            _ => unreachable!(),
-        }
+        let id = types.function_at(0);
+        let ty = types[id].unwrap_func();
+        assert_eq!(ty.params(), [ValType::I32, ValType::I64]);
+        assert_eq!(ty.results(), [ValType::I32]);
 
-        match types.tag_at(0) {
-            Some(ty) => {
-                assert_eq!(ty.params(), [ValType::I64, ValType::I32]);
-                assert_eq!(ty.results(), []);
-            }
-            _ => unreachable!(),
-        }
+        let ty = types.tag_at(0);
+        let ty = types[ty].unwrap_func();
+        assert_eq!(ty.params(), [ValType::I64, ValType::I32]);
+        assert_eq!(ty.results(), []);
 
-        assert_eq!(types.element_at(0), Some(RefType::FUNCREF));
+        assert_eq!(types.element_at(0), RefType::FUNCREF);
 
         Ok(())
     }
@@ -1490,24 +1542,53 @@ mod tests {
 
         let types = validator.validate_all(&bytes)?;
 
-        let t_id = types.id_from_type_index(0, false).unwrap();
-        let a1_id = types.id_from_type_index(1, false).unwrap();
-        let a2_id = types.id_from_type_index(2, false).unwrap();
+        let t_id = types.component_type_at(0);
+        let a1_id = types.component_type_at(1);
+        let a2_id = types.component_type_at(2);
 
-        // The ids should all be different
+        // The ids should all be the same
+        assert!(t_id == a1_id);
+        assert!(t_id == a2_id);
+        assert!(a1_id == a2_id);
+
+        // However, they should all point to the same type
+        assert!(std::ptr::eq(&types[t_id], &types[a1_id],));
+        assert!(std::ptr::eq(&types[t_id], &types[a2_id],));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_type_id_exports() -> Result<()> {
+        let bytes = wat::parse_str(
+            r#"
+            (component
+              (type $T (list string))
+              (export $A1 "A1" (type $T))
+              (export $A2 "A2" (type $T))
+            )
+        "#,
+        )?;
+
+        let mut validator = Validator::new_with_features(WasmFeatures {
+            component_model: true,
+            ..Default::default()
+        });
+
+        let types = validator.validate_all(&bytes)?;
+
+        let t_id = types.component_type_at(0);
+        let a1_id = types.component_type_at(1);
+        let a2_id = types.component_type_at(2);
+
+        // The ids should all be the same
         assert!(t_id != a1_id);
         assert!(t_id != a2_id);
         assert!(a1_id != a2_id);
 
         // However, they should all point to the same type
-        assert!(std::ptr::eq(
-            types.type_from_id(t_id).unwrap(),
-            types.type_from_id(a1_id).unwrap()
-        ));
-        assert!(std::ptr::eq(
-            types.type_from_id(t_id).unwrap(),
-            types.type_from_id(a2_id).unwrap()
-        ));
+        assert!(std::ptr::eq(&types[t_id], &types[a1_id],));
+        assert!(std::ptr::eq(&types[t_id], &types[a2_id],));
 
         Ok(())
     }

@@ -200,6 +200,8 @@ struct DocShellLoadStateInit
   // The TriggineringSandboxFlags are the SandboxFlags of the entity
   // responsible for causing the load to occur.
   uint32_t TriggeringSandboxFlags;
+  uint64_t TriggeringWindowId;
+  bool TriggeringStorageAccess;
   int32_t? CancelContentJSEpoch;
 
   bool ResultPrincipalURIIsSome;
@@ -208,13 +210,14 @@ struct DocShellLoadStateInit
   bool InheritPrincipal;
   bool PrincipalIsExplicit;
   bool ForceAllowDataURI;
-  bool IsExemptFromHTTPSOnlyMode;
+  bool IsExemptFromHTTPSFirstMode;
   bool OriginalFrameSrc;
   bool IsFormSubmission;
   bool FirstParty;
   bool HasValidUserGestureActivation;
   bool AllowFocusMove;
   bool IsFromProcessingFrameAttributes;
+  bool WasSchemelessInput;
 
   // Fields missing due to lack of need or serialization
   // nsCOMPtr<nsIDocShell> mSourceDocShell;

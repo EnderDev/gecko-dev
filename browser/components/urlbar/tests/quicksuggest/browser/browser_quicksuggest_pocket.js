@@ -4,6 +4,15 @@
 "use strict";
 
 // Browser tests for Pocket suggestions.
+//
+// TODO: Make this work with Rust enabled. Right now, running this test with
+// Rust hits the following error on ingest, which prevents ingest from finishing
+// successfully:
+//
+//  0:03.17 INFO Console message: [JavaScript Error: "1698289045697	urlbar	ERROR	QuickSuggest.SuggestBackendRust :: Ingest error: Error executing SQL: FOREIGN KEY constraint failed" {file: "resource://gre/modules/Log.sys.mjs" line: 722}]
+
+// The expected index of the Pocket suggestion.
+const EXPECTED_RESULT_INDEX = 1;
 
 const REMOTE_SETTINGS_DATA = [
   {
@@ -21,25 +30,20 @@ const REMOTE_SETTINGS_DATA = [
 ];
 
 add_setup(async function () {
-  // This must be done before enabling the feature (using the `featureGate`
-  // pref) so that the mock remote settings are set up first. Also, don't pass
-  // in the remote settings data yet; see below.
-  await QuickSuggestTestUtils.ensureQuickSuggestInit();
-
   await SpecialPowers.pushPrefEnv({
     set: [
-      ["browser.urlbar.quicksuggest.enabled", true],
-      ["browser.urlbar.suggest.quicksuggest.nonsponsored", true],
-      ["browser.urlbar.bestMatch.enabled", true],
-      ["browser.urlbar.pocket.featureGate", true],
       // Disable search suggestions so we don't hit the network.
       ["browser.search.suggest.enabled", false],
     ],
   });
 
-  // Now that the feature is enabled, set the remote settings data to force the
-  // feature to sync so we can be sure syncing is done before starting the test.
-  await QuickSuggestTestUtils.setRemoteSettingsResults(REMOTE_SETTINGS_DATA);
+  await QuickSuggestTestUtils.ensureQuickSuggestInit({
+    remoteSettingsRecords: REMOTE_SETTINGS_DATA,
+    prefs: [
+      ["suggest.quicksuggest.nonsponsored", true],
+      ["pocket.featureGate", true],
+    ],
+  });
 });
 
 add_task(async function basic() {
@@ -73,15 +77,20 @@ add_task(async function basic() {
     );
 
     // Click it.
-    let url = REMOTE_SETTINGS_DATA[0].attachment[0].url;
-    const onLoad = BrowserTestUtils.browserLoaded(
-      gBrowser.selectedBrowser,
-      false,
-      url
-    );
+    const onLoad = BrowserTestUtils.browserLoaded(gBrowser.selectedBrowser);
     EventUtils.synthesizeMouseAtCenter(element.row, {});
     await onLoad;
-    Assert.equal(gBrowser.currentURI.spec, url, "Expected page loaded");
+    // Append utm parameters.
+    let url = new URL(REMOTE_SETTINGS_DATA[0].attachment[0].url);
+    url.searchParams.set("utm_medium", "firefox-desktop");
+    url.searchParams.set("utm_source", "firefox-suggest");
+    url.searchParams.set(
+      "utm_campaign",
+      "pocket-collections-in-the-address-bar"
+    );
+    url.searchParams.set("utm_content", "treatment");
+
+    Assert.equal(gBrowser.currentURI.spec, url.href, "Expected page loaded");
   });
 });
 
@@ -93,14 +102,11 @@ add_task(async function resultMenu_showLessFrequently() {
       ["browser.urlbar.pocket.showLessFrequentlyCount", 0],
     ],
   });
+  await QuickSuggestTestUtils.forceSync();
 
-  const cleanUpNimbus = await UrlbarTestUtils.initNimbusFeature({
-    pocketShowLessFrequentlyCap: 3,
+  await QuickSuggestTestUtils.setConfig({
+    show_less_frequently_cap: 3,
   });
-
-  // Sanity check.
-  Assert.equal(UrlbarPrefs.get("pocketShowLessFrequentlyCap"), 3);
-  Assert.equal(UrlbarPrefs.get("pocket.showLessFrequentlyCount"), 0);
 
   await doShowLessFrequently({
     input: "pocket s",
@@ -120,7 +126,10 @@ add_task(async function resultMenu_showLessFrequently() {
   });
   Assert.equal(UrlbarPrefs.get("pocket.showLessFrequentlyCount"), 2);
 
+  // The cap will be reached this time. Keep the view open so we can make sure
+  // the command has been removed from the menu before it closes.
   await doShowLessFrequently({
+    keepViewOpen: true,
     input: "pocket s",
     expected: {
       isSuggestionShown: true,
@@ -128,6 +137,17 @@ add_task(async function resultMenu_showLessFrequently() {
     },
   });
   Assert.equal(UrlbarPrefs.get("pocket.showLessFrequentlyCount"), 3);
+
+  // Make sure the command has been removed.
+  let menuitem = await UrlbarTestUtils.openResultMenuAndGetItem({
+    window,
+    command: "show_less_frequently",
+    resultIndex: EXPECTED_RESULT_INDEX,
+    openByMouse: true,
+  });
+  Assert.ok(!menuitem, "Menuitem should be absent before closing the view");
+  gURLBar.view.resultMenu.hidePopup(true);
+  await UrlbarTestUtils.promisePopupClose(window);
 
   await doShowLessFrequently({
     input: "pocket s",
@@ -144,11 +164,12 @@ add_task(async function resultMenu_showLessFrequently() {
     },
   });
 
-  await cleanUpNimbus();
+  await QuickSuggestTestUtils.setConfig(QuickSuggestTestUtils.DEFAULT_CONFIG);
   await SpecialPowers.popPrefEnv();
+  await QuickSuggestTestUtils.forceSync();
 });
 
-async function doShowLessFrequently({ input, expected }) {
+async function doShowLessFrequently({ input, expected, keepViewOpen = false }) {
   await UrlbarTestUtils.promiseAutocompleteResultPopup({
     window,
     value: input,
@@ -167,10 +188,9 @@ async function doShowLessFrequently({ input, expected }) {
     return;
   }
 
-  const resultIndex = 1;
   const details = await UrlbarTestUtils.getDetailsOfResultAt(
     window,
-    resultIndex
+    EXPECTED_RESULT_INDEX
   );
   Assert.equal(
     details.result.payload.telemetryType,
@@ -184,7 +204,7 @@ async function doShowLessFrequently({ input, expected }) {
       window,
       "show_less_frequently",
       {
-        resultIndex,
+        resultIndex: EXPECTED_RESULT_INDEX,
       }
     );
     Assert.ok(expected.isMenuItemShown);
@@ -208,7 +228,9 @@ async function doShowLessFrequently({ input, expected }) {
     );
   }
 
-  await UrlbarTestUtils.promisePopupClose(window);
+  if (!keepViewOpen) {
+    await UrlbarTestUtils.promisePopupClose(window);
+  }
 }
 
 // Tests the "Not interested" result menu dismissal command.
@@ -218,11 +240,7 @@ add_task(async function resultMenu_notInterested() {
   // Re-enable suggestions and wait until PocketSuggestions syncs them from
   // remote settings again.
   UrlbarPrefs.set("suggest.pocket", true);
-  let feature = QuickSuggest.getFeature("PocketSuggestions");
-  await TestUtils.waitForCondition(async () => {
-    let suggestions = await feature.queryRemoteSettings("pocket suggestion");
-    return !!suggestions.length;
-  }, "Waiting for PocketSuggestions to serve remote settings suggestions");
+  await QuickSuggestTestUtils.forceSync();
 });
 
 // Tests the "Not relevant" result menu dismissal command.
@@ -245,10 +263,9 @@ async function doDismissTest(command) {
     "There should be two results"
   );
 
-  let resultIndex = 1;
   let { result } = await UrlbarTestUtils.getDetailsOfResultAt(
     window,
-    resultIndex
+    EXPECTED_RESULT_INDEX
   );
   Assert.equal(
     result.providerName,
@@ -265,7 +282,7 @@ async function doDismissTest(command) {
   await UrlbarTestUtils.openResultMenuAndClickItem(
     window,
     ["[data-l10n-id=firefox-suggest-command-dont-show-this]", command],
-    { resultIndex, openByMouse: true }
+    { resultIndex: EXPECTED_RESULT_INDEX, openByMouse: true }
   );
 
   // The row should be a tip now.
@@ -275,7 +292,10 @@ async function doDismissTest(command) {
     resultCount,
     "The result count should not haved changed after dismissal"
   );
-  let details = await UrlbarTestUtils.getDetailsOfResultAt(window, resultIndex);
+  let details = await UrlbarTestUtils.getDetailsOfResultAt(
+    window,
+    EXPECTED_RESULT_INDEX
+  );
   Assert.equal(
     details.type,
     UrlbarUtils.RESULT_TYPE.TIP,
@@ -295,7 +315,7 @@ async function doDismissTest(command) {
   let gotItButton = UrlbarTestUtils.getButtonForResultIndex(
     window,
     0,
-    resultIndex
+    EXPECTED_RESULT_INDEX
   );
   Assert.ok(gotItButton, "Row should have a 'Got it' button");
   EventUtils.synthesizeMouseAtCenter(gotItButton, {}, window);
@@ -389,10 +409,9 @@ add_task(async function showLessFrequentlyMenuVisibility() {
     });
     Assert.equal(UrlbarTestUtils.getResultCount(window), 2);
 
-    const resultIndex = 1;
     const details = await UrlbarTestUtils.getDetailsOfResultAt(
       window,
-      resultIndex
+      EXPECTED_RESULT_INDEX
     );
     Assert.equal(
       details.result.payload.telemetryType,
@@ -401,8 +420,8 @@ add_task(async function showLessFrequentlyMenuVisibility() {
     );
 
     const menuitem = await UrlbarTestUtils.openResultMenuAndGetItem({
-      resultIndex,
-      openByMouse: false,
+      resultIndex: EXPECTED_RESULT_INDEX,
+      openByMouse: true,
       command: "show_less_frequently",
       window,
     });

@@ -122,6 +122,8 @@ bool TypedArrayObject::ensureHasBuffer(JSContext* cx,
     return false;
   }
 
+  buffer->pinLength(tarray->isLengthPinned());
+
   // Attaching the first view to an array buffer is infallible.
   MOZ_ALWAYS_TRUE(buffer->addView(cx, tarray));
 
@@ -208,18 +210,12 @@ size_t TypedArrayObject::objectMoved(JSObject* obj, JSObject* old) {
   }
 
   Nursery& nursery = obj->runtimeFromMainThread()->gc.nursery();
-  if (!nursery.isInside(buf)) {
-    nursery.removeMallocedBufferDuringMinorGC(buf);
-    size_t nbytes = RoundUp(newObj->byteLength(), sizeof(Value));
-    AddCellMemory(newObj, nbytes, MemoryUse::TypedArrayElements);
-    return 0;
-  }
 
   // Determine if we can use inline data for the target array. If this is
   // possible, the nursery will have picked an allocation size that is large
   // enough.
   size_t nbytes = oldObj->byteLength();
-  MOZ_ASSERT(nbytes <= Nursery::MaxNurseryBufferSize);
+  bool canUseDirectForward = nbytes >= sizeof(uintptr_t);
 
   constexpr size_t headerSize = dataOffset() + sizeof(HeapSlot);
 
@@ -228,7 +224,8 @@ size_t TypedArrayObject::objectMoved(JSObject* obj, JSObject* old) {
   MOZ_ASSERT_IF(nbytes == 0,
                 headerSize + sizeof(uint8_t) <= GetGCKindBytes(newAllocKind));
 
-  if (headerSize + nbytes <= GetGCKindBytes(newAllocKind)) {
+  if (nursery.isInside(buf) &&
+      headerSize + nbytes <= GetGCKindBytes(newAllocKind)) {
     MOZ_ASSERT(oldObj->hasInlineElements());
 #ifdef DEBUG
     if (nbytes == 0) {
@@ -237,31 +234,34 @@ size_t TypedArrayObject::objectMoved(JSObject* obj, JSObject* old) {
     }
 #endif
     newObj->setInlineElements();
-  } else {
-    MOZ_ASSERT(!oldObj->hasInlineElements());
+    mozilla::PodCopy(newObj->elements(), oldObj->elements(), nbytes);
 
-    AutoEnterOOMUnsafeRegion oomUnsafe;
-    nbytes = RoundUp(nbytes, sizeof(Value));
-    void* data = newObj->zone()->pod_arena_malloc<uint8_t>(
-        js::ArrayBufferContentsArena, nbytes);
-    if (!data) {
-      oomUnsafe.crash(
-          "Failed to allocate typed array elements while tenuring.");
-    }
-    MOZ_ASSERT(!nursery.isInside(data));
-    newObj->setReservedSlot(DATA_SLOT, PrivateValue(data));
-    AddCellMemory(newObj, nbytes, MemoryUse::TypedArrayElements);
+    // Set a forwarding pointer for the element buffers in case they were
+    // preserved on the stack by Ion.
+    nursery.setForwardingPointerWhileTenuring(
+        oldObj->elements(), newObj->elements(), canUseDirectForward);
+
+    return 0;
   }
 
-  mozilla::PodCopy(newObj->elements(), oldObj->elements(), nbytes);
+  // Non-inline allocations are rounded up.
+  nbytes = RoundUp(nbytes, sizeof(Value));
 
-  // Set a forwarding pointer for the element buffers in case they were
-  // preserved on the stack by Ion.
-  nursery.setForwardingPointerWhileTenuring(
-      oldObj->elements(), newObj->elements(),
-      /* direct = */ nbytes >= sizeof(uintptr_t));
+  Nursery::WasBufferMoved result = nursery.maybeMoveBufferOnPromotion(
+      &buf, newObj, nbytes, MemoryUse::TypedArrayElements,
+      ArrayBufferContentsArena);
+  if (result == Nursery::BufferMoved) {
+    newObj->setReservedSlot(DATA_SLOT, PrivateValue(buf));
 
-  return newObj->hasInlineElements() ? 0 : nbytes;
+    // Set a forwarding pointer for the element buffers in case they were
+    // preserved on the stack by Ion.
+    nursery.setForwardingPointerWhileTenuring(
+        oldObj->elements(), newObj->elements(), canUseDirectForward);
+
+    return nbytes;
+  }
+
+  return 0;
 }
 
 bool TypedArrayObject::hasInlineElements() const {
@@ -337,12 +337,7 @@ static TypedArrayObject* NewTypedArrayObject(JSContext* cx,
     return nullptr;
   }
 
-  NativeObject* obj = NativeObject::create(cx, allocKind, heap, shape);
-  if (!obj) {
-    return nullptr;
-  }
-
-  return &obj->as<TypedArrayObject>();
+  return NativeObject::create<TypedArrayObject>(cx, allocKind, heap, shape);
 }
 
 template <typename NativeType>
@@ -477,7 +472,7 @@ class TypedArrayObjectTemplate : public TypedArrayObject {
 
   static void initTypedArraySlots(TypedArrayObject* tarray, int32_t len) {
     MOZ_ASSERT(len >= 0);
-    tarray->initFixedSlot(TypedArrayObject::BUFFER_SLOT, NullValue());
+    tarray->initFixedSlot(TypedArrayObject::BUFFER_SLOT, JS::FalseValue());
     tarray->initFixedSlot(TypedArrayObject::LENGTH_SLOT, PrivateValue(len));
     tarray->initFixedSlot(TypedArrayObject::BYTEOFFSET_SLOT,
                           PrivateValue(size_t(0)));
@@ -643,8 +638,7 @@ class TypedArrayObjectTemplate : public TypedArrayObject {
 
     // Step 6.b.iii.3.
     if (dataObj->is<ArrayBufferObjectMaybeShared>()) {
-      HandleArrayBufferObjectMaybeShared buffer =
-          dataObj.as<ArrayBufferObjectMaybeShared>();
+      auto buffer = dataObj.as<ArrayBufferObjectMaybeShared>();
       return fromBufferSameCompartment(cx, buffer, byteOffset, length, proto);
     }
     return fromBufferWrapped(cx, dataObj, byteOffset, length, proto);
@@ -688,7 +682,7 @@ class TypedArrayObjectTemplate : public TypedArrayObject {
   // 23.2.5.1.3 InitializeTypedArrayFromArrayBuffer ( O, buffer, byteOffset,
   // length ) Steps 5-8.
   static bool computeAndCheckLength(
-      JSContext* cx, HandleArrayBufferObjectMaybeShared bufferMaybeUnwrapped,
+      JSContext* cx, Handle<ArrayBufferObjectMaybeShared*> bufferMaybeUnwrapped,
       uint64_t byteOffset, uint64_t lengthIndex, size_t* length) {
     MOZ_ASSERT(byteOffset % BYTES_PER_ELEMENT == 0);
     MOZ_ASSERT(byteOffset < uint64_t(DOUBLE_INTEGRAL_PRECISION_LIMIT));
@@ -704,6 +698,7 @@ class TypedArrayObjectTemplate : public TypedArrayObject {
 
     // Step 6.
     size_t bufferByteLength = bufferMaybeUnwrapped->byteLength();
+    MOZ_ASSERT(bufferByteLength <= MaxByteLength);
 
     size_t len;
     if (lengthIndex == UINT64_MAX) {
@@ -747,14 +742,7 @@ class TypedArrayObjectTemplate : public TypedArrayObject {
       len = size_t(lengthIndex);
     }
 
-    if (len > MaxByteLength / BYTES_PER_ELEMENT) {
-      JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
-                                JSMSG_TYPED_ARRAY_CONSTRUCT_TOO_LARGE,
-                                Scalar::name(ArrayTypeID()));
-      return false;
-    }
-
-    MOZ_ASSERT(len < SIZE_MAX);
+    MOZ_ASSERT(len <= MaxByteLength / BYTES_PER_ELEMENT);
     *length = len;
     return true;
   }
@@ -763,7 +751,7 @@ class TypedArrayObjectTemplate : public TypedArrayObject {
   // 23.2.5.1.3 InitializeTypedArrayFromArrayBuffer ( O, buffer, byteOffset,
   // length ) Steps 5-13.
   static TypedArrayObject* fromBufferSameCompartment(
-      JSContext* cx, HandleArrayBufferObjectMaybeShared buffer,
+      JSContext* cx, Handle<ArrayBufferObjectMaybeShared*> buffer,
       uint64_t byteOffset, uint64_t lengthIndex, HandleObject proto) {
     // Steps 5-8.
     size_t length = 0;
@@ -804,7 +792,7 @@ class TypedArrayObjectTemplate : public TypedArrayObject {
       return nullptr;
     }
 
-    RootedArrayBufferObjectMaybeShared unwrappedBuffer(cx);
+    Rooted<ArrayBufferObjectMaybeShared*> unwrappedBuffer(cx);
     unwrappedBuffer = &unwrapped->as<ArrayBufferObjectMaybeShared>();
 
     size_t length = 0;
@@ -859,8 +847,7 @@ class TypedArrayObjectTemplate : public TypedArrayObject {
 
     uint64_t lengthIndex = lengthInt >= 0 ? uint64_t(lengthInt) : UINT64_MAX;
     if (bufobj->is<ArrayBufferObjectMaybeShared>()) {
-      HandleArrayBufferObjectMaybeShared buffer =
-          bufobj.as<ArrayBufferObjectMaybeShared>();
+      auto buffer = bufobj.as<ArrayBufferObjectMaybeShared>();
       return fromBufferSameCompartment(cx, buffer, byteOffset, lengthIndex,
                                        nullptr);
     }
@@ -1164,10 +1151,14 @@ template <typename T>
   MOZ_ASSERT(!obj->isSharedMemory());
   if (srcArray->isSharedMemory()) {
     if (!ElementSpecific<T, SharedOps>::setFromTypedArray(obj, srcArray, 0)) {
+      MOZ_ASSERT_UNREACHABLE(
+          "setFromTypedArray can only fail for overlapping buffers");
       return nullptr;
     }
   } else {
     if (!ElementSpecific<T, UnsharedOps>::setFromTypedArray(obj, srcArray, 0)) {
+      MOZ_ASSERT_UNREACHABLE(
+          "setFromTypedArray can only fail for overlapping buffers");
       return nullptr;
     }
   }
@@ -1559,9 +1550,12 @@ static bool SetTypedArrayFromTypedArray(JSContext* cx,
 
   // Steps 6-12, 16-24.
   switch (target->type()) {
-#define SET_FROM_TYPED_ARRAY(_, T, N)                                \
-  case Scalar::N:                                                    \
-    if (!SetFromTypedArray<T>(target, source, offset)) return false; \
+#define SET_FROM_TYPED_ARRAY(_, T, N)                    \
+  case Scalar::N:                                        \
+    if (!SetFromTypedArray<T>(target, source, offset)) { \
+      ReportOutOfMemory(cx);                             \
+      return false;                                      \
+    }                                                    \
     break;
     JS_FOR_EACH_TYPED_ARRAY(SET_FROM_TYPED_ARRAY)
 #undef SET_FROM_TYPED_ARRAY
@@ -2846,8 +2840,11 @@ bool js::intrinsic_TypedArrayNativeSort(JSContext* cx, unsigned argc,
     if (!tarr) {                                                              \
       return nullptr;                                                         \
     }                                                                         \
-    return JS::TypedArray<JS::Scalar::Name>::fromObject(tarr)                 \
-        .getLengthAndData(length, isSharedMemory, nogc);                      \
+    mozilla::Span<ExternalType> span =                                        \
+        JS::TypedArray<JS::Scalar::Name>::fromObject(tarr).getData(           \
+            isSharedMemory, nogc);                                            \
+    *length = span.Length();                                                  \
+    return span.data();                                                       \
   }                                                                           \
                                                                               \
   JS_PUBLIC_API ExternalType* JS_Get##Name##ArrayData(                        \
@@ -2965,21 +2962,21 @@ JS::TypedArray_base JS::TypedArray_base::fromObject(JSObject* unwrapped) {
   return TypedArray_base(nullptr);
 }
 
-// Template getLengthAndData function for TypedArrays, implemented here because
+// Template getData function for TypedArrays, implemented here because
 // it requires internal APIs.
 template <JS::Scalar::Type EType>
-typename TypedArray<EType>::DataType* TypedArray<EType>::getLengthAndData(
-    size_t* length, bool* isSharedMemory, const AutoRequireNoGC&) {
+typename mozilla::Span<typename TypedArray<EType>::DataType>
+TypedArray<EType>::getData(bool* isSharedMemory, const AutoRequireNoGC&) {
   using ExternalType = TypedArray<EType>::DataType;
   if (!obj) {
     return nullptr;
   }
   TypedArrayObject* tarr = &obj->as<TypedArrayObject>();
   MOZ_ASSERT(tarr);
-  *length = tarr->length();
   *isSharedMemory = tarr->isSharedMemory();
-  return static_cast<ExternalType*>(
-      tarr->dataPointerEither().unwrap(/*safe - caller sees isShared*/));
+  return {static_cast<ExternalType*>(tarr->dataPointerEither().unwrap(
+              /*safe - caller sees isShared*/)),
+          tarr->length()};
 };
 
 // Force the method defined above to actually be instantianted in this
@@ -2988,10 +2985,10 @@ typename TypedArray<EType>::DataType* TypedArray<EType>::getLengthAndData(
 // satisfied by the linker. (This happens with opt gtest, at least. In a DEBUG
 // build, the header contains a call to this function so it will always be
 // emitted.)
-#define INSTANTIATE_GET_DATA(a, b, Name)                    \
-  template typename TypedArray<JS::Scalar::Name>::DataType* \
-  TypedArray<JS::Scalar::Name>::getLengthAndData(           \
-      size_t* length, bool* isSharedMemory, const AutoRequireNoGC&);
+#define INSTANTIATE_GET_DATA(a, b, Name)                                  \
+  template mozilla::Span<typename TypedArray<JS::Scalar::Name>::DataType> \
+  TypedArray<JS::Scalar::Name>::getData(bool* isSharedMemory,             \
+                                        const AutoRequireNoGC&);
 JS_FOR_EACH_TYPED_ARRAY(INSTANTIATE_GET_DATA)
 #undef INSTANTIATE_GET_DATA
 

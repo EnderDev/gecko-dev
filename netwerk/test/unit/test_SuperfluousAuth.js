@@ -9,7 +9,9 @@ in the prompt service. In the end, the second request will be failed.
 
 "use strict";
 
-const { HttpServer } = ChromeUtils.import("resource://testing-common/httpd.js");
+const { HttpServer } = ChromeUtils.importESModule(
+  "resource://testing-common/httpd.sys.mjs"
+);
 
 const { MockRegistrar } = ChromeUtils.importESModule(
   "resource://testing-common/MockRegistrar.sys.mjs"
@@ -19,7 +21,7 @@ var httpProtocolHandler = Cc[
   "@mozilla.org/network/protocol;1?name=http"
 ].getService(Ci.nsIHttpProtocolHandler);
 
-XPCOMUtils.defineLazyGetter(this, "URL", function () {
+ChromeUtils.defineLazyGetter(this, "URL", function () {
   return "http://foo@localhost:" + httpServer.identity.primaryPort;
 });
 
@@ -94,6 +96,6 @@ function firstTimeThrough(request, buffer) {
 }
 
 function secondTimeThrough(request, buffer) {
-  Assert.equal(request.status, Cr.NS_ERROR_ABORT);
+  Assert.equal(request.status, Cr.NS_ERROR_SUPERFLUOS_AUTH);
   httpServer.stop(do_test_finished);
 }

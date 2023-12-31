@@ -28,6 +28,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
   PdfJsDefaultPreferences: "resource://pdf.js/PdfJsDefaultPreferences.sys.mjs",
   ProxyPolicies: "resource:///modules/policies/ProxyPolicies.sys.mjs",
+  UrlbarPrefs: "resource:///modules/UrlbarPrefs.sys.mjs",
   WebsiteFilter: "resource:///modules/policies/WebsiteFilter.sys.mjs",
 });
 
@@ -37,7 +38,7 @@ const ABOUT_CONTRACT = "@mozilla.org/network/protocol/about;1?what=";
 
 const isXpcshell = Services.env.exists("XPCSHELL_TEST_PROFILE_DIR");
 
-XPCOMUtils.defineLazyGetter(lazy, "log", () => {
+ChromeUtils.defineLazyGetter(lazy, "log", () => {
   let { ConsoleAPI } = ChromeUtils.importESModule(
     "resource://gre/modules/Console.sys.mjs"
   );
@@ -485,6 +486,15 @@ export var Policies = {
     // Queried directly by ContextualIdentityService.sys.mjs
   },
 
+  ContentAnalysis: {
+    onBeforeUIStartup(manager, param) {
+      if ("Enabled" in param) {
+        let enabled = !!param.Enabled;
+        setAndLockPref("browser.contentanalysis.enabled", enabled);
+      }
+    },
+  },
+
   Cookies: {
     onBeforeUIStartup(manager, param) {
       addAllowDenyPermissions("cookie", param.Allow, param.Block);
@@ -603,6 +613,15 @@ export var Policies = {
     },
   },
 
+  DisableAccounts: {
+    onBeforeAddons(manager, param) {
+      if (param) {
+        setAndLockPref("identity.fxaccounts.enabled", false);
+        setAndLockPref("browser.aboutwelcome.enabled", false);
+      }
+    },
+  },
+
   DisableAppUpdate: {
     onBeforeAddons(manager, param) {
       if (param) {
@@ -688,6 +707,11 @@ export var Policies = {
 
   DisableFirefoxAccounts: {
     onBeforeAddons(manager, param) {
+      // If DisableAccounts is set, let it take precedence.
+      if ("DisableAccounts" in manager.getActivePolicies()) {
+        return;
+      }
+
       if (param) {
         setAndLockPref("identity.fxaccounts.enabled", false);
         setAndLockPref("browser.aboutwelcome.enabled", false);
@@ -1275,6 +1299,35 @@ export var Policies = {
     },
   },
 
+  FirefoxSuggest: {
+    onBeforeAddons(manager, param) {
+      (async () => {
+        await lazy.UrlbarPrefs.firefoxSuggestScenarioStartupPromise;
+        if ("WebSuggestions" in param) {
+          PoliciesUtils.setDefaultPref(
+            "browser.urlbar.suggest.quicksuggest.nonsponsored",
+            param.WebSuggestions,
+            param.Locked
+          );
+        }
+        if ("SponsoredSuggestions" in param) {
+          PoliciesUtils.setDefaultPref(
+            "browser.urlbar.suggest.quicksuggest.sponsored",
+            param.SponsoredSuggestions,
+            param.Locked
+          );
+        }
+        if ("ImproveSuggest" in param) {
+          PoliciesUtils.setDefaultPref(
+            "browser.urlbar.quicksuggest.dataCollection.enabled",
+            param.ImproveSuggest,
+            param.Locked
+          );
+        }
+      })();
+    },
+  },
+
   GoToIntranetSiteForSingleWordEntryInAddressBar: {
     onBeforeAddons(manager, param) {
       setAndLockPref("browser.fixup.dns_first_for_single_words", param);
@@ -1682,12 +1735,14 @@ export var Policies = {
         "network.",
         "pdfjs.",
         "places.",
+        "pref.",
         "print.",
         "signon.",
         "spellchecker.",
         "toolkit.legacyUserProfileCustomizations.stylesheets",
         "ui.",
         "widget.",
+        "xpinstall.whitelist.required",
       ];
       if (!AppConstants.MOZ_REQUIRE_SIGNING) {
         allowedPrefixes.push("xpinstall.signatures.required");
@@ -1695,6 +1750,8 @@ export var Policies = {
       const allowedSecurityPrefs = [
         "security.block_fileuri_script_with_wrong_mime",
         "security.default_personal_cert",
+        "security.disable_button.openCertManager",
+        "security.disable_button.openDeviceManager",
         "security.insecure_connection_text.enabled",
         "security.insecure_connection_text.pbmode.enabled",
         "security.mixed_content.block_active_content",
@@ -1704,6 +1761,7 @@ export var Policies = {
         "security.OCSP.require",
         "security.ssl.enable_ocsp_stapling",
         "security.ssl.errorReporting.enabled",
+        "security.ssl.require_safe_negotiation",
         "security.tls.enable_0rtt_data",
         "security.tls.hello_downgrade_check",
         "security.tls.version.enable-deprecated",
@@ -1828,6 +1886,12 @@ export var Policies = {
       } else {
         manager.disallowFeature("createMasterPassword");
       }
+    },
+  },
+
+  PrintingEnabled: {
+    onBeforeUIStartup(manager, param) {
+      setAndLockPref("print.enabled", param);
     },
   },
 
@@ -2330,7 +2394,7 @@ export var Policies = {
  *
  * @param {string} prefName
  *        The pref to be changed
- * @param {boolean,number,string} prefValue
+ * @param {boolean|number|string} prefValue
  *        The value to set and lock
  */
 export function setAndLockPref(prefName, prefValue) {
@@ -2345,7 +2409,7 @@ export function setAndLockPref(prefName, prefValue) {
  *
  * @param {string} prefName
  *        The pref to be changed
- * @param {boolean,number,string} prefValue
+ * @param {boolean|number|string} prefValue
  *        The value to set
  * @param {boolean} locked
  *        Optionally lock the pref
@@ -2429,9 +2493,9 @@ function setDefaultPermission(policyName, policyParam) {
  *
  * @param {string} permissionName
  *        The name of the permission to change
- * @param {array} allowList
+ * @param {Array} allowList
  *        The list of URLs to be set as ALLOW_ACTION for the chosen permission.
- * @param {array} blockList
+ * @param {Array} blockList
  *        The list of URLs to be set as DENY_ACTION for the chosen permission.
  */
 function addAllowDenyPermissions(permissionName, allowList, blockList) {
@@ -2509,7 +2573,7 @@ export function runOnce(actionName, callback) {
  *        string.
  * @param {Function} callback
  *        The callback to be run when the pref value changes
- * @returns Promise
+ * @returns {Promise}
  *        A promise that will resolve once the callback finishes running.
  *
  */

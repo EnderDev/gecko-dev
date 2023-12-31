@@ -16,6 +16,7 @@
 #include "nsEnumeratorUtils.h"
 #include "mozilla/dom/Directory.h"
 #include "mozilla/dom/File.h"
+#include "mozilla/dom/Promise.h"
 #include "mozilla/Components.h"
 #include "WidgetUtils.h"
 #include "nsSimpleEnumerator.h"
@@ -25,6 +26,7 @@
 
 using namespace mozilla::widget;
 using namespace mozilla::dom;
+using mozilla::ErrorResult;
 
 #define FILEPICKER_TITLES "chrome://global/locale/filepicker.properties"
 #define FILEPICKER_FILTERS "chrome://global/content/filepicker.properties"
@@ -166,6 +168,29 @@ NS_IMETHODIMP nsBaseFilePicker::Init(mozIDOMWindowProxy* aParent,
 }
 
 NS_IMETHODIMP
+nsBaseFilePicker::IsModeSupported(nsIFilePicker::Mode aMode, JSContext* aCx,
+                                  Promise** aPromise) {
+  MOZ_ASSERT(aCx);
+  MOZ_ASSERT(aPromise);
+
+  nsIGlobalObject* globalObject = xpc::CurrentNativeGlobal(aCx);
+  if (NS_WARN_IF(!globalObject)) {
+    return NS_ERROR_FAILURE;
+  }
+
+  ErrorResult result;
+  RefPtr<Promise> promise = Promise::Create(globalObject, result);
+  if (NS_WARN_IF(result.Failed())) {
+    return result.StealNSResult();
+  }
+
+  promise->MaybeResolve(true);
+  promise.forget(aPromise);
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 nsBaseFilePicker::Open(nsIFilePickerShownCallback* aCallback) {
   nsCOMPtr<nsIRunnable> filePickerEvent =
       new AsyncShowFilePicker(this, aCallback);
@@ -236,6 +261,11 @@ nsBaseFilePicker::AppendFilters(int32_t aFilterMask) {
     // Pass the magic string "..apps" to the platform filepicker, which it
     // should recognize and do the correct platform behavior for.
     AppendFilter(title, u"..apps"_ns);
+  }
+  if (aFilterMask & filterPDF) {
+    titleBundle->GetStringFromName("pdfTitle", title);
+    filterBundle->GetStringFromName("pdfFilter", filter);
+    AppendFilter(title, filter);
   }
   return NS_OK;
 }

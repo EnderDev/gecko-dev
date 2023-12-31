@@ -35,7 +35,7 @@ function promiseTabLoadEvent(tab, url) {
   let browser = tab.linkedBrowser;
 
   if (url) {
-    BrowserTestUtils.loadURIString(browser, url);
+    BrowserTestUtils.startLoadingURIString(browser, url);
   }
 
   return BrowserTestUtils.browserLoaded(browser, false, url);
@@ -277,7 +277,7 @@ function checkPopup(popup, notifyObj) {
   });
 }
 
-XPCOMUtils.defineLazyGetter(this, "gActiveListeners", () => {
+ChromeUtils.defineLazyGetter(this, "gActiveListeners", () => {
   let listeners = new Map();
   registerCleanupFunction(() => {
     for (let [listener, eventName] of listeners) {

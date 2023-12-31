@@ -41,8 +41,7 @@ InterceptedHttpChannel::InterceptedHttpChannel(
       mProgressReported(0),
       mSynthesizedStreamLength(-1),
       mResumeStartPos(0),
-      mCallingStatusAndProgress(false),
-      mTimeStamps() {
+      mCallingStatusAndProgress(false) {
   // Pre-set the creation and AsyncOpen times based on the original channel
   // we are intercepting.  We don't want our extra internal redirect to mask
   // any time spent processing the channel.
@@ -418,8 +417,7 @@ void InterceptedHttpChannel::MaybeCallStatusAndProgress() {
     nsCOMPtr<nsIRunnable> r = NewRunnableMethod(
         "InterceptedHttpChannel::MaybeCallStatusAndProgress", this,
         &InterceptedHttpChannel::MaybeCallStatusAndProgress);
-    MOZ_ALWAYS_SUCCEEDS(
-        SchedulerGroup::Dispatch(TaskCategory::Other, r.forget()));
+    MOZ_ALWAYS_SUCCEEDS(SchedulerGroup::Dispatch(r.forget()));
 
     return;
   }
@@ -707,7 +705,7 @@ class ResetInterceptionHeaderVisitor final : public nsIHttpHeaderVisitor {
   VisitHeader(const nsACString& aHeader, const nsACString& aValue) override {
     // We skip Cookie header here, since it will be added during
     // nsHttpChannel::AsyncOpen.
-    if (aHeader.Equals(nsHttp::Cookie)) {
+    if (aHeader.Equals(nsHttp::Cookie.val())) {
       return NS_OK;
     }
     if (aValue.IsEmpty()) {
@@ -848,7 +846,8 @@ InterceptedHttpChannel::SynthesizeStatus(uint16_t aStatus,
   statusLine.AppendLiteral(" ");
   statusLine.Append(aReason);
 
-  mSynthesizedResponseHead->ParseStatusLine(statusLine);
+  NS_ENSURE_SUCCESS(mSynthesizedResponseHead->ParseStatusLine(statusLine),
+                    NS_ERROR_FAILURE);
   return NS_OK;
 }
 
@@ -1193,6 +1192,20 @@ InterceptedHttpChannel::OnDataAvailable(nsIRequest* aRequest,
   }
 
   return mListener->OnDataAvailable(this, aInputStream, aOffset, aCount);
+}
+
+NS_IMETHODIMP
+InterceptedHttpChannel::OnDataFinished(nsresult aStatus) {
+  if (mCanceled || !mListener) {
+    return aStatus;
+  }
+  nsCOMPtr<nsIThreadRetargetableStreamListener> retargetableListener =
+      do_QueryInterface(mListener);
+  if (retargetableListener) {
+    return retargetableListener->OnDataFinished(aStatus);
+  }
+
+  return NS_OK;
 }
 
 NS_IMETHODIMP

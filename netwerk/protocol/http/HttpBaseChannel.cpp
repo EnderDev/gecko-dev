@@ -24,6 +24,7 @@
 #include "mozilla/ConsoleReportCollector.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/InputStreamLengthHelper.h"
+#include "mozilla/Mutex.h"
 #include "mozilla/NullPrincipal.h"
 #include "mozilla/PermissionManager.h"
 #include "mozilla/Components.h"
@@ -55,6 +56,7 @@
 #include "nsContentUtils.h"
 #include "nsDebug.h"
 #include "nsEscape.h"
+#include "nsGlobalWindowInner.h"
 #include "nsGlobalWindowOuter.h"
 #include "nsHttpChannel.h"
 #include "nsHTTPCompressConv.h"
@@ -116,31 +118,32 @@ namespace net {
 
 static bool IsHeaderBlacklistedForRedirectCopy(nsHttpAtom const& aHeader) {
   // IMPORTANT: keep this list ASCII-code sorted
-  static nsHttpAtom const* blackList[] = {&nsHttp::Accept,
-                                          &nsHttp::Accept_Encoding,
-                                          &nsHttp::Accept_Language,
-                                          &nsHttp::Alternate_Service_Used,
-                                          &nsHttp::Authentication,
-                                          &nsHttp::Authorization,
-                                          &nsHttp::Connection,
-                                          &nsHttp::Content_Length,
-                                          &nsHttp::Cookie,
-                                          &nsHttp::Host,
-                                          &nsHttp::If,
-                                          &nsHttp::If_Match,
-                                          &nsHttp::If_Modified_Since,
-                                          &nsHttp::If_None_Match,
-                                          &nsHttp::If_None_Match_Any,
-                                          &nsHttp::If_Range,
-                                          &nsHttp::If_Unmodified_Since,
-                                          &nsHttp::Proxy_Authenticate,
-                                          &nsHttp::Proxy_Authorization,
-                                          &nsHttp::Range,
-                                          &nsHttp::TE,
-                                          &nsHttp::Transfer_Encoding,
-                                          &nsHttp::Upgrade,
-                                          &nsHttp::User_Agent,
-                                          &nsHttp::WWW_Authenticate};
+  static nsHttpAtomLiteral const* blackList[] = {
+      &nsHttp::Accept,
+      &nsHttp::Accept_Encoding,
+      &nsHttp::Accept_Language,
+      &nsHttp::Alternate_Service_Used,
+      &nsHttp::Authentication,
+      &nsHttp::Authorization,
+      &nsHttp::Connection,
+      &nsHttp::Content_Length,
+      &nsHttp::Cookie,
+      &nsHttp::Host,
+      &nsHttp::If,
+      &nsHttp::If_Match,
+      &nsHttp::If_Modified_Since,
+      &nsHttp::If_None_Match,
+      &nsHttp::If_None_Match_Any,
+      &nsHttp::If_Range,
+      &nsHttp::If_Unmodified_Since,
+      &nsHttp::Proxy_Authenticate,
+      &nsHttp::Proxy_Authorization,
+      &nsHttp::Range,
+      &nsHttp::TE,
+      &nsHttp::Transfer_Encoding,
+      &nsHttp::Upgrade,
+      &nsHttp::User_Agent,
+      &nsHttp::WWW_Authenticate};
 
   class HttpAtomComparator {
     nsHttpAtom const& mTarget;
@@ -148,6 +151,12 @@ static bool IsHeaderBlacklistedForRedirectCopy(nsHttpAtom const& aHeader) {
    public:
     explicit HttpAtomComparator(nsHttpAtom const& aTarget) : mTarget(aTarget) {}
     int operator()(nsHttpAtom const* aVal) const {
+      if (mTarget == *aVal) {
+        return 0;
+      }
+      return strcmp(mTarget.get(), aVal->get());
+    }
+    int operator()(nsHttpAtomLiteral const* aVal) const {
       if (mTarget == *aVal) {
         return 0;
       }
@@ -236,7 +245,8 @@ HttpBaseChannel::HttpBaseChannel()
       mCachedOpaqueResponseBlockingPref(
           StaticPrefs::browser_opaqueResponseBlocking()),
       mChannelBlockedByOpaqueResponse(false),
-      mDummyChannelForImageCache(false) {
+      mDummyChannelForImageCache(false),
+      mHasContentDecompressed(false) {
   StoreApplyConversion(true);
   StoreAllowSTS(true);
   StoreTracingEnabled(true);
@@ -1758,6 +1768,7 @@ HttpBaseChannel::GetThirdPartyClassificationFlags(uint32_t* aFlags) {
 
 NS_IMETHODIMP
 HttpBaseChannel::GetTransferSize(uint64_t* aTransferSize) {
+  MutexAutoLock lock(mOnDataFinishedMutex);
   *aTransferSize = mTransferSize;
   return NS_OK;
 }
@@ -1776,6 +1787,7 @@ HttpBaseChannel::GetDecodedBodySize(uint64_t* aDecodedBodySize) {
 
 NS_IMETHODIMP
 HttpBaseChannel::GetEncodedBodySize(uint64_t* aEncodedBodySize) {
+  MutexAutoLock lock(mOnDataFinishedMutex);
   *aEncodedBodySize = mEncodedBodySize;
   return NS_OK;
 }
@@ -2159,7 +2171,14 @@ HttpBaseChannel::GetResponseStatus(uint32_t* aValue) {
 NS_IMETHODIMP
 HttpBaseChannel::GetResponseStatusText(nsACString& aValue) {
   if (!mResponseHead) return NS_ERROR_NOT_AVAILABLE;
-  mResponseHead->StatusText(aValue);
+  nsAutoCString version;
+  // https://fetch.spec.whatwg.org :
+  // Responses over an HTTP/2 connection will always have the empty byte
+  // sequence as status message as HTTP/2 does not support them.
+  if (NS_WARN_IF(NS_FAILED(GetProtocolVersion(version))) ||
+      !version.EqualsLiteral("h2")) {
+    mResponseHead->StatusText(aValue);
+  }
   return NS_OK;
 }
 
@@ -2397,7 +2416,23 @@ void HttpBaseChannel::NotifySetCookie(const nsACString& aCookie) {
 }
 
 bool HttpBaseChannel::IsBrowsingContextDiscarded() const {
-  return mLoadGroup && mLoadGroup->GetIsBrowsingContextDiscarded();
+  // If there is no loadGroup attached to the current channel, we check the
+  // global private browsing state for the private channel instead. For
+  // non-private channel, we will always return false here.
+  //
+  // Note that we can only access the global private browsing state in the
+  // parent process. So, we will fallback to just return false in the content
+  // process.
+  if (!mLoadGroup) {
+    if (!XRE_IsParentProcess()) {
+      return false;
+    }
+
+    return mLoadInfo->GetOriginAttributes().mPrivateBrowsingId != 0 &&
+           !dom::CanonicalBrowsingContext::IsPrivateBrowsingActive();
+  }
+
+  return mLoadGroup->GetIsBrowsingContextDiscarded();
 }
 
 // https://mikewest.github.io/corpp/#process-navigation-response
@@ -3498,7 +3533,9 @@ HttpBaseChannel::SetChannelIsForDownload(bool aChannelIsForDownload) {
 
 NS_IMETHODIMP
 HttpBaseChannel::SetCacheKeysRedirectChain(nsTArray<nsCString>* cacheKeys) {
-  mRedirectedCachekeys = WrapUnique(cacheKeys);
+  auto RedirectedCachekeys = mRedirectedCachekeys.Lock();
+  auto& ref = RedirectedCachekeys.ref();
+  ref = WrapUnique(cacheKeys);
   return NS_OK;
 }
 
@@ -4438,7 +4475,7 @@ void HttpBaseChannel::AddCookiesToRequest() {
 
   // If we are in the child process, we want the parent seeing any
   // cookie headers that might have been set by SetRequestHeader()
-  SetRequestHeader(nsDependentCString(nsHttp::Cookie), cookie, false);
+  SetRequestHeader(nsHttp::Cookie.val(), cookie, false);
 }
 
 /* static */
@@ -4994,14 +5031,17 @@ nsresult HttpBaseChannel::SetupReplacementChannel(nsIURI* newURI,
 
     // if there is a chain of keys for redirect-responses we transfer it to
     // the new channel (see bug #561276)
-    if (mRedirectedCachekeys) {
-      LOG(
-          ("HttpBaseChannel::SetupReplacementChannel "
-           "[this=%p] transferring chain of redirect cache-keys",
-           this));
-      rv = httpInternal->SetCacheKeysRedirectChain(
-          mRedirectedCachekeys.release());
-      MOZ_ASSERT(NS_SUCCEEDED(rv));
+    {
+      auto redirectedCachekeys = mRedirectedCachekeys.Lock();
+      auto& ref = redirectedCachekeys.ref();
+      if (ref) {
+        LOG(
+            ("HttpBaseChannel::SetupReplacementChannel "
+             "[this=%p] transferring chain of redirect cache-keys",
+             this));
+        rv = httpInternal->SetCacheKeysRedirectChain(ref.release());
+        MOZ_ASSERT(NS_SUCCEEDED(rv));
+      }
     }
 
     // Preserve Request mode.
@@ -5335,7 +5375,8 @@ HttpBaseChannel::TimingAllowCheck(nsIPrincipal* aOrigin, bool* _retval) {
                                                 serializedOrigin, mLoadInfo);
 
   // All redirects are same origin
-  if (sameOrigin && !serializedOrigin.IsEmpty()) {
+  if (sameOrigin && (!serializedOrigin.IsEmpty() &&
+                     !serializedOrigin.EqualsLiteral("null"))) {
     *_retval = true;
     return NS_OK;
   }
@@ -5518,7 +5559,7 @@ HttpBaseChannel::GetCacheReadEnd(TimeStamp* _retval) {
 
 NS_IMETHODIMP
 HttpBaseChannel::GetTransactionPending(TimeStamp* _retval) {
-  *_retval = mTransactionPendingTime;
+  *_retval = mTransactionTimings.transactionPending;
   return NS_OK;
 }
 
@@ -5622,7 +5663,7 @@ void HttpBaseChannel::MaybeReportTimingData() {
       return;
     }
 
-    Maybe<LoadInfoArgs> loadInfoArgs;
+    LoadInfoArgs loadInfoArgs;
     mozilla::ipc::LoadInfoToLoadInfoArgs(mLoadInfo, &loadInfoArgs);
     child->SendReportFrameTimingData(loadInfoArgs, entryName, initiatorType,
                                      std::move(performanceTimingData));
@@ -5833,6 +5874,12 @@ HttpBaseChannel::SetNavigationStartTimeStamp(TimeStamp aTimeStamp) {
 
 nsresult HttpBaseChannel::CheckRedirectLimit(uint32_t aRedirectFlags) const {
   if (aRedirectFlags & nsIChannelEventSink::REDIRECT_INTERNAL) {
+    // for internal redirect due to auth retry we do not have any limit
+    // as we might restrict the number of times a user might retry
+    // authentication
+    if (aRedirectFlags & nsIChannelEventSink::REDIRECT_AUTH_RETRY) {
+      return NS_OK;
+    }
     // Some platform features, like Service Workers, depend on internal
     // redirects.  We should allow some number of internal redirects above
     // and beyond the normal redirect limit so these features continue
@@ -6215,38 +6262,14 @@ HttpBaseChannel::GetIsProxyUsed(bool* aIsProxyUsed) {
   return NS_OK;
 }
 
-void HttpBaseChannel::LogORBError(
-    const nsAString& aReason,
-    const OpaqueResponseBlockedTelemetryReason aTelemetryReason) {
-  RefPtr<dom::Document> doc;
-  mLoadInfo->GetLoadingDocument(getter_AddRefs(doc));
-
-  nsAutoCString uri;
-  nsresult rv = nsContentUtils::AnonymizeURI(mURI, uri);
-  if (NS_WARN_IF(NS_FAILED(rv))) {
-    return;
-  }
-
-  uint64_t contentWindowId;
-  GetTopLevelContentWindowId(&contentWindowId);
-  if (contentWindowId) {
-    nsContentUtils::ReportToConsoleByWindowID(
-        u"A resource is blocked by OpaqueResponseBlocking, please check browser console for details."_ns,
-        nsIScriptError::warningFlag, "ORB"_ns, contentWindowId, mURI);
-  }
-
-  AutoTArray<nsString, 2> params;
-  params.AppendElement(NS_ConvertUTF8toUTF16(uri));
-  params.AppendElement(aReason);
-  nsContentUtils::ReportToConsole(nsIScriptError::warningFlag, "ORB"_ns, doc,
-                                  nsContentUtils::eNECKO_PROPERTIES,
-                                  "ResourceBlockedORB", params);
-
+static void CollectORBBlockTelemetry(
+    const OpaqueResponseBlockedTelemetryReason aTelemetryReason,
+    ExtContentPolicy aPolicy) {
   Telemetry::LABELS_ORB_BLOCK_REASON label{
       static_cast<uint32_t>(aTelemetryReason)};
   Telemetry::AccumulateCategorical(label);
 
-  switch (mLoadInfo->GetExternalContentPolicyType()) {
+  switch (aPolicy) {
     case ExtContentPolicy::TYPE_INVALID:
       Telemetry::AccumulateCategorical(
           Telemetry::LABELS_ORB_BLOCK_INITIATOR::INVALID);
@@ -6337,6 +6360,43 @@ void HttpBaseChannel::LogORBError(
   }
 }
 
+void HttpBaseChannel::LogORBError(
+    const nsAString& aReason,
+    const OpaqueResponseBlockedTelemetryReason aTelemetryReason) {
+  auto policy = mLoadInfo->GetExternalContentPolicyType();
+  CollectORBBlockTelemetry(aTelemetryReason, policy);
+
+  // Blocking `ExtContentPolicy::TYPE_BEACON` isn't web observable, so keep
+  // quiet in the console about blocking it.
+  if (policy == ExtContentPolicy::TYPE_BEACON) {
+    return;
+  }
+
+  RefPtr<dom::Document> doc;
+  mLoadInfo->GetLoadingDocument(getter_AddRefs(doc));
+
+  nsAutoCString uri;
+  nsresult rv = nsContentUtils::AnonymizeURI(mURI, uri);
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    return;
+  }
+
+  uint64_t contentWindowId;
+  GetTopLevelContentWindowId(&contentWindowId);
+  if (contentWindowId) {
+    nsContentUtils::ReportToConsoleByWindowID(
+        u"A resource is blocked by OpaqueResponseBlocking, please check browser console for details."_ns,
+        nsIScriptError::warningFlag, "ORB"_ns, contentWindowId, mURI);
+  }
+
+  AutoTArray<nsString, 2> params;
+  params.AppendElement(NS_ConvertUTF8toUTF16(uri));
+  params.AppendElement(aReason);
+  nsContentUtils::ReportToConsole(nsIScriptError::warningFlag, "ORB"_ns, doc,
+                                  nsContentUtils::eNECKO_PROPERTIES,
+                                  "ResourceBlockedORB", params);
+}
+
 NS_IMETHODIMP HttpBaseChannel::SetEarlyHintLinkType(
     uint32_t aEarlyHintLinkType) {
   mEarlyHintLinkType = aEarlyHintLinkType;
@@ -6346,6 +6406,19 @@ NS_IMETHODIMP HttpBaseChannel::SetEarlyHintLinkType(
 NS_IMETHODIMP HttpBaseChannel::GetEarlyHintLinkType(
     uint32_t* aEarlyHintLinkType) {
   *aEarlyHintLinkType = mEarlyHintLinkType;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+HttpBaseChannel::SetHasContentDecompressed(bool aValue) {
+  LOG(("HttpBaseChannel::SetHasContentDecompressed [this=%p value=%d]\n", this,
+       aValue));
+  mHasContentDecompressed = aValue;
+  return NS_OK;
+}
+NS_IMETHODIMP
+HttpBaseChannel::GetHasContentDecompressed(bool* value) {
+  *value = mHasContentDecompressed;
   return NS_OK;
 }
 

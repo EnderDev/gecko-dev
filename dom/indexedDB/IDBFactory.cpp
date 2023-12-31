@@ -28,7 +28,7 @@
 #include "mozilla/Telemetry.h"
 #include "nsAboutProtocolUtils.h"
 #include "nsContentUtils.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
 #include "nsIAboutModule.h"
 #include "nsILoadContext.h"
 #include "nsIURI.h"
@@ -179,7 +179,7 @@ Result<RefPtr<IDBFactory>, nsresult> IDBFactory::CreateForWindow(
 
   factory->mBrowserChild = BrowserChild::GetFrom(aWindow);
   factory->mEventTarget =
-      nsGlobalWindowInner::Cast(aWindow)->EventTargetFor(TaskCategory::Other);
+      nsGlobalWindowInner::Cast(aWindow)->SerialEventTarget();
   factory->mInnerWindowID = aWindow->WindowID();
   factory->mPrivateBrowsingMode =
       loadContext && loadContext->UsePrivateBrowsing();

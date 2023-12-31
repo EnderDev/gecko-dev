@@ -25,25 +25,6 @@ export interface Attachment {
 }
 
 /**
- * The JSON that is synced from Remote Settings for the language-id models.
- */
-export interface LanguageIdModelRecord {
-  // e.g. "0d4db293-a17c-4085-9bd8-e2e146c85000"
-  id: string;
-  // The full model name, e.g. "lid.176.ftz"
-  name: string;
-  // The semver number, used for handling future format changes. e.g. 1.0
-  version: string;
-  // The file attachment for this record
-  attachment: Attachment;
-  // e.g. 1673455932527
-  last_modified: string;
-  // A JEXL expression to determine whether this record should be pulled from Remote Settings
-  // See: https://remote-settings.readthedocs.io/en/latest/target-filters.html#filter-expressions
-  filter_expression: string;
-}
-
-/**
  * The JSON that is synced from Remote Settings for the translation models.
  */
 export interface TranslationModelRecord {
@@ -262,18 +243,6 @@ interface TranslationsEnginePayload {
 }
 
 /**
- * These are the files that are downloaded from Remote Settings that are necessary
- * to start the language-identification engine. These may not be available if running
- * in tests.
- */
-interface LanguageIdEnginePayload {
-  wasmBuffer: ArrayBuffer,
-  modelBuffer: ArrayBuffer,
-  mockedConfidence: null | number,
-  mockedLangTag: null | string,
-}
-
-/**
  * Nodes that are being translated are given priority according to their visibility.
  */
 export type NodeVisibility = "in-viewport" | "out-of-viewport" | "hidden";
@@ -295,8 +264,8 @@ export interface LanguagePair { fromLang: string, toLang: string };
  */
 export interface SupportedLanguages {
   languagePairs: LanguagePair[],
-  fromLanguages: Array<{ langTag: string, isBeta: boolean, displayName: string, }>,
-  toLanguages: Array<{ langTag: string, isBeta: boolean, displayName: string }>,
+  fromLanguages: Array<{ langTag: string, displayName: string, }>,
+  toLanguages: Array<{ langTag: string, displayName: string }>,
 }
 
 export type TranslationErrors = "engine-load-error";

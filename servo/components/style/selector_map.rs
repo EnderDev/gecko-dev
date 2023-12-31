@@ -153,7 +153,7 @@ impl<T> SelectorMap<T> {
             namespace_hash: HashMap::default(),
             rare_pseudo_classes: SmallVec::new(),
             other: SmallVec::new(),
-            bucket_attributes: static_prefs::pref!("layout.css.bucket-attribute-names.enabled"),
+            bucket_attributes: true,
             count: 0,
         }
     }
@@ -753,9 +753,9 @@ fn specific_bucket_for<'a>(
         },
         Component::Is(ref list) | Component::Where(ref list) => {
             if list.len() == 1 {
-                find_bucket(list[0].iter(), disjoint_buckets, bucket_attributes)
+                find_bucket(list.slice()[0].iter(), disjoint_buckets, bucket_attributes)
             } else {
-                for selector in &**list {
+                for selector in list.slice() {
                     let bucket = find_bucket(selector.iter(), disjoint_buckets, bucket_attributes);
                     disjoint_buckets.push(bucket);
                 }

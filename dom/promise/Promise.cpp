@@ -40,7 +40,7 @@
 #include "nsContentUtils.h"
 #include "nsCycleCollectionParticipant.h"
 #include "nsDebug.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
 #include "nsIScriptObjectPrincipal.h"
 #include "nsJSEnvironment.h"
 #include "nsJSPrincipals.h"
@@ -732,7 +732,7 @@ void Promise::ReportRejectedPromise(JSContext* aCx,
         event->SerializeStack(aCx, resolutionSite);
       }
     }
-    winForDispatch->Dispatch(mozilla::TaskCategory::Other, event.forget());
+    winForDispatch->Dispatch(event.forget());
   } else {
     NS_DispatchToMainThread(event);
   }
@@ -776,8 +776,7 @@ class PromiseWorkerProxyRunnable : public WorkerRunnable {
  public:
   PromiseWorkerProxyRunnable(PromiseWorkerProxy* aPromiseWorkerProxy,
                              PromiseWorkerProxy::RunCallbackFunc aFunc)
-      : WorkerRunnable(aPromiseWorkerProxy->GetWorkerPrivate(),
-                       WorkerThreadUnchangedBusyCount),
+      : WorkerRunnable(aPromiseWorkerProxy->GetWorkerPrivate(), WorkerThread),
         mPromiseWorkerProxy(aPromiseWorkerProxy),
         mFunc(aFunc) {
     MOZ_ASSERT(NS_IsMainThread());
@@ -1065,6 +1064,23 @@ already_AddRefed<Promise> Promise::CreateRejectedWithErrorResult(
   }
   returnPromise->MaybeReject(std::move(aRejectionError));
   return returnPromise.forget();
+}
+
+nsresult Promise::TryExtractNSResultFromRejectionValue(
+    JS::Handle<JS::Value> aValue) {
+  if (aValue.isInt32()) {
+    return nsresult(aValue.toInt32());
+  }
+
+  if (aValue.isObject()) {
+    RefPtr<DOMException> domException;
+    UNWRAP_OBJECT(DOMException, aValue, domException);
+    if (domException) {
+      return domException->GetResult();
+    }
+  }
+
+  return NS_ERROR_DOM_NOT_NUMBER_ERR;
 }
 
 }  // namespace mozilla::dom

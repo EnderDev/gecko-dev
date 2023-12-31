@@ -169,13 +169,48 @@ void TenuringTracer::traverse(JS::Value* thingp) {
   }
 }
 
+void TenuringTracer::traverse(wasm::AnyRef* thingp) {
+  MOZ_ASSERT(!nursery().isInside(thingp));
+
+  wasm::AnyRef value = *thingp;
+  CheckTracedThing(this, value);
+
+  wasm::AnyRef post = wasm::AnyRef::invalid();
+  switch (value.kind()) {
+    case wasm::AnyRefKind::Object: {
+      JSObject* obj = &value.toJSObject();
+      onObjectEdge(&obj, "value");
+      post = wasm::AnyRef::fromJSObject(*obj);
+      break;
+    }
+    case wasm::AnyRefKind::String: {
+      JSString* str = value.toJSString();
+      onStringEdge(&str, "string");
+      post = wasm::AnyRef::fromJSString(str);
+      break;
+    }
+    case wasm::AnyRefKind::I31:
+    case wasm::AnyRefKind::Null: {
+      // This function must only be called for GC things.
+      MOZ_CRASH();
+    }
+  }
+
+  if (post != value) {
+    *thingp = post;
+  }
+}
+
 template <typename T>
-void js::gc::StoreBuffer::MonoTypeBuffer<T>::trace(TenuringTracer& mover) {
-  mozilla::ReentrancyGuard g(*owner_);
-  MOZ_ASSERT(owner_->isEnabled());
+void js::gc::StoreBuffer::MonoTypeBuffer<T>::trace(TenuringTracer& mover,
+                                                   StoreBuffer* owner) {
+  mozilla::ReentrancyGuard g(*owner);
+  MOZ_ASSERT(owner->isEnabled());
+
   if (last_) {
     last_.trace(mover);
   }
+
   for (typename StoreSet::Range r = stores_.all(); !r.empty(); r.popFront()) {
     r.front().trace(mover);
   }
@@ -183,9 +218,11 @@ void js::gc::StoreBuffer::MonoTypeBuffer<T>::trace(TenuringTracer& mover) {
 
 namespace js::gc {
 template void StoreBuffer::MonoTypeBuffer<StoreBuffer::ValueEdge>::trace(
-    TenuringTracer&);
+    TenuringTracer&, StoreBuffer* owner);
 template void StoreBuffer::MonoTypeBuffer<StoreBuffer::SlotsEdge>::trace(
-    TenuringTracer&);
+    TenuringTracer&, StoreBuffer* owner);
+template void StoreBuffer::MonoTypeBuffer<StoreBuffer::WasmAnyRefEdge>::trace(
+    TenuringTracer&, StoreBuffer* owner);
 template struct StoreBuffer::MonoTypeBuffer<StoreBuffer::StringPtrEdge>;
 template struct StoreBuffer::MonoTypeBuffer<StoreBuffer::BigIntPtrEdge>;
 template struct StoreBuffer::MonoTypeBuffer<StoreBuffer::ObjectPtrEdge>;
@@ -358,14 +395,15 @@ void ArenaCellSet::trace(TenuringTracer& mover) {
   }
 }
 
-void js::gc::StoreBuffer::WholeCellBuffer::trace(TenuringTracer& mover) {
-  MOZ_ASSERT(owner_->isEnabled());
+void js::gc::StoreBuffer::WholeCellBuffer::trace(TenuringTracer& mover,
+                                                 StoreBuffer* owner) {
+  MOZ_ASSERT(owner->isEnabled());
 
 #ifdef DEBUG
   // Verify that all string whole cells are traced first before any other
   // strings are visited for any reason.
-  MOZ_ASSERT(!owner_->markingNondeduplicatable);
-  owner_->markingNondeduplicatable = true;
+  MOZ_ASSERT(!owner->markingNondeduplicatable);
+  owner->markingNondeduplicatable = true;
 #endif
   // Trace all of the strings to mark the non-deduplicatable bits, then trace
   // all other whole cells.
@@ -373,7 +411,7 @@ void js::gc::StoreBuffer::WholeCellBuffer::trace(TenuringTracer& mover) {
     stringHead_->trace(mover);
   }
 #ifdef DEBUG
-  owner_->markingNondeduplicatable = false;
+  owner->markingNondeduplicatable = false;
 #endif
   if (nonStringHead_) {
     nonStringHead_->trace(mover);
@@ -407,6 +445,12 @@ void js::gc::StoreBuffer::CellPtrEdge<T>::trace(TenuringTracer& mover) const {
 }
 
 void js::gc::StoreBuffer::ValueEdge::trace(TenuringTracer& mover) const {
+  if (deref()) {
+    mover.traverse(edge);
+  }
+}
+
+void js::gc::StoreBuffer::WasmAnyRefEdge::trace(TenuringTracer& mover) const {
   if (deref()) {
     mover.traverse(edge);
   }
@@ -600,40 +644,20 @@ size_t js::gc::TenuringTracer::moveSlotsToTenured(NativeObject* dst,
     return 0;
   }
 
-  Zone* zone = src->nurseryZone();
   size_t count = src->numDynamicSlots();
-
-  uint64_t uid = src->maybeUniqueId();
-
   size_t allocSize = ObjectSlots::allocSize(count);
 
-  ObjectSlots* srcHeader = src->getSlotsHeader();
-  if (!nursery().isInside(srcHeader)) {
-    AddCellMemory(dst, allocSize, MemoryUse::ObjectSlots);
-    nursery().removeMallocedBufferDuringMinorGC(srcHeader);
+  ObjectSlots* header = src->getSlotsHeader();
+  Nursery::WasBufferMoved result = nursery().maybeMoveBufferOnPromotion(
+      &header, dst, allocSize, MemoryUse::ObjectSlots);
+  if (result == Nursery::BufferNotMoved) {
     return 0;
   }
 
-  {
-    AutoEnterOOMUnsafeRegion oomUnsafe;
-    HeapSlot* allocation =
-        zone->pod_malloc<HeapSlot>(ObjectSlots::allocCount(count));
-    if (!allocation) {
-      oomUnsafe.crash(allocSize, "Failed to allocate slots while tenuring.");
-    }
-
-    ObjectSlots* slotsHeader = new (allocation)
-        ObjectSlots(count, srcHeader->dictionarySlotSpan(), uid);
-    dst->slots_ = slotsHeader->slots();
-  }
-
-  AddCellMemory(dst, allocSize, MemoryUse::ObjectSlots);
-
-  PodCopy(dst->slots_, src->slots_, count);
+  dst->slots_ = header->slots();
   if (count) {
     nursery().setSlotsForwardingPointer(src->slots_, dst->slots_, count);
   }
-
   return allocSize;
 }
 
@@ -644,31 +668,19 @@ size_t js::gc::TenuringTracer::moveElementsToTenured(NativeObject* dst,
     return 0;
   }
 
-  Zone* zone = src->nurseryZone();
-
   ObjectElements* srcHeader = src->getElementsHeader();
   size_t nslots = srcHeader->numAllocatedElements();
   size_t allocSize = nslots * sizeof(HeapSlot);
 
-  void* srcAllocatedHeader = src->getUnshiftedElementsHeader();
-
-  /* TODO Bug 874151: Prefer to put element data inline if we have space. */
-  if (!nursery().isInside(srcAllocatedHeader)) {
-    MOZ_ASSERT(src->elements_ == dst->elements_);
-    nursery().removeMallocedBufferDuringMinorGC(srcAllocatedHeader);
-
-    AddCellMemory(dst, allocSize, MemoryUse::ObjectElements);
-
-    return 0;
-  }
-
   // Shifted elements are copied too.
   uint32_t numShifted = srcHeader->numShiftedElements();
+
+  void* unshiftedHeader = src->getUnshiftedElementsHeader();
 
   /* Unlike other objects, Arrays and Tuples can have fixed elements. */
   if (src->canHaveFixedElements() && nslots <= GetGCKindSlots(dstKind)) {
     dst->as<NativeObject>().setFixedElements();
-    js_memcpy(dst->getElementsHeader(), srcAllocatedHeader, allocSize);
+    js_memcpy(dst->getElementsHeader(), unshiftedHeader, allocSize);
     dst->elements_ += numShifted;
     dst->getElementsHeader()->flags |= ObjectElements::FIXED;
     nursery().setElementsForwardingPointer(srcHeader, dst->getElementsHeader(),
@@ -676,22 +688,16 @@ size_t js::gc::TenuringTracer::moveElementsToTenured(NativeObject* dst,
     return allocSize;
   }
 
-  MOZ_ASSERT(nslots >= 2);
+  /* TODO Bug 874151: Prefer to put element data inline if we have space. */
 
-  ObjectElements* dstHeader;
-  {
-    AutoEnterOOMUnsafeRegion oomUnsafe;
-    dstHeader =
-        reinterpret_cast<ObjectElements*>(zone->pod_malloc<HeapSlot>(nslots));
-    if (!dstHeader) {
-      oomUnsafe.crash(allocSize, "Failed to allocate elements while tenuring.");
-    }
+  Nursery::WasBufferMoved result = nursery().maybeMoveBufferOnPromotion(
+      &unshiftedHeader, dst, allocSize, MemoryUse::ObjectElements);
+  if (result == Nursery::BufferNotMoved) {
+    return 0;
   }
 
-  AddCellMemory(dst, allocSize, MemoryUse::ObjectElements);
-
-  js_memcpy(dstHeader, srcAllocatedHeader, allocSize);
-  dst->elements_ = dstHeader->elements() + numShifted;
+  dst->elements_ =
+      static_cast<ObjectElements*>(unshiftedHeader)->elements() + numShifted;
   dst->getElementsHeader()->flags &= ~ObjectElements::FIXED;
   nursery().setElementsForwardingPointer(srcHeader, dst->getElementsHeader(),
                                          srcHeader->capacity);
@@ -754,7 +760,8 @@ JSString* js::gc::TenuringTracer::moveToTenured(JSString* src) {
 
   if (src->length() < MAX_DEDUPLICATABLE_STRING_LENGTH && src->isLinear() &&
       src->isDeduplicatable() && stringDeDupSet.isSome()) {
-    if (auto p = stringDeDupSet->lookup(src)) {
+    auto p = stringDeDupSet->lookupForAdd(src);
+    if (p) {
       // Deduplicate to the looked-up string!
       dst = *p;
       zone->stringStats.ref().noteDeduplicated(src->length(), src->allocSize());
@@ -765,7 +772,11 @@ JSString* js::gc::TenuringTracer::moveToTenured(JSString* src) {
 
     dst = allocTenuredString(src, zone, dstKind);
 
-    if (!stringDeDupSet->putNew(dst)) {
+    using DedupHasher [[maybe_unused]] = DeduplicationStringHasher<JSString*>;
+    MOZ_ASSERT(DedupHasher::hash(src) == DedupHasher::hash(dst),
+               "src and dst must have the same hash for lookupForAdd");
+
+    if (!stringDeDupSet->add(p, dst)) {
       // When there is oom caused by the stringDeDupSet, stop deduplicating
       // strings.
       stringDeDupSet.reset();
@@ -965,29 +976,18 @@ size_t js::gc::TenuringTracer::moveBigIntToTenured(JS::BigInt* dst,
 
   MOZ_ASSERT(dst->zone() == src->nurseryZone());
 
-  if (src->hasHeapDigits()) {
-    size_t length = dst->digitLength();
-    if (!nursery().isInside(src->heapDigits_)) {
-      nursery().removeMallocedBufferDuringMinorGC(src->heapDigits_);
-    } else {
-      Zone* zone = src->nurseryZone();
-      {
-        AutoEnterOOMUnsafeRegion oomUnsafe;
-        dst->heapDigits_ = zone->pod_malloc<JS::BigInt::Digit>(length);
-        if (!dst->heapDigits_) {
-          oomUnsafe.crash(sizeof(JS::BigInt::Digit) * length,
-                          "Failed to allocate digits while tenuring.");
-        }
-      }
+  if (!src->hasHeapDigits()) {
+    return size;
+  }
 
-      PodCopy(dst->heapDigits_, src->heapDigits_, length);
-      nursery().setDirectForwardingPointer(src->heapDigits_, dst->heapDigits_);
+  size_t length = dst->digitLength();
+  size_t nbytes = length * sizeof(JS::BigInt::Digit);
 
-      size += length * sizeof(JS::BigInt::Digit);
-    }
-
-    AddCellMemory(dst, length * sizeof(JS::BigInt::Digit),
-                  MemoryUse::BigIntDigits);
+  Nursery::WasBufferMoved result = nursery().maybeMoveBufferOnPromotion(
+      &dst->heapDigits_, dst, nbytes, MemoryUse::BigIntDigits);
+  if (result == Nursery::BufferMoved) {
+    nursery().setDirectForwardingPointer(src->heapDigits_, dst->heapDigits_);
+    size += nbytes;
   }
 
   return size;

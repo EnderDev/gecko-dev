@@ -648,7 +648,6 @@ class FileRecordJSONDecoder(json.JSONDecoder):
 
 
 class Manifest(object):
-
     valid_formats = ("json",)
 
     def __init__(self, file_records=None):
@@ -1179,7 +1178,7 @@ def fetch_files(
                     log.warning(
                         "Impossible to add file %s to cache folder %s"
                         % (localfile.filename, cache_folder),
-                        exc_info=True,
+                        exc_info=False,
                     )
         else:
             failed_files.append(localfile.filename)

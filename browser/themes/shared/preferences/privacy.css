@@ -42,7 +42,7 @@
 }
 
 .speaker-icon {
-  list-style-image: url(chrome://global/skin/media/audio.svg);
+  list-style-image: url(chrome://browser/skin/notification-icons/speaker.svg);
 }
 
 .desktop-notification-icon {
@@ -80,15 +80,18 @@
 }
 
 .privacy-detailedoption,
-#fpiIncompatibilityWarning {
+#fpiIncompatibilityWarning,
+#rfpIncompatibilityWarning {
   margin: 3px 0;
 }
 
-#fpiIncompatibilityWarning {
+#fpiIncompatibilityWarning,
+#rfpIncompatibilityWarning {
   background-color: var(--section-highlight-background-color);
 }
 
 #fpiIncompatibilityWarning,
+#rfpIncompatibilityWarning,
 #contentBlockingCategories {
   margin-top: 16px;
 }
@@ -256,6 +259,7 @@
 
 .content-blocking-warning-image {
   list-style-image: url("chrome://global/skin/icons/warning.svg");
+  width: 16px;
   margin-inline-end: 6px;
 }
 
@@ -264,7 +268,8 @@
 }
 
 #blockCookiesMenu,
-#trackingProtectionMenu {
+#trackingProtectionMenu,
+#fingerprintingProtectionMenu {
   margin: 0;
 }
 
@@ -317,12 +322,6 @@
      option boxes the same as the apparent vertical space between the labels of
      the checkboxes above the Firefox Suggest subsection. */
   margin-block-start: 18px;
-}
-
-.firefoxSuggestOptionBox:first-of-type {
-  /* Similar here: Make the apparent vertical space between the last checkbox
-     and first option box the same as elsewhere. */
-  margin-block-start: 11px;
 }
 
 #firefoxSuggestInfoBox {

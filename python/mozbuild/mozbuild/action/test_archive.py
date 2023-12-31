@@ -41,12 +41,14 @@ TEST_HARNESS_BINS = [
     "crashinject",
     "geckodriver",
     "http3server",
+    "content_analysis_sdk_agent",
     "minidumpwriter",
     "pk12util",
     "screenshot",
     "screentopng",
     "ssltunnel",
     "xpcshell",
+    "plugin-container",
 ]
 
 TEST_HARNESS_DLLS = ["crashinjectdll", "mozglue"]
@@ -214,7 +216,7 @@ ARCHIVE_FILES = {
         {
             "source": buildconfig.topobjdir,
             "base": "dist/bin/components",
-            "patterns": ["httpd.js"],
+            "patterns": ["httpd.sys.mjs"],
             "dest": "bin/components",
         },
         {
@@ -286,6 +288,13 @@ ARCHIVE_FILES = {
             "pattern": "specialpowers/**",
             "dest": "mochitest/extensions",
         },
+        # Needed by Windows a11y browser tests.
+        {
+            "source": buildconfig.topobjdir,
+            "base": "accessible/interfaces/ia2",
+            "pattern": "IA2Typelib.tlb",
+            "dest": "mochitest",
+        },
     ],
     "mozharness": [
         {
@@ -315,8 +324,23 @@ ARCHIVE_FILES = {
         },
         {
             "source": buildconfig.topsrcdir,
+            "base": "testing/mozbase/mozlog",
+            "pattern": "mozlog/**",
+        },
+        {
+            "source": buildconfig.topsrcdir,
+            "base": "python/mozterm",
+            "pattern": "mozterm/**",
+        },
+        {
+            "source": buildconfig.topsrcdir,
             "base": "testing/mozbase/mozprocess",
             "pattern": "mozprocess/**",
+        },
+        {
+            "source": buildconfig.topsrcdir,
+            "base": "testing/mozbase/mozsystemmonitor",
+            "pattern": "mozsystemmonitor/**",
         },
         {
             "source": buildconfig.topsrcdir,
@@ -325,8 +349,13 @@ ARCHIVE_FILES = {
         },
         {
             "source": buildconfig.topsrcdir,
+            "base": "third_party/python/toml",
+            "pattern": "**",
+        },
+        {
+            "source": buildconfig.topsrcdir,
             "base": "third_party/python/distro",
-            "pattern": "distro.py",
+            "pattern": "distro/**",
         },
         {
             "source": buildconfig.topsrcdir,
@@ -431,6 +460,7 @@ ARCHIVE_FILES = {
                 "chrome/**",
                 "chrome.manifest",
                 "components/**",
+                "content_analysis_sdk_agent",
                 "http3server",
                 "*.ini",
                 "localization/**",

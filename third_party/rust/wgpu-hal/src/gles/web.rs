@@ -25,6 +25,7 @@ impl AdapterContext {
 
 #[derive(Debug)]
 pub struct Instance {
+    /// Set when a canvas is provided, and used to implement [`Instance::enumerate_adapters()`].
     webgl2_context: Mutex<Option<web_sys::WebGl2RenderingContext>>,
 }
 
@@ -65,14 +66,16 @@ impl Instance {
                 // “not supported” could include “insufficient GPU resources” or “the GPU process
                 // previously crashed”. So, we must return it as an `Err` since it could occur
                 // for circumstances outside the application author's control.
-                return Err(crate::InstanceError);
+                return Err(crate::InstanceError::new(String::from(
+                    "canvas.getContext() returned null; webgl2 not available or canvas already in use"
+                )));
             }
             Err(js_error) => {
                 // <https://html.spec.whatwg.org/multipage/canvas.html#dom-canvas-getcontext>
-                // A thrown exception indicates misuse of the canvas state. Ideally we wouldn't
-                // panic in this case, but for now, `InstanceError` conveys no detail, so it
-                // is more informative to panic with a specific message.
-                panic!("canvas.getContext() threw {js_error:?}")
+                // A thrown exception indicates misuse of the canvas state.
+                return Err(crate::InstanceError::new(format!(
+                    "canvas.getContext() threw exception {js_error:?}",
+                )));
             }
         };
 
@@ -82,6 +85,8 @@ impl Instance {
             .dyn_into()
             .expect("canvas context is not a WebGl2RenderingContext");
 
+        // It is not inconsistent to overwrite an existing context, because the only thing that
+        // `self.webgl2_context` is used for is producing the response to `enumerate_adapters()`.
         *self.webgl2_context.lock() = Some(webgl2_context.clone());
 
         Ok(Surface {
@@ -106,12 +111,20 @@ impl Instance {
     }
 }
 
-// SAFE: WASM doesn't have threads
+#[cfg(all(
+    feature = "fragile-send-sync-non-atomic-wasm",
+    not(target_feature = "atomics")
+))]
 unsafe impl Sync for Instance {}
+#[cfg(all(
+    feature = "fragile-send-sync-non-atomic-wasm",
+    not(target_feature = "atomics")
+))]
 unsafe impl Send for Instance {}
 
 impl crate::Instance<super::Api> for Instance {
     unsafe fn init(_desc: &crate::InstanceDescriptor) -> Result<Self, crate::InstanceError> {
+        profiling::scope!("Init OpenGL (WebGL) Backend");
         Ok(Instance {
             webgl2_context: Mutex::new(None),
         })
@@ -146,7 +159,9 @@ impl crate::Instance<super::Api> for Instance {
 
             self.create_surface_from_canvas(canvas)
         } else {
-            Err(crate::InstanceError)
+            Err(crate::InstanceError::new(format!(
+                "window handle {window_handle:?} is not a web handle"
+            )))
         }
     }
 
@@ -171,15 +186,22 @@ pub struct Surface {
     srgb_present_program: Option<glow::Program>,
 }
 
+#[cfg(all(
+    feature = "fragile-send-sync-non-atomic-wasm",
+    not(target_feature = "atomics")
+))]
+unsafe impl Sync for Surface {}
+#[cfg(all(
+    feature = "fragile-send-sync-non-atomic-wasm",
+    not(target_feature = "atomics")
+))]
+unsafe impl Send for Surface {}
+
 #[derive(Clone, Debug)]
 enum Canvas {
     Canvas(web_sys::HtmlCanvasElement),
     Offscreen(web_sys::OffscreenCanvas),
 }
-
-// SAFE: Because web doesn't have threads ( yet )
-unsafe impl Sync for Surface {}
-unsafe impl Send for Surface {}
 
 #[derive(Clone, Debug)]
 pub struct Swapchain {
@@ -194,8 +216,9 @@ impl Surface {
     pub(super) unsafe fn present(
         &mut self,
         _suf_texture: super::Texture,
-        gl: &glow::Context,
+        context: &AdapterContext,
     ) -> Result<(), crate::SurfaceError> {
+        let gl = &context.glow_context;
         let swapchain = self.swapchain.as_ref().ok_or(crate::SurfaceError::Other(
             "need to configure surface before presenting",
         ))?;
@@ -392,7 +415,6 @@ impl crate::Surface<super::Api> for Surface {
                 height: sc.extent.height,
                 depth: 1,
             },
-            is_cubemap: false,
         };
         Ok(Some(crate::AcquiredSurfaceTexture {
             texture,

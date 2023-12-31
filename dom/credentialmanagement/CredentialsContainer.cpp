@@ -6,6 +6,7 @@
 
 #include "mozilla/dom/Credential.h"
 #include "mozilla/dom/CredentialsContainer.h"
+#include "mozilla/dom/FeaturePolicyUtils.h"
 #include "mozilla/dom/IdentityCredential.h"
 #include "mozilla/dom/Promise.h"
 #include "mozilla/StaticPrefs_dom.h"
@@ -16,7 +17,6 @@
 #include "nsContentUtils.h"
 #include "nsFocusManager.h"
 #include "nsIDocShell.h"
-#include "nsGlobalWindowInner.h"
 
 namespace mozilla::dom {
 
@@ -124,6 +124,14 @@ void CredentialsContainer::EnsureWebAuthnManager() {
   }
 }
 
+already_AddRefed<WebAuthnManager> CredentialsContainer::GetWebAuthnManager() {
+  MOZ_ASSERT(NS_IsMainThread());
+
+  EnsureWebAuthnManager();
+  RefPtr<WebAuthnManager> ref = mManager;
+  return ref.forget();
+}
+
 JSObject* CredentialsContainer::WrapObject(JSContext* aCx,
                                            JS::Handle<JSObject*> aGivenProto) {
   return CredentialsContainer_Binding::Wrap(aCx, this, aGivenProto);
@@ -144,10 +152,27 @@ already_AddRefed<Promise> CredentialsContainer::Get(
     return CreateAndRejectWithNotSupported(mParent, aRv);
   }
 
+  bool conditionallyMediated =
+      aOptions.mMediation == CredentialMediationRequirement::Conditional;
   if (aOptions.mPublicKey.WasPassed() &&
       StaticPrefs::security_webauth_webauthn()) {
-    if (!IsSameOriginWithAncestors(mParent) || !IsInActiveTab(mParent)) {
+    MOZ_ASSERT(mParent);
+    if (!FeaturePolicyUtils::IsFeatureAllowed(
+            mParent->GetExtantDoc(), u"publickey-credentials-get"_ns) ||
+        !IsInActiveTab(mParent)) {
       return CreateAndRejectWithNotAllowed(mParent, aRv);
+    }
+
+    if (conditionallyMediated) {
+      // Conditional mediation for WebAuthn Get() will be implemented in
+      // Bug 1838932.
+      RefPtr<Promise> promise = CreatePromise(mParent, aRv);
+      if (!promise) {
+        return nullptr;
+      }
+      promise->MaybeRejectWithTypeError<MSG_INVALID_ENUM_VALUE>(
+          "mediation", "conditional", "CredentialMediationRequirement");
+      return promise.forget();
     }
 
     EnsureWebAuthnManager();
@@ -158,6 +183,15 @@ already_AddRefed<Promise> CredentialsContainer::Get(
   if (aOptions.mIdentity.WasPassed() &&
       StaticPrefs::dom_security_credentialmanagement_identity_enabled()) {
     RefPtr<Promise> promise = CreatePromise(mParent, aRv);
+    if (!promise) {
+      return nullptr;
+    }
+
+    if (conditionallyMediated) {
+      promise->MaybeRejectWithTypeError<MSG_INVALID_ENUM_VALUE>(
+          "mediation", "conditional", "CredentialMediationRequirement");
+      return promise.forget();
+    }
 
     if (mActiveIdentityRequest) {
       promise->MaybeRejectWithInvalidStateError(

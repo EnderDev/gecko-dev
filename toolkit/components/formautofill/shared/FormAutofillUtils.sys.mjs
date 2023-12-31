@@ -270,7 +270,7 @@ FormAutofillUtils = {
   },
 
   isCCNumber(ccNumber) {
-    return lazy.CreditCard.isValidNumber(ccNumber);
+    return ccNumber && lazy.CreditCard.isValidNumber(ccNumber);
   },
 
   ensureLoggedIn(promptMessage) {
@@ -438,7 +438,7 @@ FormAutofillUtils = {
    * @returns {boolean} true if the element is visible
    */
   isFieldVisible(element, visibilityCheck = true) {
-    if (visibilityCheck) {
+    if (visibilityCheck && element.checkVisibility) {
       return element.checkVisibility({
         checkOpacity: true,
         checkVisibilityCSS: true,
@@ -446,6 +446,23 @@ FormAutofillUtils = {
     }
 
     return !element.hidden && element.style.display != "none";
+  },
+
+  /**
+   * Determines if an element is focusable
+   * and accessible via keyboard navigation or not.
+   *
+   * @param {HTMLElement} element
+   *
+   * @returns {bool} true if the element is focusable and accessible
+   */
+  isFieldFocusable(element) {
+    return (
+      // The Services.focus.elementIsFocusable API considers elements with
+      // tabIndex="-1" set as focusable. But since they are not accessible
+      // via keyboard navigation we treat them as non-interactive
+      Services.focus.elementIsFocusable(element, 0) && element.tabIndex != "-1"
+    );
   },
 
   /**
@@ -1166,13 +1183,13 @@ FormAutofillUtils = {
   },
 };
 
-XPCOMUtils.defineLazyGetter(FormAutofillUtils, "stringBundle", function () {
+ChromeUtils.defineLazyGetter(FormAutofillUtils, "stringBundle", function () {
   return Services.strings.createBundle(
     "chrome://formautofill/locale/formautofill.properties"
   );
 });
 
-XPCOMUtils.defineLazyGetter(FormAutofillUtils, "brandBundle", function () {
+ChromeUtils.defineLazyGetter(FormAutofillUtils, "brandBundle", function () {
   return Services.strings.createBundle(
     "chrome://branding/locale/brand.properties"
   );
@@ -1224,6 +1241,13 @@ XPCOMUtils.defineLazyPreferenceGetter(
   "visibilityCheckThreshold",
   "extensions.formautofill.heuristics.visibilityCheckThreshold",
   200
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  FormAutofillUtils,
+  "interactivityCheckMode",
+  "extensions.formautofill.heuristics.interactivityCheckMode",
+  "focusability"
 );
 
 // This is only used in iOS

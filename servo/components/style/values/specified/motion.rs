@@ -10,6 +10,7 @@ use crate::values::computed::{Context, ToComputedValue};
 use crate::values::generics::motion as generics;
 use crate::values::specified::basic_shape::BasicShape;
 use crate::values::specified::position::{HorizontalPosition, VerticalPosition};
+use crate::values::specified::url::SpecifiedUrl;
 use crate::values::specified::{Angle, Position};
 use crate::Zero;
 use cssparser::Parser;
@@ -19,7 +20,8 @@ use style_traits::{ParseError, StyleParseErrorKind};
 pub type RayFunction = generics::GenericRayFunction<Angle, Position>;
 
 /// The specified value of <offset-path>.
-pub type OffsetPathFunction = generics::GenericOffsetPathFunction<BasicShape, RayFunction>;
+pub type OffsetPathFunction =
+    generics::GenericOffsetPathFunction<BasicShape, RayFunction, SpecifiedUrl>;
 
 /// The specified value of `offset-path`.
 pub type OffsetPath = generics::GenericOffsetPath<OffsetPathFunction>;
@@ -148,9 +150,7 @@ impl Parse for OffsetPathFunction {
         context: &ParserContext,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self, ParseError<'i>> {
-        use crate::values::specified::basic_shape::{
-            AllowedBasicShapes, DefaultPosition, ShapeType,
-        };
+        use crate::values::specified::basic_shape::{AllowedBasicShapes, ShapeType};
 
         // <offset-path> = <ray()> | <url> | <basic-shape>
         // https://drafts.fxtf.org/motion-1/#typedef-offset-path
@@ -161,20 +161,20 @@ impl Parse for OffsetPathFunction {
             }
         }
 
+        if static_prefs::pref!("layout.css.motion-path-url.enabled") {
+            if let Ok(url) = input.try_parse(|i| SpecifiedUrl::parse(context, i)) {
+                return Ok(OffsetPathFunction::Url(url));
+            }
+        }
+
         let allowed_shapes = if static_prefs::pref!("layout.css.motion-path-basic-shapes.enabled") {
             AllowedBasicShapes::ALL
         } else {
             AllowedBasicShapes::PATH
         };
 
-        BasicShape::parse(
-            context,
-            input,
-            allowed_shapes,
-            ShapeType::Outline,
-            DefaultPosition::Context,
-        )
-        .map(OffsetPathFunction::Shape)
+        BasicShape::parse(context, input, allowed_shapes, ShapeType::Outline)
+            .map(OffsetPathFunction::Shape)
     }
 }
 

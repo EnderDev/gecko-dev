@@ -48,7 +48,7 @@ const TEST_PING_TYPE = "test-ping-type";
 
 var gClientID = null;
 
-XPCOMUtils.defineLazyGetter(this, "DATAREPORTING_PATH", async function () {
+ChromeUtils.defineLazyGetter(this, "DATAREPORTING_PATH", async function () {
   return PathUtils.join(PathUtils.profileDir, "datareporting");
 });
 
@@ -804,7 +804,6 @@ add_task(async function test_encryptedPing() {
     // The underlying jwcrypto module being used here is not currently available on Android.
     return;
   }
-  Cu.importGlobalProperties(["crypto"]);
 
   const ECDH_PARAMS = {
     name: "ECDH",
@@ -1050,7 +1049,6 @@ add_task(async function test_encryptedPing_overrideId() {
     // The underlying jwcrypto module being used here is not currently available on Android.
     return;
   }
-  Cu.importGlobalProperties(["crypto"]);
 
   const publicKey = {
     crv: "P-256",

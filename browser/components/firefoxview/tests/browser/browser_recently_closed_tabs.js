@@ -6,12 +6,9 @@
 requestLongerTimeout(10);
 
 /**
- * The recently closed tab list is populated on a per-window basis.
- *
- * By default, the withFirefoxView helper opens fx view in the current window.
- * This ensures that the add_new_tab, close_tab,
- * and open_then_close functions are creating sessionstore entries
- * associated with the correct window where the tests are run.
+ * Ensure that the add_new_tab, close_tab, and open_then_close
+ * functions are creating sessionstore entries associated with
+ * the correct window where the tests are run.
  */
 
 ChromeUtils.defineESModuleGetters(globalThis, {
@@ -19,7 +16,6 @@ ChromeUtils.defineESModuleGetters(globalThis, {
 });
 
 const RECENTLY_CLOSED_EVENT = [
-  ["firefoxview", "entered", "firefoxview", undefined],
   ["firefoxview", "recently_closed", "tabs", undefined],
 ];
 
@@ -116,11 +112,10 @@ add_task(async function test_empty_list() {
 add_task(async function test_list_ordering() {
   Services.obs.notifyObservers(null, "browser:purge-session-history");
   is(
-    SessionStore.getClosedTabCountForWindow(window),
+    SessionStore.getClosedTabCount(),
     0,
     "Closed tab count after purging session history"
   );
-  await clearAllParentTelemetryEvents();
 
   const closedObjectsChanged = () =>
     TestUtils.topicObserved("sessionstore-closed-objects-changed");
@@ -172,6 +167,7 @@ add_task(async function test_list_ordering() {
 
     let ele = document.querySelector("ol.closed-tabs-list").firstElementChild;
     let uri = ele.getAttribute("data-targeturi");
+    await clearAllParentTelemetryEvents();
     let newTabPromise = BrowserTestUtils.waitForNewTab(gBrowser, uri);
     ele.querySelector(".closed-tab-li-main").click();
     await newTabPromise;
@@ -182,9 +178,9 @@ add_task(async function test_list_ordering() {
           Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
           false
         ).parent;
-        return events && events.length >= 2;
+        return events && events.length >= 1;
       },
-      "Waiting for entered and recently_closed firefoxview telemetry events.",
+      "Waiting for recently_closed firefoxview telemetry events.",
       200,
       100
     );
@@ -461,7 +457,7 @@ add_task(async function test_switch_before_closing() {
       null,
       FINAL_URL
     );
-    BrowserTestUtils.loadURIString(newTab.linkedBrowser, FINAL_URL);
+    BrowserTestUtils.startLoadingURIString(newTab.linkedBrowser, FINAL_URL);
     await loadPromise;
     // Close the added tab
     BrowserTestUtils.removeTab(newTab);

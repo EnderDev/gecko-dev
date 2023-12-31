@@ -1,4 +1,4 @@
-// |jit-test| test-also=--wasm-extended-const; test-also=--wasm-exceptions; test-also=--wasm-function-references; test-also=--wasm-gc
+// |jit-test| test-also=--wasm-extended-const; test-also=--wasm-exceptions;
 
 // Test that if a feature is 'experimental' then we must be in a nightly build,
 // and if a feature is 'released' then it must be enabled on release and beta.
@@ -19,20 +19,20 @@
 //        feature to work correctly. All features should have a 'disabled.js'
 //        test to verify this. Basic testing for this is included with each
 //        feature in this test for sanity.
+// NOTE2: Keep this file in sync with:
+//        `dom/worklet/tests/worklet_audioWorklet_WASM_features.js`.
 
-let { release_or_beta } = getBuildConfiguration();
+let release_or_beta = getBuildConfiguration("release_or_beta");
 let nightly = !release_or_beta;
 
 let nightlyOnlyFeatures = [
   [
-    'function-references',
-    wasmFunctionReferencesEnabled(),
-    `(module (func (param (ref extern))))`
-  ],
-  [
-    'gc',
-    wasmGcEnabled(),
-    `(module (type $s (struct)) (func (param (ref null $s))))`
+    'relaxed-simd',
+    wasmRelaxedSimdEnabled(),
+    `(module (func (result v128)
+      unreachable
+      i16x8.relaxed_laneselect
+    ))`
   ],
 ];
 
@@ -82,6 +82,11 @@ let releasedFeatures = [
         i32.add
       )
     )`
+  ],
+  [
+    'tail-calls',
+    wasmTailCallsEnabled(),
+    `(module (func) (func (return_call 0)))`
   ],
 ];
 

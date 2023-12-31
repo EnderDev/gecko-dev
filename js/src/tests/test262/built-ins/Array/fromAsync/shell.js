@@ -152,6 +152,24 @@ const SKIP_SYMBOL = Symbol("Skip");
 
 var TemporalHelpers = {
   /*
+   * Codes and maximum lengths of months in the ISO 8601 calendar.
+   */
+  ISOMonths: [
+    { month: 1, monthCode: "M01", daysInMonth: 31 },
+    { month: 2, monthCode: "M02", daysInMonth: 29 },
+    { month: 3, monthCode: "M03", daysInMonth: 31 },
+    { month: 4, monthCode: "M04", daysInMonth: 30 },
+    { month: 5, monthCode: "M05", daysInMonth: 31 },
+    { month: 6, monthCode: "M06", daysInMonth: 30 },
+    { month: 7, monthCode: "M07", daysInMonth: 31 },
+    { month: 8, monthCode: "M08", daysInMonth: 31 },
+    { month: 9, monthCode: "M09", daysInMonth: 30 },
+    { month: 10, monthCode: "M10", daysInMonth: 31 },
+    { month: 11, monthCode: "M11", daysInMonth: 30 },
+    { month: 12, monthCode: "M12", daysInMonth: 31 }
+  ],
+
+  /*
    * assertDuration(duration, years, ...,  nanoseconds[, description]):
    *
    * Shorthand for asserting that each field of a Temporal.Duration is equal to
@@ -169,6 +187,26 @@ var TemporalHelpers = {
     assert.sameValue(duration.milliseconds, milliseconds, `${description} milliseconds result`);
     assert.sameValue(duration.microseconds, microseconds, `${description} microseconds result`);
     assert.sameValue(duration.nanoseconds, nanoseconds, `${description} nanoseconds result`);
+  },
+
+  /*
+   * assertDateDuration(duration, years, months, weeks, days, [, description]):
+   *
+   * Shorthand for asserting that each date field of a Temporal.Duration is
+   * equal to an expected value.
+   */
+  assertDateDuration(duration, years, months, weeks, days, description = "") {
+    assert(duration instanceof Temporal.Duration, `${description} instanceof`);
+    assert.sameValue(duration.years, years, `${description} years result`);
+    assert.sameValue(duration.months, months, `${description} months result`);
+    assert.sameValue(duration.weeks, weeks, `${description} weeks result`);
+    assert.sameValue(duration.days, days, `${description} days result`);
+    assert.sameValue(duration.hours, 0, `${description} hours result should be zero`);
+    assert.sameValue(duration.minutes, 0, `${description} minutes result should be zero`);
+    assert.sameValue(duration.seconds, 0, `${description} seconds result should be zero`);
+    assert.sameValue(duration.milliseconds, 0, `${description} milliseconds result should be zero`);
+    assert.sameValue(duration.microseconds, 0, `${description} microseconds result should be zero`);
+    assert.sameValue(duration.nanoseconds, 0, `${description} nanoseconds result should be zero`);
   },
 
   /*
@@ -1456,6 +1494,25 @@ var TemporalHelpers = {
   },
 
   /*
+   * A custom calendar whose fields() method returns the same value as the
+   * iso8601 calendar, with the addition of extraFields provided as parameter.
+   */
+  calendarWithExtraFields(fields) {
+    class CalendarWithExtraFields extends Temporal.Calendar {
+      constructor(extraFields) {
+        super("iso8601");
+        this._extraFields = extraFields;
+      }
+
+      fields(fieldNames) {
+        return super.fields(fieldNames).concat(this._extraFields);
+      }
+    }
+
+    return new CalendarWithExtraFields(fields);
+  },
+
+  /*
    * crossDateLineTimeZone():
    *
    * This returns an instance of a custom time zone class that implements one
@@ -1810,7 +1867,7 @@ var TemporalHelpers = {
       }
 
       getPossibleInstantsFor(plainDateTime) {
-        this.getPossibleInstantsForCalledWith.push(plainDateTime.toString());
+        this.getPossibleInstantsForCalledWith.push(plainDateTime.toString({ calendarName: "never" }));
         const [instant] = super.getPossibleInstantsFor(plainDateTime);
         if (this._shiftNanoseconds > 0) {
           if (this._isBeforeShift(instant)) return [instant];
@@ -1899,8 +1956,14 @@ var TemporalHelpers = {
         return this._offsetValue;
       }
 
-      getPossibleInstantsFor() {
-        return [];
+      getPossibleInstantsFor(dt) {
+        if (typeof this._offsetValue !== 'number' || Math.abs(this._offsetValue) >= 86400e9 || isNaN(this._offsetValue)) return [];
+        const zdt = dt.toZonedDateTime("UTC").add({ nanoseconds: -this._offsetValue });
+        return [zdt.toInstant()];
+      }
+
+      get id() {
+        return this.getOffsetStringFor(new Temporal.Instant(0n));
       }
     }
     return new SpecificOffsetTimeZone(offsetValue);
@@ -2018,6 +2081,30 @@ var TemporalHelpers = {
   },
 
   /*
+   * A custom time zone that does not allow any of its methods to be called, for
+   * the purpose of asserting that a particular operation does not call into
+   * user code.
+   */
+  timeZoneThrowEverything() {
+    class TimeZoneThrowEverything extends Temporal.TimeZone {
+      constructor() {
+        super("UTC");
+      }
+      getOffsetNanosecondsFor() {
+        TemporalHelpers.assertUnreachable("getOffsetNanosecondsFor should not be called");
+      }
+      getPossibleInstantsFor() {
+        TemporalHelpers.assertUnreachable("getPossibleInstantsFor should not be called");
+      }
+      toString() {
+        TemporalHelpers.assertUnreachable("toString should not be called");
+      }
+    }
+
+    return new TimeZoneThrowEverything();
+  },
+
+  /*
    * Returns an object that will append logs of any Gets or Calls of its valueOf
    * or toString properties to the array calls. Both valueOf and toString will
    * return the actual primitiveValue. propertyName is used in the log.
@@ -2053,6 +2140,8 @@ var TemporalHelpers = {
     plainMonthDayStringsInvalid() {
       return [
         "11-18junk",
+        "11-18[u-ca=gregory]",
+        "11-18[u-ca=hebrew]",
       ];
     },
 

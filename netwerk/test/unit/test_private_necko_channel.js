@@ -4,7 +4,9 @@
 
 "use strict";
 
-const { HttpServer } = ChromeUtils.import("resource://testing-common/httpd.js");
+const { HttpServer } = ChromeUtils.importESModule(
+  "resource://testing-common/httpd.sys.mjs"
+);
 
 var httpserver = new HttpServer();
 var testpath = "/simple";
@@ -49,8 +51,8 @@ function checkRequest(request, data, context) {
     get_device_entry_count(
       "disk",
       Services.loadContextInfo.private,
-      function (count) {
-        Assert.equal(count, 1);
+      function (count1) {
+        Assert.equal(count1, 1);
         httpserver.stop(do_test_finished);
       }
     );

@@ -19,12 +19,6 @@ class PrintHelper {
     info("withTestPage: " + pageUrl);
     let isPdf = pageUrl.endsWith(".pdf");
 
-    if (isPdf) {
-      await SpecialPowers.pushPrefEnv({
-        set: [["pdfjs.eventBusDispatchToDOM", true]],
-      });
-    }
-
     let taskReturn = await BrowserTestUtils.withNewTab(
       isPdf ? "about:blank" : pageUrl,
       async function (browser) {
@@ -36,7 +30,7 @@ class PrintHelper {
             null,
             true
           );
-          BrowserTestUtils.loadURIString(browser, pageUrl);
+          BrowserTestUtils.startLoadingURIString(browser, pageUrl);
           await loaded;
         }
         await testFn(new PrintHelper(browser));
@@ -109,23 +103,6 @@ class PrintHelper {
       },
       paperProperties
     );
-  }
-
-  // This is used only for the old print preview. For tests
-  // involving the newer UI, use waitForPreview instead.
-  static waitForOldPrintPreview(expectedBrowser) {
-    const { PrintingParent } = ChromeUtils.importESModule(
-      "resource://gre/actors/PrintingParent.sys.mjs"
-    );
-
-    return new Promise(resolve => {
-      PrintingParent.setTestListener(browser => {
-        if (browser == expectedBrowser) {
-          PrintingParent.setTestListener(null);
-          resolve();
-        }
-      });
-    });
   }
 
   constructor(sourceBrowser) {

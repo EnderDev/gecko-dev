@@ -5,16 +5,11 @@
 import React from "react";
 import { shallow } from "enzyme";
 import Group from "../Group.js";
-import {
-  makeMockFrame,
-  makeMockSource,
-  mockthreadcx,
-} from "../../../../utils/test-mockup";
+import { makeMockFrame, makeMockSource } from "../../../../utils/test-mockup";
 
 function render(overrides = {}) {
   const frame = { ...makeMockFrame(), displayName: "foo", library: "Back" };
   const defaultProps = {
-    cx: mockthreadcx,
     group: [frame],
     selectedFrame: frame,
     frameworkGroupingOn: true,
@@ -30,7 +25,7 @@ function render(overrides = {}) {
   };
 
   const props = { ...defaultProps, ...overrides };
-  const component = shallow(<Group {...props} />, {
+  const component = shallow(React.createElement(Group, props), {
     context: { l10n: L10N },
   });
   return { component, props };

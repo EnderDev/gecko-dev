@@ -820,7 +820,10 @@ export var AddonTestUtils = {
     // Ensure some startup observers in XPIProvider are released.
     Services.obs.notifyObservers(null, "test-load-xpi-database");
 
-    Services.obs.notifyObservers(null, "quit-application-granted");
+    // Note: the code here used to trigger observer notifications such as
+    // "quit-application-granted". That was removed because of unwanted side
+    // effects in other components. The MockAsyncShutdown triggers here are very
+    // specific and only affect the AddonManager/XPIProvider internals.
     await MockAsyncShutdown.quitApplicationGranted.trigger();
 
     // If XPIDatabase.asyncLoadDB() has been called before, then _dbPromise is
@@ -1805,6 +1808,31 @@ export var AddonTestUtils = {
       }));
 
     return events;
+  },
+
+  /**
+   * @param {string|string[]} events - The event(s) to retrieve.
+   * @param {object} [filter] - key/value pairs to filter events.
+   * @returns {object[]} Collected extra objects from events.
+   */
+  getAMGleanEvents(events, filter = {}) {
+    let result = [];
+    for (let event of [].concat(events)) {
+      result = result.concat(Glean.addonsManager[event].testGetValue() ?? []);
+    }
+
+    // When combining multiple events, we want them in chronological order.
+    result.sort((a, b) => a.timestamp - b.timestamp);
+
+    result = result.filter(e =>
+      Object.keys(filter).every(key => e.extra[key] === filter[key])
+    );
+
+    // We (usually) don't care about install_id, so drop it to ease comparison.
+    result.forEach(e => delete e.extra.install_id);
+
+    // For Glean events, all data is in the extra object.
+    return result.map(e => e.extra);
   },
 };
 

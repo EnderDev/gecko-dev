@@ -5,7 +5,7 @@
 // Imported for side-effects.
 import { html } from "lit.all.mjs";
 // eslint-disable-next-line import/no-unassigned-import
-import "toolkit-widgets/panel-list.js";
+import "chrome://global/content/elements/panel-list.js";
 // eslint-disable-next-line import/no-unassigned-import
 import "browser/components/migration/content/migration-wizard.mjs";
 import { MigrationWizardConstants } from "chrome://browser/content/migration/migration-wizard-constants.mjs";
@@ -34,6 +34,7 @@ const FAKE_MIGRATOR_LIST = [
     ],
     profile: { id: "Default", name: "Default" },
     brandImage: "chrome://browser/content/migration/brands/chrome.png",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -49,6 +50,7 @@ const FAKE_MIGRATOR_LIST = [
     ],
     profile: { id: "person-2", name: "Person 2" },
     brandImage: "chrome://browser/content/migration/brands/chrome.png",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -56,7 +58,8 @@ const FAKE_MIGRATOR_LIST = [
     displayName: "Microsoft Internet Explorer",
     resourceTypes: ["HISTORY", "BOOKMARKS"],
     profile: null,
-    brandImage: "chrome://browser/content/migration/brands/ie.png",
+    brandImage: "chrome://global/skin/icons/defaultFavicon.svg",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -64,6 +67,8 @@ const FAKE_MIGRATOR_LIST = [
     displayName: "Microsoft Edge Legacy",
     resourceTypes: ["HISTORY", "FORMDATA", "PASSWORDS", "BOOKMARKS"],
     profile: null,
+    brandImage: "chrome://global/skin/icons/defaultFavicon.svg",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -78,6 +83,7 @@ const FAKE_MIGRATOR_LIST = [
     ],
     profile: { id: "Default", name: "Default" },
     brandImage: "chrome://browser/content/migration/brands/edge.png",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -92,6 +98,7 @@ const FAKE_MIGRATOR_LIST = [
     ],
     profile: { id: "Default", name: "Default" },
     brandImage: "chrome://browser/content/migration/brands/brave.png",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -99,6 +106,8 @@ const FAKE_MIGRATOR_LIST = [
     displayName: "Internal Testing Migrator",
     resourceTypes: ["HISTORY", "PASSWORDS", "BOOKMARKS"],
     profile: null,
+    brandImage: "chrome://global/skin/icons/defaultFavicon.svg",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -107,6 +116,7 @@ const FAKE_MIGRATOR_LIST = [
     resourceTypes: ["HISTORY", "PASSWORDS", "BOOKMARKS"],
     profile: null,
     brandImage: "chrome://browser/content/migration/brands/safari.png",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -115,6 +125,7 @@ const FAKE_MIGRATOR_LIST = [
     resourceTypes: ["HISTORY", "FORMDATA", "PASSWORDS", "BOOKMARKS"],
     profile: { id: "Default", name: "Default" },
     brandImage: "chrome://browser/content/migration/brands/opera.png",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -123,6 +134,7 @@ const FAKE_MIGRATOR_LIST = [
     resourceTypes: ["HISTORY", "FORMDATA", "PASSWORDS", "BOOKMARKS"],
     profile: { id: "Default", name: "Default" },
     brandImage: "chrome://browser/content/migration/brands/operagx.png",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -131,6 +143,7 @@ const FAKE_MIGRATOR_LIST = [
     resourceTypes: ["HISTORY"],
     profile: { id: "Default", name: "Default" },
     brandImage: "chrome://browser/content/migration/brands/vivaldi.png",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
@@ -138,6 +151,8 @@ const FAKE_MIGRATOR_LIST = [
     displayName: "Browser with no resources",
     resourceTypes: [],
     profile: { id: "Default", name: "Default" },
+    brandImage: "chrome://global/skin/icons/defaultFavicon.svg",
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.FILE,
@@ -145,6 +160,7 @@ const FAKE_MIGRATOR_LIST = [
     displayName: "Passwords from CSV file",
     brandImage: "chrome://branding/content/document.ico",
     resourceTypes: [],
+    hasPermissions: true,
   },
   {
     type: MigrationWizardConstants.MIGRATOR_TYPES.FILE,
@@ -152,6 +168,7 @@ const FAKE_MIGRATOR_LIST = [
     displayName: "Bookmarks from file",
     brandImage: "chrome://branding/content/document.ico",
     resourceTypes: [],
+    hasPermissions: true,
   },
 ];
 
@@ -165,9 +182,10 @@ const Template = ({ state, dialogMode }) => html`
   </style>
 
   <div class="card card-no-hover" style="width: fit-content">
-    <migration-wizard ?dialog-mode=${dialogMode} .state=${state}>
-      <panel-list></panel-list>
-    </migration-wizard>
+    <migration-wizard
+      ?dialog-mode=${dialogMode}
+      .state=${state}
+    ></migration-wizard>
   </div>
 `;
 
@@ -196,6 +214,62 @@ MainSelectorVariant2.args = {
     page: MigrationWizardConstants.PAGES.SELECTION,
     migrators: FAKE_MIGRATOR_LIST,
     showImportAll: true,
+  },
+};
+
+export const NoPermissionMessage = Template.bind({});
+NoPermissionMessage.args = {
+  dialogMode: true,
+  state: {
+    page: MigrationWizardConstants.PAGES.SELECTION,
+    migrators: [
+      {
+        type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
+        key: "chromium",
+        displayName: "Chromium",
+        resourceTypes: [],
+        profile: null,
+        brandImage: "chrome://browser/content/migration/brands/chromium.png",
+        hasPermissions: false,
+        permissionsPath: "/home/user/snap/chromium/common/chromium",
+      },
+      {
+        type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
+        key: "safari",
+        displayName: "Safari",
+        resourceTypes: ["HISTORY", "PASSWORDS", "BOOKMARKS"],
+        profile: null,
+        brandImage: "chrome://browser/content/migration/brands/safari.png",
+        hasPermissions: false,
+        permissionsPath: "/Users/user/Library/Safari",
+      },
+      {
+        type: MigrationWizardConstants.MIGRATOR_TYPES.BROWSER,
+        key: "vivaldi",
+        displayName: "Vivaldi",
+        resourceTypes: ["HISTORY"],
+        profile: { id: "Default", name: "Default" },
+        brandImage: "chrome://browser/content/migration/brands/vivaldi.png",
+        hasPermissions: true,
+      },
+      {
+        type: MigrationWizardConstants.MIGRATOR_TYPES.FILE,
+        key: "file-password-csv",
+        displayName: "Passwords from CSV file",
+        brandImage: "chrome://branding/content/document.ico",
+        resourceTypes: [],
+        hasPermissions: true,
+      },
+      {
+        type: MigrationWizardConstants.MIGRATOR_TYPES.FILE,
+        key: "file-bookmarks",
+        displayName: "Bookmarks from file",
+        brandImage: "chrome://branding/content/document.ico",
+        resourceTypes: [],
+        hasPermissions: true,
+      },
+    ],
+    showImportAll: false,
   },
 };
 
@@ -275,6 +349,41 @@ Success.args = {
       [MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.PASSWORDS]: {
         value: MigrationWizardConstants.PROGRESS_VALUE.SUCCESS,
         message: "14 logins and passwords",
+      },
+      [MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.HISTORY]: {
+        value: MigrationWizardConstants.PROGRESS_VALUE.SUCCESS,
+        message: "From the last 180 days",
+      },
+      [MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.EXTENSIONS]: {
+        value: MigrationWizardConstants.PROGRESS_VALUE.SUCCESS,
+        message: "1 extension",
+      },
+      [MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.FORMDATA]: {
+        value: MigrationWizardConstants.PROGRESS_VALUE.SUCCESS,
+        message: "Addresses, credit cards, form history",
+      },
+      [MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.PAYMENT_METHODS]: {
+        value: MigrationWizardConstants.PROGRESS_VALUE.SUCCESS,
+        message: "6 payment methods",
+      },
+    },
+  },
+};
+
+export const SuccessWithWarnings = Template.bind({});
+SuccessWithWarnings.args = {
+  dialogMode: true,
+  state: {
+    page: MigrationWizardConstants.PAGES.PROGRESS,
+    key: "chrome",
+    progress: {
+      [MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.BOOKMARKS]: {
+        value: MigrationWizardConstants.PROGRESS_VALUE.SUCCESS,
+        message: "14 bookmarks",
+      },
+      [MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.PASSWORDS]: {
+        value: MigrationWizardConstants.PROGRESS_VALUE.WARNING,
+        message: "Something didn't work correctly.",
       },
       [MigrationWizardConstants.DISPLAYED_RESOURCE_TYPES.HISTORY]: {
         value: MigrationWizardConstants.PROGRESS_VALUE.SUCCESS,

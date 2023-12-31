@@ -19,9 +19,13 @@ import {Protocol} from 'devtools-protocol';
 import {assert} from '../util/assert.js';
 
 import {CDPSession} from './Connection.js';
-import {EVALUATION_SCRIPT_URL} from './ExecutionContext.js';
-import {addEventListener, debugError, PuppeteerEventListener} from './util.js';
-import {removeEventListeners} from './util.js';
+import {
+  addEventListener,
+  debugError,
+  PuppeteerEventListener,
+  PuppeteerURL,
+  removeEventListeners,
+} from './util.js';
 
 /**
  * @internal
@@ -141,6 +145,14 @@ export class Coverage {
   }
 
   /**
+   * @internal
+   */
+  updateClient(client: CDPSession): void {
+    this.#jsCoverage.updateClient(client);
+    this.#cssCoverage.updateClient(client);
+  }
+
+  /**
    * @param options - Set of configurable options for coverage defaults to
    * `resetOnNavigation : true, reportAnonymousScripts : false,`
    * `includeRawScriptCoverage : false, useBlockCoverage : true`
@@ -208,6 +220,13 @@ export class JSCoverage {
     this.#client = client;
   }
 
+  /**
+   * @internal
+   */
+  updateClient(client: CDPSession): void {
+    this.#client = client;
+  }
+
   async start(
     options: {
       resetOnNavigation?: boolean;
@@ -264,7 +283,7 @@ export class JSCoverage {
     event: Protocol.Debugger.ScriptParsedEvent
   ): Promise<void> {
     // Ignore puppeteer-injected scripts
-    if (event.url === EVALUATION_SCRIPT_URL) {
+    if (PuppeteerURL.isPuppeteerURL(event.url)) {
       return;
     }
     // Ignore other anonymous scripts unless the reportAnonymousScripts option is true.
@@ -335,6 +354,13 @@ export class CSSCoverage {
   #resetOnNavigation = false;
 
   constructor(client: CDPSession) {
+    this.#client = client;
+  }
+
+  /**
+   * @internal
+   */
+  updateClient(client: CDPSession): void {
     this.#client = client;
   }
 

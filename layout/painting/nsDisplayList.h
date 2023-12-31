@@ -310,9 +310,7 @@ class nsDisplayListBuilder {
         : mAccumulatedRectLevels(0), mAllowAsyncAnimation(true) {}
 
     Preserves3DContext(const Preserves3DContext& aOther)
-        : mAccumulatedTransform(),
-          mAccumulatedRect(),
-          mAccumulatedRectLevels(0),
+        : mAccumulatedRectLevels(0),
           mVisibleRect(aOther.mVisibleRect),
           mAllowAsyncAnimation(aOther.mAllowAsyncAnimation) {}
 
@@ -1439,32 +1437,6 @@ class nsDisplayListBuilder {
   }
 
   /**
-   * Accumulates the bounds of box frames that have moz-appearance
-   * -moz-win-exclude-glass style. Used in setting glass margins on
-   * Windows.
-   *
-   * We set the window opaque region (from which glass margins are computed)
-   * to the intersection of the glass region specified here and the opaque
-   * region computed during painting. So the excluded glass region actually
-   * *limits* the extent of the opaque area reported to Windows. We limit it
-   * so that changes to the computed opaque region (which can vary based on
-   * region optimizations and the placement of UI elements) outside the
-   * -moz-win-exclude-glass area don't affect the glass margins reported to
-   * Windows; changing those margins willy-nilly can cause the Windows 7 glass
-   * haze effect to jump around disconcertingly.
-   */
-  void AddWindowExcludeGlassRegion(nsIFrame* aFrame, const nsRect& aBounds) {
-    mWindowExcludeGlassRegion.Add(aFrame, aBounds);
-  }
-
-  /**
-   * Returns the window exclude glass region.
-   */
-  nsRegion GetWindowExcludeGlassRegion() const {
-    return mWindowExcludeGlassRegion.ToRegion();
-  }
-
-  /**
    * Accumulates opaque stuff into the window opaque region.
    */
   void AddWindowOpaqueRegion(nsIFrame* aFrame, const nsRect& aBounds) {
@@ -1482,12 +1454,6 @@ class nsDisplayListBuilder {
     return IsRetainingDisplayList() ? mRetainedWindowOpaqueRegion.ToRegion()
                                     : mWindowOpaqueRegion;
   }
-
-  void SetGlassDisplayItem(nsDisplayItem* aItem);
-  void ClearGlassDisplayItem() { mGlassDisplayItem = nullptr; }
-  nsDisplayItem* GetGlassDisplayItem() { return mGlassDisplayItem; }
-
-  bool NeedToForceTransparentSurfaceForItem(nsDisplayItem* aItem);
 
   /**
    * mContainsBlendMode is true if we processed a display item that
@@ -1794,11 +1760,6 @@ class nsDisplayListBuilder {
   // The reference frame for mCurrentFrame.
   const nsIFrame* mCurrentReferenceFrame;
 
-  // The display item for the Windows window glass background, if any
-  // Set during full display list builds or during display list merging only,
-  // partial display list builds don't touch this.
-  nsDisplayItem* mGlassDisplayItem;
-
   nsIFrame* mCaretFrame;
   // A temporary list that we append scroll info items to while building
   // display items for the contents of frames with SVG effects.
@@ -1845,7 +1806,6 @@ class nsDisplayListBuilder {
   nsTHashSet<nsDisplayItem*> mReuseableItems;
 
   // Tracked regions used for retained display list.
-  WeakFrameRegion mWindowExcludeGlassRegion;
   WeakFrameRegion mRetainedWindowDraggingRegion;
   WeakFrameRegion mRetainedWindowNoDraggingRegion;
 
@@ -1884,10 +1844,6 @@ class nsDisplayListBuilder {
   Preserves3DContext mPreserves3DCtx;
 
   uint8_t mBuildingExtraPagesForPageNum;
-
-  // If we've encountered a glass item yet, only used during partial display
-  // list builds.
-  bool mHasGlassItemDuringPartial;
 
   nsDisplayListBuilderMode mMode;
   static uint32_t sPaintSequenceNumber;
@@ -2599,9 +2555,6 @@ class nsDisplayItem {
   void SetPainted() { mItemFlags += ItemFlag::Painted; }
 #endif
 
-  void SetIsGlassItem() { mItemFlags += ItemFlag::IsGlassItem; }
-  bool IsGlassItem() { return mItemFlags.contains(ItemFlag::IsGlassItem); }
-
   /**
    * Function to create the WebRenderCommands.
    * We should check if the layer state is
@@ -2645,11 +2598,14 @@ class nsDisplayItem {
   virtual bool NeedsGeometryUpdates() const { return false; }
 
   /**
-   * Some items such as those calling into the native themed widget machinery
-   * have to be painted on the content process. In this case it is best to avoid
-   * allocating layers that serializes and forwards the work to the compositor.
+   * When this item is rendered using fallback rendering, whether it should use
+   * blob rendering (i.e. a recording DrawTarget), as opposed to a pixel-backed
+   * DrawTarget.
+   * Some items, such as those calling into the native themed widget machinery,
+   * are more efficiently painted without blob recording. Those should return
+   * false here.
    */
-  virtual bool MustPaintOnContentSide() const { return false; }
+  virtual bool ShouldUseBlobRenderingForFallback() const { return true; }
 
   /**
    * If this has a child list where the children are in the same coordinate
@@ -2849,7 +2805,6 @@ class nsDisplayItem {
     Combines3DTransformWithAncestors,
     ForceNotVisible,
     HasHitTestInfo,
-    IsGlassItem,
 #ifdef MOZ_DUMP_PAINTING
     // True if this frame has been painted.
     Painted,
@@ -4345,7 +4300,9 @@ class nsDisplayThemedBackground : public nsPaintedDisplayItem {
       layers::RenderRootStateManager* aManager,
       nsDisplayListBuilder* aDisplayListBuilder) override;
 
-  bool MustPaintOnContentSide() const override { return true; }
+  bool ShouldUseBlobRenderingForFallback() const override {
+    return !XRE_IsParentProcess();
+  }
 
   /**
    * GetBounds() returns the background painting area.
@@ -4685,10 +4642,10 @@ class nsDisplayOutline final : public nsPaintedDisplayItem {
 
   NS_DISPLAY_DECL_NAME("Outline", TYPE_OUTLINE)
 
-  bool MustPaintOnContentSide() const override {
+  bool ShouldUseBlobRenderingForFallback() const override {
     MOZ_ASSERT(IsThemedOutline(),
                "The only fallback path we have is for themed outlines");
-    return true;
+    return !XRE_IsParentProcess();
   }
 
   bool CreateWebRenderCommands(
@@ -5498,6 +5455,7 @@ class nsDisplayOwnLayer : public nsDisplayWrapList {
   bool IsScrollThumbLayer() const;
   bool IsScrollbarContainer() const;
   bool IsRootScrollbarContainer() const;
+  bool IsScrollbarLayerForRoot() const;
   bool IsZoomingLayer() const;
   bool IsFixedPositionLayer() const;
   bool IsStickyPositionLayer() const;

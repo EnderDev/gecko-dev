@@ -122,8 +122,7 @@ ImageListener::OnStartRequest(nsIRequest* request) {
 }
 
 ImageDocument::ImageDocument()
-    : MediaDocument(),
-      mVisibleWidth(0.0),
+    : mVisibleWidth(0.0),
       mVisibleHeight(0.0),
       mImageWidth(0),
       mImageHeight(0),
@@ -145,8 +144,9 @@ NS_IMPL_ISUPPORTS_CYCLE_COLLECTION_INHERITED(ImageDocument, MediaDocument,
                                              imgINotificationObserver,
                                              nsIDOMEventListener)
 
-nsresult ImageDocument::Init() {
-  nsresult rv = MediaDocument::Init();
+nsresult ImageDocument::Init(nsIPrincipal* aPrincipal,
+                             nsIPrincipal* aPartitionedPrincipal) {
+  nsresult rv = MediaDocument::Init(aPrincipal, aPartitionedPrincipal);
   NS_ENSURE_SUCCESS(rv, rv);
 
   mShouldResize = StaticPrefs::browser_enable_automatic_image_resizing();
@@ -603,6 +603,10 @@ nsresult ImageDocument::CreateSyntheticDocument() {
   mImageContent->SetAttr(kNameSpaceID_None, nsGkAtoms::src, srcString, false);
   mImageContent->SetAttr(kNameSpaceID_None, nsGkAtoms::alt, srcString, false);
 
+  if (mIsInObjectOrEmbed) {
+    SetModeClass(eIsInObjectOrEmbed);
+  }
+
   body->AppendChildTo(mImageContent, false, IgnoreErrors());
   mImageContent->SetLoadingEnabled(true);
 
@@ -719,7 +723,7 @@ void ImageDocument::UpdateTitleAndCharset() {
 
 bool ImageDocument::IsSiteSpecific() {
   return !ShouldResistFingerprinting(RFPTarget::SiteSpecificZoom) &&
-         mozilla::Preferences::GetBool("browser.zoom.siteSpecific", false);
+         StaticPrefs::browser_zoom_siteSpecific();
 }
 
 void ImageDocument::ResetZoomLevel() {
@@ -796,11 +800,13 @@ void ImageDocument::MaybeSendResultToEmbedder(nsresult aResult) {
 }
 }  // namespace mozilla::dom
 
-nsresult NS_NewImageDocument(mozilla::dom::Document** aResult) {
+nsresult NS_NewImageDocument(mozilla::dom::Document** aResult,
+                             nsIPrincipal* aPrincipal,
+                             nsIPrincipal* aPartitionedPrincipal) {
   auto* doc = new mozilla::dom::ImageDocument();
   NS_ADDREF(doc);
 
-  nsresult rv = doc->Init();
+  nsresult rv = doc->Init(aPrincipal, aPartitionedPrincipal);
   if (NS_FAILED(rv)) {
     NS_RELEASE(doc);
   }

@@ -658,6 +658,12 @@ struct ParamTraits<nsILoadInfo::CrossOriginEmbedderPolicy>
     : EnumSerializer<nsILoadInfo::CrossOriginEmbedderPolicy,
                      CrossOriginEmbedderPolicyValidator> {};
 
+template <>
+struct ParamTraits<nsIThread::QoSPriority>
+    : public ContiguousEnumSerializerInclusive<nsIThread::QoSPriority,
+                                               nsIThread::QOS_PRIORITY_NORMAL,
+                                               nsIThread::QOS_PRIORITY_LOW> {};
+
 template <size_t N, typename Word>
 struct ParamTraits<mozilla::BitSet<N, Word>> {
   typedef mozilla::BitSet<N, Word> paramType;
@@ -749,10 +755,20 @@ struct ParamTraits<std::tuple<Ts...>> {
 template <>
 struct ParamTraits<mozilla::net::LinkHeader> {
   typedef mozilla::net::LinkHeader paramType;
+  constexpr static int kNumberOfMembers = 14;
+  constexpr static int kSizeOfEachMember = sizeof(nsString);
+  constexpr static int kExpectedSizeOfParamType =
+      kNumberOfMembers * kSizeOfEachMember;
+
   static void Write(MessageWriter* aWriter, const paramType& aParam) {
+    static_assert(sizeof(paramType) == kExpectedSizeOfParamType,
+                  "All members of should be written below.");
+    // Bug 1860565: `aParam.mAnchor` is not written.
+
     WriteParam(aWriter, aParam.mHref);
     WriteParam(aWriter, aParam.mRel);
     WriteParam(aWriter, aParam.mTitle);
+    WriteParam(aWriter, aParam.mNonce);
     WriteParam(aWriter, aParam.mIntegrity);
     WriteParam(aWriter, aParam.mSrcset);
     WriteParam(aWriter, aParam.mSizes);
@@ -761,8 +777,13 @@ struct ParamTraits<mozilla::net::LinkHeader> {
     WriteParam(aWriter, aParam.mCrossOrigin);
     WriteParam(aWriter, aParam.mReferrerPolicy);
     WriteParam(aWriter, aParam.mAs);
+    WriteParam(aWriter, aParam.mFetchPriority);
   }
   static bool Read(MessageReader* aReader, paramType* aResult) {
+    static_assert(sizeof(paramType) == kExpectedSizeOfParamType,
+                  "All members of should be handled below.");
+    // Bug 1860565: `aParam.mAnchor` is not handled.
+
     if (!ReadParam(aReader, &aResult->mHref)) {
       return false;
     }
@@ -770,6 +791,9 @@ struct ParamTraits<mozilla::net::LinkHeader> {
       return false;
     }
     if (!ReadParam(aReader, &aResult->mTitle)) {
+      return false;
+    }
+    if (!ReadParam(aReader, &aResult->mNonce)) {
       return false;
     }
     if (!ReadParam(aReader, &aResult->mIntegrity)) {
@@ -793,7 +817,10 @@ struct ParamTraits<mozilla::net::LinkHeader> {
     if (!ReadParam(aReader, &aResult->mReferrerPolicy)) {
       return false;
     }
-    return ReadParam(aReader, &aResult->mAs);
+    if (!ReadParam(aReader, &aResult->mAs)) {
+      return false;
+    }
+    return ReadParam(aReader, &aResult->mFetchPriority);
   };
 };
 

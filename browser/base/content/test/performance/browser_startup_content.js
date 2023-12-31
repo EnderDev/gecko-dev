@@ -32,6 +32,7 @@ const known_scripts = {
 
     // Browser front-end
     "resource:///actors/AboutReaderChild.sys.mjs",
+    "resource:///actors/InteractionsChild.sys.mjs",
     "resource:///actors/LinkHandlerChild.sys.mjs",
     "resource:///actors/SearchSERPTelemetryChild.sys.mjs",
     "resource://gre/actors/ContentMetaChild.sys.mjs",
@@ -61,11 +62,6 @@ if (!Services.appinfo.sessionHistoryInParent) {
   );
 }
 
-if (AppConstants.NIGHTLY_BUILD) {
-  // Browser front-end.
-  known_scripts.modules.add("resource:///actors/InteractionsChild.sys.mjs");
-}
-
 // Items on this list *might* load when creating the process, as opposed to
 // items in the main list, which we expect will always load.
 const intermittently_loaded_scripts = {
@@ -76,15 +72,10 @@ const intermittently_loaded_scripts = {
     // Translations code which may be preffed on.
     "resource://gre/actors/TranslationsChild.sys.mjs",
     "resource://gre/modules/translation/LanguageDetector.sys.mjs",
-    "chrome://global/content/translations/language-id-engine.sys.mjs",
     "resource://gre/modules/ConsoleAPIStorage.sys.mjs", // Logging related.
 
     // Session store.
     "resource://gre/modules/sessionstore/SessionHistory.sys.mjs",
-
-    // Webcompat about:config front-end. This is part of a system add-on which
-    // may not load early enough for the test.
-    "resource://webcompat/AboutCompat.jsm",
 
     // Cookie banner handling.
     "resource://gre/actors/CookieBannerChild.sys.mjs",
@@ -100,11 +91,7 @@ const intermittently_loaded_scripts = {
     "resource://testing-common/WrapPrivileged.sys.mjs",
   ]),
   frameScripts: new Set([]),
-  processScripts: new Set([
-    // Webcompat about:config front-end. This is presently nightly-only and
-    // part of a system add-on which may not load early enough for the test.
-    "resource://webcompat/aboutPageProcessScript.js",
-  ]),
+  processScripts: new Set([]),
 };
 
 const forbiddenScripts = {

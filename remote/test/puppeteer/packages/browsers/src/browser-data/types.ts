@@ -24,6 +24,7 @@ import * as firefox from './firefox.js';
  */
 export enum Browser {
   CHROME = 'chrome',
+  CHROMEHEADLESSSHELL = 'chrome-headless-shell',
   CHROMIUM = 'chromium',
   FIREFOX = 'firefox',
   CHROMEDRIVER = 'chromedriver',
@@ -53,6 +54,10 @@ export const downloadUrls = {
  * @public
  */
 export enum BrowserTag {
+  CANARY = 'canary',
+  BETA = 'beta',
+  DEV = 'dev',
+  STABLE = 'stable',
   LATEST = 'latest',
 }
 

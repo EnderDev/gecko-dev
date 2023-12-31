@@ -4,6 +4,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "nsAttrValue.h"
+#include "nsAttrValueOrString.h"
+#include "nsGenericHTMLElement.h"
 #include "nsGkAtoms.h"
 #include "nsStyleConsts.h"
 #include "mozilla/dom/Document.h"
@@ -18,8 +21,10 @@
 #include "nsDOMJSUtils.h"
 #include "nsIScriptError.h"
 #include "nsISupportsImpl.h"
+#include "mozilla/dom/FetchPriority.h"
 #include "mozilla/dom/HTMLScriptElement.h"
 #include "mozilla/dom/HTMLScriptElementBinding.h"
+#include "mozilla/Assertions.h"
 #include "mozilla/StaticPrefs_dom.h"
 
 NS_IMPL_NS_NEW_HTML_ELEMENT_CHECK_PARSER(Script)
@@ -70,6 +75,11 @@ bool HTMLScriptElement::ParseAttribute(int32_t aNamespaceID, nsAtom* aAttribute,
 
     if (aAttribute == nsGkAtoms::integrity) {
       aResult.ParseStringOrAtom(aValue);
+      return true;
+    }
+
+    if (aAttribute == nsGkAtoms::fetchpriority) {
+      ParseFetchPriority(aValue, aResult);
       return true;
     }
   }
@@ -150,33 +160,13 @@ void HTMLScriptElement::GetScriptCharset(nsAString& charset) {
   GetCharset(charset);
 }
 
-void HTMLScriptElement::FreezeExecutionAttrs(Document* aOwnerDoc) {
+void HTMLScriptElement::FreezeExecutionAttrs(const Document* aOwnerDoc) {
   if (mFrozen) {
     return;
   }
 
-  MOZ_ASSERT((mKind != ScriptKind::eModule) &&
-             (mKind != ScriptKind::eImportMap) && !mAsync && !mDefer &&
-             !mExternal);
-
   // Determine whether this is a(n) classic/module/importmap script.
-  nsAutoString type;
-  GetScriptType(type);
-  if (!type.IsEmpty()) {
-    if (aOwnerDoc->ModuleScriptsEnabled() &&
-        type.LowerCaseEqualsASCII("module")) {
-      mKind = ScriptKind::eModule;
-    }
-
-    // https://html.spec.whatwg.org/multipage/scripting.html#prepare-the-script-element
-    // Step 11. Otherwise, if the script block's type string is an ASCII
-    // case-insensitive match for the string "importmap", then set el's type to
-    // "importmap".
-    if (aOwnerDoc->ImportMapsEnabled() &&
-        type.LowerCaseEqualsASCII("importmap")) {
-      mKind = ScriptKind::eImportMap;
-    }
-  }
+  DetermineKindFromType(aOwnerDoc);
 
   // variation of this code in SVGScriptElement - check if changes
   // need to be transfered when modifying.  Note that we don't use GetSrc here
@@ -220,6 +210,17 @@ void HTMLScriptElement::FreezeExecutionAttrs(Document* aOwnerDoc) {
 
 CORSMode HTMLScriptElement::GetCORSMode() const {
   return AttrValueToCORSMode(GetParsedAttr(nsGkAtoms::crossorigin));
+}
+
+FetchPriority HTMLScriptElement::GetFetchPriority() const {
+  const nsAttrValue* fetchpriorityAttribute =
+      GetParsedAttr(nsGkAtoms::fetchpriority);
+  if (fetchpriorityAttribute) {
+    MOZ_ASSERT(fetchpriorityAttribute->Type() == nsAttrValue::eEnum);
+    return FetchPriority(fetchpriorityAttribute->GetEnumValue());
+  }
+
+  return FetchPriority::Auto;
 }
 
 mozilla::dom::ReferrerPolicy HTMLScriptElement::GetReferrerPolicy() {

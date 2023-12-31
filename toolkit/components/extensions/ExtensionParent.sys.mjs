@@ -329,6 +329,7 @@ const ProxyMessenger = {
     if (!extension) {
       return Promise.reject({ message: ERROR_NO_RECEIVERS });
     }
+    // TODO bug 1852317: This should not be unconditional.
     await extension.wakeupBackground?.();
 
     arg.sender = this.getSender(extension, sender);
@@ -481,7 +482,7 @@ GlobalManager = {
  * parent side of a proxied API.
  */
 class ProxyContextParent extends BaseContext {
-  constructor(envType, extension, params, xulBrowser, principal) {
+  constructor(envType, extension, params, browsingContext, principal) {
     super(envType, extension);
 
     this.childId = params.childId;
@@ -491,10 +492,14 @@ class ProxyContextParent extends BaseContext {
 
     this.listenerPromises = new Set();
 
+    // browsingContext is null when subclassed by BackgroundWorkerContextParent.
+    const xulBrowser = browsingContext?.top.embedderElement;
     // This message manager is used by ParentAPIManager to send messages and to
     // close the ProxyContext if the underlying message manager closes. This
     // message manager object may change when `xulBrowser` swaps docshells, e.g.
     // when a tab is moved to a different window.
+    // TODO: Is xulBrowser correct for ContentScriptContextParent? Messages
+    // through the xulBrowser won't reach cross-process iframes.
     this.messageManagerProxy =
       xulBrowser && new lazy.MessageManagerProxy(xulBrowser);
 
@@ -637,6 +642,7 @@ class ProxyContextParent extends BaseContext {
   }
 
   get parentMessageManager() {
+    // TODO bug 1595186: Replace use of parentMessageManager.
     return this.messageManagerProxy?.messageManager;
   }
 
@@ -687,10 +693,11 @@ class ContentScriptContextParent extends ProxyContextParent {}
  * ExtensionChild.jsm.
  */
 class ExtensionPageContextParent extends ProxyContextParent {
-  constructor(envType, extension, params, xulBrowser) {
-    super(envType, extension, params, xulBrowser, extension.principal);
+  constructor(envType, extension, params, browsingContext) {
+    super(envType, extension, params, browsingContext, extension.principal);
 
     this.viewType = params.viewType;
+    this.isTopContext = browsingContext.top === browsingContext;
 
     this.extension.views.add(this);
 
@@ -861,8 +868,8 @@ class DevToolsExtensionPageContextParent extends ExtensionPageContextParent {
 class BackgroundWorkerContextParent extends ProxyContextParent {
   constructor(envType, extension, params) {
     // TODO: split out from ProxyContextParent a base class that
-    // doesn't expect a xulBrowser and one for contexts that are
-    // expected to have a xulBrowser associated.
+    // doesn't expect a browsingContext and one for contexts that are
+    // expected to have a browsingContext associated.
     super(envType, extension, params, null, extension.principal);
 
     this.viewType = params.viewType;
@@ -937,7 +944,6 @@ ParentAPIManager = {
 
   recvCreateProxyContext(data, { actor, sender }) {
     let { envType, extensionId, childId, principal } = data;
-    let target = actor.browsingContext?.top.embedderElement;
 
     if (this.proxyContexts.has(childId)) {
       throw new Error(
@@ -956,7 +962,9 @@ ParentAPIManager = {
         throw new Error(`Bad sender context envType: ${sender.envType}`);
       }
 
+      let isBackgroundWorker = false;
       if (JSWindowActorParent.isInstance(actor)) {
+        const target = actor.browsingContext.top.embedderElement;
         let processMessageManager =
           target.messageManager.processMessageManager ||
           Services.ppmm.getChildAt(0);
@@ -984,31 +992,44 @@ ParentAPIManager = {
             `Unexpected envType ${envType} on an extension process actor`
           );
         }
+        if (data.viewType !== "background_worker") {
+          throw new Error(
+            `Unexpected viewType ${data.viewType} on an extension process actor`
+          );
+        }
+        isBackgroundWorker = true;
+      } else {
+        // Unreacheable: JSWindowActorParent and JSProcessActorParent are the
+        // only actors.
+        throw new Error(
+          "Attempt to create privileged extension parent via incorrect actor"
+        );
       }
 
-      if (envType == "addon_parent" && data.viewType === "background_worker") {
+      if (isBackgroundWorker) {
         context = new BackgroundWorkerContextParent(envType, extension, data);
       } else if (envType == "addon_parent") {
         context = new ExtensionPageContextParent(
           envType,
           extension,
           data,
-          target
+          actor.browsingContext
         );
       } else if (envType == "devtools_parent") {
         context = new DevToolsExtensionPageContextParent(
           envType,
           extension,
           data,
-          target
+          actor.browsingContext
         );
       }
     } else if (envType == "content_parent") {
+      // Note: actor is always a JSWindowActorParent, with a browsingContext.
       context = new ContentScriptContextParent(
         envType,
         extension,
         data,
-        target,
+        actor.browsingContext,
         principal
       );
     } else {
@@ -1097,6 +1118,16 @@ ParentAPIManager = {
     };
 
     try {
+      if (
+        context.isBackgroundContext &&
+        !context.extension.persistentBackground
+      ) {
+        context.extension.emit("background-script-reset-idle", {
+          reason: "parentApiCall",
+          path: data.path,
+        });
+      }
+
       let args = data.args;
       let { isHandlingUserInput = false } = data.options || {};
       let pendingBrowser = context.pendingEventBrowser;
@@ -1781,10 +1812,10 @@ function promiseMessageFromChild(messageManager, messageName) {
 }
 
 // This should be called before browser.loadURI is invoked.
-async function promiseExtensionViewLoaded(browser) {
+async function promiseBackgroundViewLoaded(browser) {
   let { childId } = await promiseMessageFromChild(
     browser.messageManager,
-    "Extension:ExtensionViewLoaded"
+    "Extension:BackgroundViewLoaded"
   );
   if (childId) {
     return ParentAPIManager.getContextById(childId);
@@ -2232,7 +2263,7 @@ export var ExtensionParent = {
   StartupCache,
   WebExtensionPolicy,
   apiManager,
-  promiseExtensionViewLoaded,
+  promiseBackgroundViewLoaded,
   watchExtensionProxyContextLoad,
   watchExtensionWorkerContextLoaded,
   DebugUtils,
@@ -2256,7 +2287,7 @@ ExtensionParent._resetStartupPromises = () => {
 };
 ExtensionParent._resetStartupPromises();
 
-XPCOMUtils.defineLazyGetter(ExtensionParent, "PlatformInfo", () => {
+ChromeUtils.defineLazyGetter(ExtensionParent, "PlatformInfo", () => {
   return Object.freeze({
     os: (function () {
       let os = AppConstants.platform;
@@ -2283,7 +2314,7 @@ XPCOMUtils.defineLazyGetter(ExtensionParent, "PlatformInfo", () => {
  *
  * @returns {Array<string>} an array of stylesheets needed for the current platform.
  */
-XPCOMUtils.defineLazyGetter(ExtensionParent, "extensionStylesheets", () => {
+ChromeUtils.defineLazyGetter(ExtensionParent, "extensionStylesheets", () => {
   let stylesheets = ["chrome://browser/content/extension.css"];
 
   if (AppConstants.platform === "macosx") {

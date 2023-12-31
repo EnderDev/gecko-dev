@@ -136,13 +136,13 @@ add_task(async function test_file_migration() {
 
     info("Waiting for panel-list shown");
     await new Promise(resolve => {
-      wizard
+      shadow
         .querySelector("panel-list")
         .addEventListener("shown", resolve, { once: true });
     });
 
     info("Panel list shown. Clicking on panel-item");
-    let panelItem = wizard.querySelector(
+    let panelItem = shadow.querySelector(
       `panel-item[key="${DUMMY_FILEMIGRATOR_KEY}"]`
     );
     panelItem.click();
@@ -170,9 +170,9 @@ add_task(async function test_file_migration() {
       "div[name='page-file-import-progress'] .resource-progress-group"
     );
     for (let progressGroup of progressGroups) {
-      let expectedSuccessText =
+      let expectedMessageText =
         SUCCESS_STATE[progressGroup.dataset.resourceType];
-      if (expectedSuccessText) {
+      if (expectedMessageText) {
         let progressIcon = progressGroup.querySelector(".progress-icon");
         Assert.stringMatches(
           progressIcon.getAttribute("state"),
@@ -180,9 +180,9 @@ add_task(async function test_file_migration() {
           "Should be showing completed state."
         );
 
-        let successText =
-          progressGroup.querySelector(".success-text").textContent;
-        Assert.equal(successText, expectedSuccessText);
+        let messageText =
+          progressGroup.querySelector(".message-text").textContent;
+        Assert.equal(messageText, expectedMessageText);
       } else {
         Assert.ok(
           BrowserTestUtils.is_hidden(progressGroup),
@@ -250,13 +250,13 @@ add_task(async function test_file_migration_error() {
 
     info("Waiting for panel-list shown");
     await new Promise(resolve => {
-      wizard
+      shadow
         .querySelector("panel-list")
         .addEventListener("shown", resolve, { once: true });
     });
 
     info("Panel list shown. Clicking on panel-item");
-    let panelItem = wizard.querySelector(
+    let panelItem = shadow.querySelector(
       `panel-item[key="${DUMMY_FILEMIGRATOR_KEY}"]`
     );
     panelItem.click();
@@ -291,14 +291,8 @@ add_task(async function test_file_migration_error() {
     );
 
     let errorMessageContainer = shadow.querySelector(".file-import-error");
-
-    // Using BrowserTestUtils.is_visible to check for the visibility of the
-    // message seems to throw as it works its way up the ancestry and hits
-    // the shadowRoot. We'll work around this by making sure that the
-    // boundingClientRect has a width and height.
-    let errorRect = errorMessageContainer.getBoundingClientRect();
     Assert.ok(
-      errorRect.width && errorRect.height,
+      BrowserTestUtils.is_visible(errorMessageContainer),
       "Should be showing the error message container"
     );
 

@@ -164,7 +164,7 @@
       <link rel="stylesheet" href="chrome://browser/content/aboutlogins/common.css">
       <link rel="stylesheet" href="chrome://browser/content/aboutlogins/components/fxaccounts-button.css">
       <div class="logged-out-view">
-        <p class="fxaccounts-extra-text" data-l10n-id="fxaccounts-sign-in-text"></p>
+        <p class="fxaccounts-extra-text text-deemphasized" data-l10n-id="fxaccounts-sign-in-text"></p>
         <button class="fxaccounts-enable-button" data-l10n-id="fxaccounts-sign-in-sync-button"></button>
       </div>
       <div class="logged-in-view">
@@ -179,13 +179,14 @@
       <link rel="stylesheet" href="chrome://global/skin/in-content/common.css">
       <link rel="stylesheet" href="chrome://browser/content/aboutlogins/common.css">
       <link rel="stylesheet" href="chrome://browser/content/aboutlogins/components/login-list.css">
+      <script type="module" src="chrome://browser/content/aboutlogins/components/login-command-button.mjs"></script>
       <div class="listHeader">
         <login-filter></login-filter>
         <div class="create-login-button-container">
-          <button class="create-login-button" data-l10n-id="create-new-login-button"></button>
+          <login-command-button class="create-login-button" data-l10n-id="create-new-login-button" icon="chrome://global/skin/icons/plus.svg" ></login-command-button>
         </div>
       </div>
-      <div class="meta">
+      <div class="meta text-deemphasized">
         <label for="login-sort">
           <span data-l10n-id="login-list-sort-label-text"></span>
           <select id="login-sort">
@@ -218,8 +219,8 @@
       <li class="login-list-item" role="option">
         <img class="favicon" />
         <div class="labels">
-          <span class="title" dir="auto"></span>
-          <span class="username" dir="ltr"></span>
+          <span class="title text-truncated-ellipsis" dir="auto"></span>
+          <span class="username text-deemphasized text-truncated-ellipsis" dir="ltr"></span>
         </div>
         <img class="alert-icon" title="" src=""/>
       </li>
@@ -241,7 +242,7 @@
       <section>
         <p class="description" data-l10n-id="login-intro-description"></p>
         <ul>
-          <li data-l10n-id="login-intro-instructions-fxa"></li>
+          <li data-l10n-id="login-intro-instructions-fxa2"></li>
           <li data-l10n-id="login-intro-instructions-fxa-settings"></li>
           <li data-l10n-id="login-intro-instructions-fxa-passwords-help">
             <a data-l10n-name="passwords-help-link" class="intro-help-link" target="_blank" rel="noreferrer"></a>
@@ -259,6 +260,7 @@
 
     <template id="login-item-template">
       <script type="module" src="chrome://browser/content/aboutlogins/components/login-timeline.mjs"></script>
+      <script type="module" src="chrome://browser/content/aboutlogins/components/login-command-button.mjs"></script>
       <script type="module" src="chrome://browser/content/aboutlogins/components/login-alert.mjs"></script>
       <link rel="stylesheet" href="chrome://global/skin/in-content/common.css">
       <link rel="stylesheet" href="chrome://browser/content/aboutlogins/common.css">
@@ -271,90 +273,82 @@
               <a data-l10n-name="duplicate-link" tabindex="0" href=""></a>
             </span>
           </div>
-          <div class="header">
-            <img class="login-item-favicon" />
-            <h2 class="title">
-              <span class="login-item-title"></span>
-              <span class="new-login-title" data-l10n-id="login-item-new-login-title"></span>
-            </h2>
-            <button class="edit-button ghost-button" data-l10n-id="login-item-edit-button"></button>
-            <button class="delete-button ghost-button" data-l10n-id="about-logins-login-item-remove-button"></button>
-          </div>
-          <login-breach-alert></login-breach-alert>
-          <div class="vulnerable-alert">
-            <h3 class="alert-title" data-l10n-id="about-logins-vulnerable-alert-title"></h3>
-            <img class="alert-icon" src="chrome://browser/content/aboutlogins/icons/vulnerable-password.svg"/>
-            <span class="alert-text" data-l10n-id="about-logins-vulnerable-alert-text2"></span>
-            <a class="alert-link" data-l10n-id="about-logins-vulnerable-alert-link" data-l10n-args='{"hostname": ""}' href="#" rel="noreferrer" target="_blank"></a>
-            <a class="alert-learn-more-link" data-l10n-id="about-logins-vulnerable-alert-learn-more-link" href="#" rel="noreferrer" target="_blank"></a>
-          </div>
           <form>
-            <div class="detail-row">
-              <label class="detail-cell">
-                <span class="origin-label field-label" data-l10n-id="login-item-origin-label"></span>
-                <!-- Default text inputs to readonly to reduce jumping of the field
-                    size on page load since it always starts readonly. -->
+            <div class="header">
+              <img class="login-item-favicon" />
+              <h2 class="title">
+                <span class="login-item-title"></span>
+                <span class="new-login-title" data-l10n-id="login-item-new-login-title"></span>
+              </h2>
+              <div class="action-buttons">
+                <login-command-button class="edit-button" l10nId="login-item-edit-button" variant="ghost-button" icon="chrome://global/skin/icons/edit.svg" ></login-command-button>
+                  <moz-button-group class="form-actions-row">
+                    <button class="save-changes-button" type="submit"></button>
+                    <button class="cancel-button" data-l10n-id="login-item-cancel-button" type="button"></button>
+                  </moz-button-group>
+                <login-command-button class="delete-button" l10nId="about-logins-login-item-remove-button" variant="ghost-button" icon="chrome://global/skin/icons/delete.svg" ></login-command-button>
+              </div>
+           </div>
+            <login-breach-alert></login-breach-alert>
+            <login-vulnerable-password-alert></login-vulnerable-password-alert>
+              <div class="detail-row">
+                <label class="detail-cell">
+                  <span class="origin-label field-label" data-l10n-id="login-item-origin-label"></span>
+                  <!-- Default text inputs to readonly to reduce jumping of the field
+                      size on page load since it always starts readonly. -->
 
-                <input type="url"
-                      name="origin"
-                      required
-                      data-l10n-id="login-item-origin"
-                      dir="auto"
-                      readonly/>
-                <a class="origin-input" dir="auto" target="_blank" rel="noreferrer" name="origin" href=""></a>
-                <div class="tooltip-container">
-                  <div class="arrow-box">
-                      <p class="tooltip-message" data-l10n-id="login-item-tooltip-message"></p>
+                  <input type="url"
+                        name="origin"
+                        required
+                        data-l10n-id="login-item-origin"
+                        dir="auto"
+                        readonly/>
+                  <a class="origin-input" dir="auto" target="_blank" rel="noreferrer" name="origin" href=""></a>
+                  <div class="tooltip-container">
+                    <div class="arrow-box">
+                        <p class="tooltip-message" data-l10n-id="login-item-tooltip-message"></p>
+                    </div>
                   </div>
+                </label>
+              </div>
+              <div class="detail-grid">
+                <div class="detail-row">
+                  <label class="detail-cell">
+                    <span class="username-label field-label" data-l10n-id="login-item-username-label"></span>
+                    <input type="text"
+                          name="username"
+                          data-l10n-id="login-item-username"
+                          dir="ltr"
+                          readonly/>
+                  </label>
+                  <login-command-button class="copy-button copy-username-button" l10nId="login-item-copy-username-button-text">
+                  </login-command-button>
                 </div>
-              </label>
-            </div>
-            <div class="detail-grid">
-              <div class="detail-row">
-                <label class="detail-cell">
-                  <span class="username-label field-label" data-l10n-id="login-item-username-label"></span>
-                  <input type="text"
-                         name="username"
-                         data-l10n-id="login-item-username"
-                         dir="ltr"
-                         readonly/>
-                </label>
-                <button class="copy-button copy-username-button" data-copy-login-property="username" data-telemetry-object="username" type="button">
-                  <span class="copied-button-text" data-l10n-id="login-item-copied-username-button-text"></span>
-                  <span class="copy-button-text" data-l10n-id="login-item-copy-username-button-text"></span>
-                </button>
+                <div class="detail-row">
+                  <label class="detail-cell">
+                    <span class="password-label field-label" data-l10n-id="login-item-password-label"></span>
+                    <div class="reveal-password-wrapper">
+                      <input type="password"
+                            name="password"
+                            autocomplete="off"
+                            dir="ltr"
+                            required
+                            readonly/>
+                      <input class="password-display"
+                            type="password"
+                            autocomplete="off"
+                            dir="ltr"
+                            readonly/>
+                      <input type="checkbox"
+                            class="reveal-password-checkbox"
+                            data-l10n-id="login-item-password-reveal-checkbox"/>
+                    </div>
+                  </label>
+                  <login-command-button class="copy-button copy-password-button" l10nId="login-item-copy-password-button-text" >
+                  </login-command-button>
+                </div>
               </div>
-              <div class="detail-row">
-                <label class="detail-cell">
-                  <span class="password-label field-label" data-l10n-id="login-item-password-label"></span>
-                  <div class="reveal-password-wrapper">
-                    <input type="password"
-                           name="password"
-                           autocomplete="off"
-                           dir="ltr"
-                           required
-                           readonly/>
-                    <input class="password-display"
-                           type="password"
-                           autocomplete="off"
-                           dir="ltr"
-                           readonly/>
-                    <input type="checkbox"
-                           class="reveal-password-checkbox"
-                           data-l10n-id="login-item-password-reveal-checkbox"/>
-                  </div>
-                </label>
-                <button class="copy-button copy-password-button" data-copy-login-property="password" data-telemetry-object="password" type="button">
-                  <span class="copied-button-text" data-l10n-id="login-item-copied-password-button-text"></span>
-                  <span class="copy-button-text" data-l10n-id="login-item-copy-password-button-text"></span>
-                </button>
-              </div>
-            </div>
-            <moz-button-group class="form-actions-row">
-              <button class="save-changes-button" type="submit"></button>
-              <button class="cancel-button" data-l10n-id="login-item-cancel-button" type="button"></button>
-            </moz-button-group>
-            <login-timeline hidden ></login-timeline>
+              <login-timeline hidden ></login-timeline>
           </form>
         </div>
       </div>

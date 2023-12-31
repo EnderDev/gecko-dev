@@ -7,6 +7,10 @@
 
 @namespace html url("http://www.w3.org/1999/xhtml");
 
+:root {
+  --sidebar-border-color: ThreeDShadow;
+}
+
 /**
  * We intentionally do not include browser-custom-colors.css,
  * instead choosing to fall back to system colours and transparencies
@@ -14,31 +18,54 @@
  * platform.
  */
 
-:root {
-  --toolbar-non-lwt-bgcolor: color-mix(in srgb, -moz-dialog 85%, white);
-  --toolbar-non-lwt-textcolor: -moz-dialogtext;
-
-  --chrome-content-separator-color: ThreeDShadow;
-}
-
-:root:not(:-moz-lwtheme),
-toolbar[brighttext]:not(:-moz-lwtheme) {
-  --tab-attention-icon-color: AccentColor;
-}
-
-:root:-moz-lwtheme {
-  --chrome-content-separator-color: rgba(0,0,0,.3);
-}
-
 #menubar-items {
   flex-direction: column; /* for flex hack */
   justify-content: normal; /* align the menubar to the top also in customize mode */
 }
 
-#navigator-toolbox {
-  appearance: none;
+/**
+ * Titlebar drawing:
+ *
+ * GTK windows have both a window radius (exposed via the
+ * `-moz-gtk-csd-titlebar-radius`) environment variable, and a window shadow
+ * (which we can't read back from GTK). Note that the -moz-window-decorations
+ * (in X11) or the compositor (in Wayland) does draw the shadow corners
+ * already.
+ */
+:root[tabsintitlebar] {
   background-color: transparent;
-  border-top: none;
+
+  /* When temporarily showing the menu bar, make it at least as tall as the tab
+   * bar such that the window controls don't appear to move up. */
+  #toolbar-menubar[autohide="true"] {
+    height: calc(var(--tab-min-height) + 2 * var(--tab-block-margin));
+  }
+}
+
+:root[tabsintitlebar][sizemode="normal"]:not([gtktiledwindow="true"]) {
+  /* This takes care of drawing our window decorations on X11 */
+  -moz-default-appearance: -moz-window-decorations;
+  appearance: auto;
+
+  #navigator-toolbox,
+  dialog::backdrop {
+    border-top-left-radius: env(-moz-gtk-csd-titlebar-radius);
+    border-top-right-radius: env(-moz-gtk-csd-titlebar-radius);
+  }
+
+  /* stylelint-disable-next-line media-query-no-invalid */
+  @media (-moz-bool-pref: "widget.gtk.rounded-bottom-corners.enabled") {
+    #navigator-toolbox {
+      /* The body clip below covers this. */
+      border-radius: 0;
+    }
+
+    body,
+    dialog::backdrop {
+      /* Use an uniform clip to allow WebRender to optimize it better */
+      border-radius: env(-moz-gtk-csd-titlebar-radius);
+    }
+  }
 }
 
 .browser-toolbar {
@@ -91,22 +118,11 @@ menuitem.bookmark-item {
   font-size: 1.05em;
 }
 
-@supports -moz-bool-pref("browser.urlbar.experimental.expandTextOnFocus") {
+/* stylelint-disable-next-line media-query-no-invalid */
+@media (-moz-bool-pref: "browser.urlbar.experimental.expandTextOnFocus") {
   #urlbar[breakout-extend] {
     font-size: 1.14em;
   }
-}
-
-:root {
-  --toolbar-field-border-color: ThreeDShadow;
-}
-
-/* Address bar results view */
-
-:root:not(:-moz-lwtheme) {
-  --urlbar-popup-action-color: -moz-nativehyperlinktext;
-  --autocomplete-popup-highlight-background: SelectedItem;
-  --autocomplete-popup-highlight-color: SelectedItemText;
 }
 
 /* AutoComplete */
@@ -116,11 +132,6 @@ menuitem.bookmark-item {
 }
 
 /* Content area */
-
-
-#browser {
-  --sidebar-border-color: ThreeDShadow;
-}
 
 .sidebar-splitter {
   appearance: none;
@@ -141,20 +152,10 @@ menuitem.bookmark-item {
   min-height: 0;
 }
 
-#titlebar {
-  background-color: ActiveCaption;
-  color: CaptionText;
-}
-
-#titlebar:-moz-window-inactive {
-  background-color: InactiveCaption;
-  color: InactiveCaptionText;
-}
-
 #TabsToolbar,
 #toolbar-menubar,
 #main-menubar,
-#titlebar:-moz-lwtheme {
+#titlebar {
   appearance: none;
   background-color: transparent;
   color: inherit;
@@ -249,167 +250,99 @@ menuitem.bookmark-item {
   margin-bottom: -10px;
 }
 
-#context-navigation > .menuitem-iconic > .menu-iconic-left {
-  /* override toolkit/themes/linux/global/menu.css */
-  padding-inline-end: 0 !important;
-  margin-inline-end: 0 !important;
+/* The button box must appear on top of the navigator-toolbox in order for
+ * click and hover mouse events to work properly for the button in the restored
+ * window state. Otherwise, elements in the navigator-toolbox, like the menubar,
+ * can swallow those events. */
+.titlebar-buttonbox {
+  z-index: 1;
+  align-items: center;
 }
 
-/**
- * Titlebar drawing:
- *
- * We draw to titlebar when Gkt+ CSD is available. This is mostly
- * straight-forward, but getting the window corners to look perfect is a bit
- * tricky, as there are different variables to take into account.
- *
- * GTK windows have both a window radius (exposed via the
- * `-moz-gtk-csd-titlebar-radius`) environment variable, and a window shadow
- * (which we can't read back from GTK). Note that the native drawing does draw
- * the shadow already.
- *
- * So there are multiple configurations to consider:
- *
- *  * Whether we're using Wayland vs. X11
- *  * Whether we're using a lightweight theme or not.
- *
- * Consider the simple case (default system theme). We render the titlebar
- * using `-moz-default-appearance: -moz-window-titlebar;`, then don't draw
- * anything else. Success!
- *
- * Now consider lightweight themes: We need to render the native titlebar
- * behind the "theme" titlebar in order to render the native shadow on X11. But
- * we can't just use the #navigator-toolbox as that's where the lightweight
- * theme background goes, so we need to use the #navigator-toolbox-background.
- * We still have to apply the corner radii to #navigator-toolbox of course, so
- * the lightweight theme background doesn't overflow the titlebar radius.
- *
- * In a Wayland-only world, the setup could be much simpler: We could apply the
- * titlebar appearance to #navigator-toolbox, and just apply the border radius
- * on the <body> or #navigator-toolbox-background to clip the extra shadow when
- * using the system theme. For the lightweight theme, we could use
- * appearance: none and the titlebar radius on the toolbox. In X11 however, we
- * do need the native titlebar behind at all times.
- */
-@media (-moz-gtk-csd-available) {
-  :root[tabsintitlebar][sizemode="normal"] {
-    background-color: transparent;
-  }
+/* Render titlebar command buttons according to system config.
+ * Use full scale icons here as the Gtk+ does. */
+.titlebar-min {
+  appearance: auto;
+  -moz-default-appearance: -moz-window-button-minimize;
+  order: env(-moz-gtk-csd-minimize-button-position);
+}
+.titlebar-max {
+  appearance: auto;
+  -moz-default-appearance: -moz-window-button-maximize;
+  order: env(-moz-gtk-csd-maximize-button-position);
+}
+.titlebar-restore {
+  appearance: auto;
+  -moz-default-appearance: -moz-window-button-restore;
+  order: env(-moz-gtk-csd-maximize-button-position);
+}
+.titlebar-close {
+  appearance: auto;
+  -moz-default-appearance: -moz-window-button-close;
+  order: env(-moz-gtk-csd-close-button-position);
+}
 
-  :root[tabsintitlebar] #navigator-toolbox-background {
-    appearance: auto;
-    -moz-default-appearance: -moz-window-titlebar-maximized;
-  }
+/* When using lightweight themes, use our own buttons since native ones might
+ * assume a native background in order to be visible. */
+.titlebar-button:-moz-lwtheme {
+  appearance: none;
+  border-radius: 100%;
 
-  :root[tabsintitlebar][sizemode="normal"]:not([gtktiledwindow="true"]) #navigator-toolbox-background {
-    -moz-default-appearance: -moz-window-titlebar;
+  &:focus-visible {
+    outline: var(--focus-outline);
+    outline-offset: var(--focus-outline-inset);
   }
+}
+.titlebar-button > .toolbarbutton-icon:-moz-lwtheme {
+  padding: 6px;
+  -moz-context-properties: stroke;
+  stroke: currentColor;
+}
+.titlebar-min:-moz-lwtheme {
+  list-style-image: url(chrome://browser/skin/window-controls/minimize.svg);
+}
+.titlebar-max:-moz-lwtheme {
+  list-style-image: url(chrome://browser/skin/window-controls/maximize.svg);
+}
+.titlebar-restore:-moz-lwtheme {
+  list-style-image: url(chrome://browser/skin/window-controls/restore.svg);
+}
+.titlebar-close:-moz-lwtheme {
+  list-style-image: url(chrome://browser/skin/window-controls/close.svg);
+}
+.titlebar-button:-moz-lwtheme:hover {
+  background-color: color-mix(in srgb, currentColor 12%, transparent);
+}
+.titlebar-button:-moz-lwtheme:hover:active {
+  background-color: color-mix(in srgb, currentColor 20%, transparent);
+}
+.titlebar-close:-moz-lwtheme:hover {
+  background-color: #d70022;
+  color: white;
+}
+.titlebar-close:-moz-lwtheme:hover:active {
+  background-color: #ff0039;
+}
 
-  :root[tabsintitlebar] #titlebar {
-    /* Use the toolbox background */
-    background-color: transparent;
-  }
-
-  :root[tabsintitlebar][sizemode="normal"]:not([gtktiledwindow="true"]) #navigator-toolbox:-moz-lwtheme,
-  :root[tabsintitlebar][sizemode="normal"]:not([gtktiledwindow="true"]) dialog::backdrop {
-    border-top-left-radius: env(-moz-gtk-csd-titlebar-radius);
-    border-top-right-radius: env(-moz-gtk-csd-titlebar-radius);
-  }
-
-  /* When temporarily showing the menu bar, make it at least as tall as the tab
-   * bar such that the window controls don't appear to move up. */
-  :root[tabsintitlebar] #toolbar-menubar[autohide="true"] {
-    height: calc(var(--tab-min-height) + 2 * var(--tab-block-margin));
-  }
-
-  /* The button box must appear on top of the navigator-toolbox in order for
-   * click and hover mouse events to work properly for the button in the restored
-   * window state. Otherwise, elements in the navigator-toolbox, like the menubar,
-   * can swallow those events. */
-  .titlebar-buttonbox {
-    z-index: 1;
-    align-items: center;
-  }
-
-  /* Render titlebar command buttons according to system config.
-   * Use full scale icons here as the Gtk+ does. */
+@media not (-moz-gtk-csd-minimize-button) {
   .titlebar-min {
-    appearance: auto;
-    -moz-default-appearance: -moz-window-button-minimize;
-    order: env(-moz-gtk-csd-minimize-button-position);
+    display: none;
   }
+}
+@media not (-moz-gtk-csd-maximize-button) {
+  .titlebar-restore,
   .titlebar-max {
-    appearance: auto;
-    -moz-default-appearance: -moz-window-button-maximize;
-    order: env(-moz-gtk-csd-maximize-button-position);
+    display: none;
   }
-  .titlebar-restore {
-    appearance: auto;
-    -moz-default-appearance: -moz-window-button-restore;
-    order: env(-moz-gtk-csd-maximize-button-position);
-  }
+}
+@media not (-moz-gtk-csd-close-button) {
   .titlebar-close {
-    appearance: auto;
-    -moz-default-appearance: -moz-window-button-close;
-    order: env(-moz-gtk-csd-close-button-position);
+    display: none;
   }
+}
 
-  /* When using lightweight themes, use our own buttons since native ones might
-   * assume a native background in order to be visible. */
-  .titlebar-button:-moz-lwtheme {
-    appearance: none;
-    border-radius: 100%;
-  }
-  .titlebar-button > .toolbarbutton-icon:-moz-lwtheme {
-    padding: 6px;
-    -moz-context-properties: stroke;
-    stroke: currentColor;
-  }
-  .titlebar-min:-moz-lwtheme {
-    list-style-image: url(chrome://browser/skin/window-controls/minimize.svg);
-  }
-  .titlebar-max:-moz-lwtheme {
-    list-style-image: url(chrome://browser/skin/window-controls/maximize.svg);
-  }
-  .titlebar-restore:-moz-lwtheme {
-    list-style-image: url(chrome://browser/skin/window-controls/restore.svg);
-  }
-  .titlebar-close:-moz-lwtheme {
-    list-style-image: url(chrome://browser/skin/window-controls/close.svg);
-  }
-  .titlebar-button:-moz-lwtheme:hover {
-    background-color: color-mix(in srgb, currentColor 12%, transparent);
-  }
-  .titlebar-button:-moz-lwtheme:hover:active {
-    background-color: color-mix(in srgb, currentColor 20%, transparent);
-  }
-  .titlebar-close:-moz-lwtheme:hover {
-    background-color: #d70022;
-    color: white;
-  }
-  .titlebar-close:-moz-lwtheme:hover:active {
-    background-color: #ff0039;
-  }
-
-  @media not (-moz-gtk-csd-minimize-button) {
-    .titlebar-min {
-      display: none;
-    }
-  }
-  @media not (-moz-gtk-csd-maximize-button) {
-    .titlebar-restore,
-    .titlebar-max {
-      display: none;
-    }
-  }
-  @media not (-moz-gtk-csd-close-button) {
-    .titlebar-close {
-      display: none;
-    }
-  }
-
-  @media (-moz-gtk-csd-reversed-placement) {
-    .titlebar-buttonbox-container {
-      order: -1;
-    }
+@media (-moz-gtk-csd-reversed-placement) {
+  .titlebar-buttonbox-container {
+    order: -1;
   }
 }

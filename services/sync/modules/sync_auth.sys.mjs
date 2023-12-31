@@ -27,13 +27,13 @@ ChromeUtils.defineESModuleGetters(lazy, {
   Weave: "resource://services-sync/main.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "fxAccounts", () => {
+ChromeUtils.defineLazyGetter(lazy, "fxAccounts", () => {
   return ChromeUtils.importESModule(
     "resource://gre/modules/FxAccounts.sys.mjs"
   ).getFxAccountsSingleton();
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "log", function () {
+ChromeUtils.defineLazyGetter(lazy, "log", function () {
   let log = Log.repository.getLogger("Sync.SyncAuthManager");
   log.manageLevelFromPref("services.sync.log.logger.identity");
   return log;
@@ -46,9 +46,7 @@ XPCOMUtils.defineLazyPreferenceGetter(
 );
 
 // FxAccountsCommon.js doesn't use a "namespace", so create one here.
-var fxAccountsCommon = ChromeUtils.import(
-  "resource://gre/modules/FxAccountsCommon.js"
-);
+import * as fxAccountsCommon from "resource://gre/modules/FxAccountsCommon.sys.mjs";
 
 const SCOPE_OLD_SYNC = fxAccountsCommon.SCOPE_OLD_SYNC;
 

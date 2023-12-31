@@ -3,11 +3,14 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use crate::{
-    cow_label, wgpu_string, AdapterInformation, ByteBuf, CommandEncoderAction, DeviceAction,
-    DropAction, ImageDataLayout, ImplicitLayout, QueueWriteAction, RawString, TextureAction,
+    cow_label, error::HasErrorBufferType, wgpu_string, AdapterInformation, ByteBuf,
+    CommandEncoderAction, DeviceAction, DropAction, ImageDataLayout, ImplicitLayout,
+    QueueWriteAction, RawString, TextureAction,
 };
 
-use wgc::{hub::IdentityManager, id};
+use crate::SwapChainId;
+
+use wgc::{id, identity::IdentityManager};
 use wgt::{Backend, TextureFormat};
 
 pub use wgc::command::{compute_ffi::*, render_ffi::*};
@@ -503,6 +506,7 @@ pub extern "C" fn wgpu_client_create_texture(
     client: &Client,
     device_id: id::DeviceId,
     desc: &wgt::TextureDescriptor<Option<&nsACString>, crate::FfiSlice<TextureFormat>>,
+    swap_chain_id: Option<&SwapChainId>,
     bb: &mut ByteBuf,
 ) -> id::TextureId {
     let label = wgpu_string(desc.label);
@@ -520,6 +524,7 @@ pub extern "C" fn wgpu_client_create_texture(
     let action = DeviceAction::CreateTexture(
         id,
         desc.map_label_and_view_formats(|_| label, |_| view_formats),
+        swap_chain_id.copied(),
     );
     *bb = make_byte_buf(&action);
 
@@ -544,7 +549,7 @@ pub extern "C" fn wgpu_client_create_texture_view(
         .alloc(backend);
 
     let wgpu_desc = wgc::resource::TextureViewDescriptor {
-        label: label,
+        label,
         format: desc.format.cloned(),
         dimension: desc.dimension.cloned(),
         range: wgt::ImageSubresourceRange {
@@ -579,7 +584,7 @@ pub extern "C" fn wgpu_client_create_sampler(
         .alloc(backend);
 
     let wgpu_desc = wgc::resource::SamplerDescriptor {
-        label: label,
+        label,
         address_modes: desc.address_modes,
         mag_filter: desc.mag_filter,
         min_filter: desc.min_filter,
@@ -644,7 +649,7 @@ pub extern "C" fn wgpu_device_create_render_bundle_encoder(
         .map(|format| Some(format.clone()))
         .collect();
     let descriptor = wgc::command::RenderBundleEncoderDescriptor {
-        label: label,
+        label,
         color_formats: Cow::Owned(color_formats),
         depth_stencil: desc
             .depth_stencil_format
@@ -659,8 +664,11 @@ pub extern "C" fn wgpu_device_create_render_bundle_encoder(
     match wgc::command::RenderBundleEncoder::new(&descriptor, device_id, None) {
         Ok(encoder) => Box::into_raw(Box::new(encoder)),
         Err(e) => {
-            let message = format!("Error in Device::create_render_bundle_encoder: {}", e);
-            let action = DeviceAction::Error(message);
+            let message = format!("Error in `Device::create_render_bundle_encoder`: {}", e);
+            let action = DeviceAction::Error {
+                message,
+                r#type: e.error_type(),
+            };
             *bb = make_byte_buf(&action);
             ptr::null_mut()
         }
@@ -725,6 +733,14 @@ pub unsafe extern "C" fn wgpu_client_create_render_bundle_error(
 #[repr(C)]
 pub struct ComputePassDescriptor<'a> {
     pub label: Option<&'a nsACString>,
+    pub timestamp_writes: Option<&'a ComputePassTimestampWrites<'a>>,
+}
+
+#[repr(C)]
+pub struct ComputePassTimestampWrites<'a> {
+    pub query_set: id::QuerySetId,
+    pub beginning_of_pass_write_index: Option<&'a u32>,
+    pub end_of_pass_write_index: Option<&'a u32>,
 }
 
 #[no_mangle]
@@ -732,11 +748,35 @@ pub unsafe extern "C" fn wgpu_command_encoder_begin_compute_pass(
     encoder_id: id::CommandEncoderId,
     desc: &ComputePassDescriptor,
 ) -> *mut wgc::command::ComputePass {
-    let label = wgpu_string(desc.label);
+    let &ComputePassDescriptor {
+        label,
+        timestamp_writes,
+    } = desc;
+
+    let label = wgpu_string(label);
+
+    let timestamp_writes = timestamp_writes.map(|tsw| {
+        let &ComputePassTimestampWrites {
+            query_set,
+            beginning_of_pass_write_index,
+            end_of_pass_write_index,
+        } = tsw;
+        let beginning_of_pass_write_index = beginning_of_pass_write_index.cloned();
+        let end_of_pass_write_index = end_of_pass_write_index.cloned();
+        wgc::command::ComputePassTimestampWrites {
+            query_set,
+            beginning_of_pass_write_index,
+            end_of_pass_write_index,
+        }
+    });
+    let timestamp_writes = timestamp_writes.as_ref();
 
     let pass = wgc::command::ComputePass::new(
         encoder_id,
-        &wgc::command::ComputePassDescriptor { label: label },
+        &wgc::command::ComputePassDescriptor {
+            label,
+            timestamp_writes,
+        },
     );
     Box::into_raw(Box::new(pass))
 }
@@ -761,6 +801,15 @@ pub struct RenderPassDescriptor<'a> {
     pub color_attachments: *const wgc::command::RenderPassColorAttachment,
     pub color_attachments_length: usize,
     pub depth_stencil_attachment: *const wgc::command::RenderPassDepthStencilAttachment,
+    pub timestamp_writes: Option<&'a RenderPassTimestampWrites<'a>>,
+    pub occlusion_query_set: Option<wgc::id::QuerySetId>,
+}
+
+#[repr(C)]
+pub struct RenderPassTimestampWrites<'a> {
+    pub query_set: wgc::id::QuerySetId,
+    pub beginning_of_pass_write_index: Option<&'a u32>,
+    pub end_of_pass_write_index: Option<&'a u32>,
 }
 
 #[no_mangle]
@@ -768,19 +817,46 @@ pub unsafe extern "C" fn wgpu_command_encoder_begin_render_pass(
     encoder_id: id::CommandEncoderId,
     desc: &RenderPassDescriptor,
 ) -> *mut wgc::command::RenderPass {
-    let label = wgpu_string(desc.label);
+    let &RenderPassDescriptor {
+        label,
+        color_attachments,
+        color_attachments_length,
+        depth_stencil_attachment,
+        timestamp_writes,
+        occlusion_query_set,
+    } = desc;
 
-    let color_attachments: Vec<_> =
-        make_slice(desc.color_attachments, desc.color_attachments_length)
-            .iter()
-            .map(|format| Some(format.clone()))
-            .collect();
+    let label = wgpu_string(label);
+
+    let timestamp_writes = timestamp_writes.map(|tsw| {
+        let &RenderPassTimestampWrites {
+            query_set,
+            beginning_of_pass_write_index,
+            end_of_pass_write_index,
+        } = tsw;
+        let beginning_of_pass_write_index = beginning_of_pass_write_index.cloned();
+        let end_of_pass_write_index = end_of_pass_write_index.cloned();
+        wgc::command::RenderPassTimestampWrites {
+            query_set,
+            beginning_of_pass_write_index,
+            end_of_pass_write_index,
+        }
+    });
+
+    let timestamp_writes = timestamp_writes.as_ref();
+
+    let color_attachments: Vec<_> = make_slice(color_attachments, color_attachments_length)
+        .iter()
+        .map(|format| Some(format.clone()))
+        .collect();
     let pass = wgc::command::RenderPass::new(
         encoder_id,
         &wgc::command::RenderPassDescriptor {
-            label: label,
+            label,
             color_attachments: Cow::Owned(color_attachments),
-            depth_stencil_attachment: desc.depth_stencil_attachment.as_ref(),
+            depth_stencil_attachment: depth_stencil_attachment.as_ref(),
+            timestamp_writes,
+            occlusion_query_set,
         },
     );
     Box::into_raw(Box::new(pass))
@@ -878,13 +954,55 @@ pub unsafe extern "C" fn wgpu_client_create_bind_group_layout(
         });
     }
     let wgpu_desc = wgc::binding_model::BindGroupLayoutDescriptor {
-        label: label,
+        label,
         entries: Cow::Owned(entries),
     };
 
     let action = DeviceAction::CreateBindGroupLayout(id, wgpu_desc);
     *bb = make_byte_buf(&action);
     id
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wgpu_client_render_pipeline_get_bind_group_layout(
+    client: &Client,
+    pipeline_id: id::RenderPipelineId,
+    index: u32,
+    bb: &mut ByteBuf,
+) -> id::BindGroupLayoutId {
+    let backend = pipeline_id.backend();
+    let bgl_id = client
+        .identities
+        .lock()
+        .select(backend)
+        .bind_group_layouts
+        .alloc(backend);
+
+    let action = DeviceAction::RenderPipelineGetBindGroupLayout(pipeline_id, index, bgl_id);
+    *bb = make_byte_buf(&action);
+
+    bgl_id
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wgpu_client_compute_pipeline_get_bind_group_layout(
+    client: &Client,
+    pipeline_id: id::ComputePipelineId,
+    index: u32,
+    bb: &mut ByteBuf,
+) -> id::BindGroupLayoutId {
+    let backend = pipeline_id.backend();
+    let bgl_id = client
+        .identities
+        .lock()
+        .select(backend)
+        .bind_group_layouts
+        .alloc(backend);
+
+    let action = DeviceAction::ComputePipelineGetBindGroupLayout(pipeline_id, index, bgl_id);
+    *bb = make_byte_buf(&action);
+
+    bgl_id
 }
 
 #[no_mangle]
@@ -905,7 +1023,7 @@ pub unsafe extern "C" fn wgpu_client_create_pipeline_layout(
         .alloc(backend);
 
     let wgpu_desc = wgc::binding_model::PipelineLayoutDescriptor {
-        label: label,
+        label,
         bind_group_layouts: Cow::Borrowed(make_slice(
             desc.bind_group_layouts,
             desc.bind_group_layouts_length,
@@ -955,7 +1073,7 @@ pub unsafe extern "C" fn wgpu_client_create_bind_group(
         });
     }
     let wgpu_desc = wgc::binding_model::BindGroupDescriptor {
-        label: label,
+        label,
         layout: desc.layout,
         entries: Cow::Owned(entries),
     };
@@ -1176,5 +1294,26 @@ pub unsafe extern "C" fn wgpu_queue_write_texture(
 /// Returns the block size or zero if the format has multiple aspects (for example depth+stencil).
 #[no_mangle]
 pub extern "C" fn wgpu_texture_format_block_size_single_aspect(format: wgt::TextureFormat) -> u32 {
-    format.block_size(None).unwrap_or(0)
+    format.block_copy_size(None).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_client_use_external_texture_in_swapChain(
+    device_id: id::DeviceId,
+    format: wgt::TextureFormat,
+) -> bool {
+    if device_id.backend() != wgt::Backend::Dx12 {
+        return false;
+    }
+
+    if !static_prefs::pref!("dom.webgpu.swap-chain.external-texture-dx12") {
+        return false;
+    }
+
+    let supported = match format {
+        wgt::TextureFormat::Bgra8Unorm => true,
+        _ => false,
+    };
+
+    supported
 }

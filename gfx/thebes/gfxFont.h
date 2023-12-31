@@ -18,6 +18,7 @@
 #include "mozilla/AlreadyAddRefed.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/FontPropertyTypes.h"
+#include "mozilla/HashTable.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/MruCache.h"
 #include "mozilla/Mutex.h"
@@ -98,7 +99,7 @@ struct gfxFontStyle {
                gfxFloat aSize, const FontSizeAdjust& aSizeAdjust,
                bool aSystemFont, bool aPrinterFont, bool aWeightSynthesis,
                bool aStyleSynthesis, bool aSmallCapsSynthesis,
-               uint32_t aLanguageOverride);
+               bool aPositionSynthesis, uint32_t aLanguageOverride);
   // Features are composed of (1) features from style rules (2) features
   // from feature settings rules and (3) family-specific features.  (1) and
   // (3) are guaranteed to be mutually exclusive
@@ -146,10 +147,6 @@ struct gfxFontStyle {
   // in order to get correct glyph shapes.)
   uint32_t languageOverride;
 
-  // The estimated background color behind the text. Enables a special
-  // rendering mode when NS_GET_A(.) > 0. Only used for text in the chrome.
-  nscolor fontSmoothingBackgroundColor;
-
   // The Font{Weight,Stretch,SlantStyle} fields are each a 16-bit type.
 
   // The weight of the font: 100, 200, ... 900.
@@ -190,10 +187,11 @@ struct gfxFontStyle {
   // Used to imitate -webkit-font-smoothing: antialiased
   bool useGrayscaleAntialiasing : 1;
 
-  // Whether synthetic styles are allowed
+  // Whether synthetic styles are allowed (required, in the case of position)
   bool allowSyntheticWeight : 1;
   bool allowSyntheticStyle : 1;
   bool allowSyntheticSmallCaps : 1;
+  bool useSyntheticPosition : 1;
 
   // some variant features require fallback which complicates the shaping
   // code, so set up a bool to indicate when shaping with fallback is needed
@@ -237,6 +235,8 @@ struct gfxFontStyle {
            (variantSubSuper == other.variantSubSuper) &&
            (allowSyntheticWeight == other.allowSyntheticWeight) &&
            (allowSyntheticStyle == other.allowSyntheticStyle) &&
+           (allowSyntheticSmallCaps == other.allowSyntheticSmallCaps) &&
+           (useSyntheticPosition == other.useSyntheticPosition) &&
            (systemFont == other.systemFont) &&
            (printerFont == other.printerFont) &&
            (useGrayscaleAntialiasing == other.useGrayscaleAntialiasing) &&
@@ -249,8 +249,7 @@ struct gfxFontStyle {
            (variationSettings == other.variationSettings) &&
            (languageOverride == other.languageOverride) &&
            mozilla::NumbersAreBitwiseIdentical(autoOpticalSize,
-                                               other.autoOpticalSize) &&
-           (fontSmoothingBackgroundColor == other.fontSmoothingBackgroundColor);
+                                               other.autoOpticalSize);
   }
 };
 
@@ -682,7 +681,7 @@ class gfxFontShaper {
   static void MergeFontFeatures(
       const gfxFontStyle* aStyle, const nsTArray<gfxFontFeature>& aFontFeatures,
       bool aDisableLigatures, const nsACString& aFamilyName, bool aAddSmallCaps,
-      void (*aHandleFeature)(const uint32_t&, uint32_t&, void*),
+      void (*aHandleFeature)(uint32_t, uint32_t, void*),
       void* aHandleFeatureData);
 
  protected:
@@ -1037,8 +1036,8 @@ class gfxShapedText {
     return mDetailedGlyphs->Get(aCharIndex);
   }
 
-  void AdjustAdvancesForSyntheticBold(float aSynBoldOffset, uint32_t aOffset,
-                                      uint32_t aLength);
+  void ApplyTrackingToClusters(gfxFloat aTrackingAdjustment, uint32_t aOffset,
+                               uint32_t aLength);
 
   // Mark clusters in the CompressedGlyph records, starting at aOffset,
   // based on the Unicode properties of the text in aString.
@@ -1348,6 +1347,8 @@ class gfxShapedWord final : public gfxShapedText {
     return (aHash >> 28) ^ (aHash << 4) ^ aCh;
   }
 
+  size_t SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf) const;
+
  private:
   // so that gfxTextRun can share our DetailedGlyphStore class
   friend class gfxTextRun;
@@ -1415,6 +1416,7 @@ class gfxFont {
   using SVGContextPaint = mozilla::SVGContextPaint;
 
   using RoundingFlags = gfxFontShaper::RoundingFlags;
+  using ShapedTextFlags = mozilla::gfx::ShapedTextFlags;
 
  public:
   using FontSlantStyle = mozilla::FontSlantStyle;
@@ -1840,7 +1842,7 @@ class gfxFont {
   }
   void ClearCachedWordsLocked() MOZ_REQUIRES(mLock) {
     MOZ_ASSERT(mWordCache);
-    mWordCache->Clear();
+    mWordCache->clear();
   }
 
   // Glyph rendering/geometry has changed, so invalidate data as necessary.
@@ -2095,13 +2097,18 @@ class gfxFont {
   RefPtr<gfxFontEntry> mFontEntry;
   mutable mozilla::RWLock mLock;
 
-  struct CacheHashKey {
+  // Note that WordCacheKey contains a pointer to the text of the word, which
+  // must be valid for as long as the key is in use. When using for a Lookup,
+  // the string may be local/temporary, but when storing in the HashMap, we
+  // set the Key text pointer to reference the text in the associated
+  // gfxShapedWord that is being stored.
+  struct WordCacheKey {
     union {
       const uint8_t* mSingle;
       const char16_t* mDouble;
     } mText;
     uint32_t mLength;
-    mozilla::gfx::ShapedTextFlags mFlags;
+    ShapedTextFlags mFlags;
     Script mScript;
     RefPtr<nsAtom> mLanguage;
     int32_t mAppUnitsPerDevUnit;
@@ -2109,10 +2116,10 @@ class gfxFont {
     bool mTextIs8Bit;
     RoundingFlags mRounding;
 
-    CacheHashKey(const uint8_t* aText, uint32_t aLength, uint32_t aStringHash,
+    WordCacheKey(const uint8_t* aText, uint32_t aLength, uint32_t aStringHash,
                  Script aScriptCode, nsAtom* aLanguage,
-                 int32_t aAppUnitsPerDevUnit,
-                 mozilla::gfx::ShapedTextFlags aFlags, RoundingFlags aRounding)
+                 int32_t aAppUnitsPerDevUnit, ShapedTextFlags aFlags,
+                 RoundingFlags aRounding)
         : mLength(aLength),
           mFlags(aFlags),
           mScript(aScriptCode),
@@ -2123,15 +2130,15 @@ class gfxFont {
                    int(aRounding) + (aLanguage ? aLanguage->hash() : 0)),
           mTextIs8Bit(true),
           mRounding(aRounding) {
-      NS_ASSERTION(aFlags & mozilla::gfx::ShapedTextFlags::TEXT_IS_8BIT,
+      NS_ASSERTION(aFlags & ShapedTextFlags::TEXT_IS_8BIT,
                    "8-bit flag should have been set");
       mText.mSingle = aText;
     }
 
-    CacheHashKey(const char16_t* aText, uint32_t aLength, uint32_t aStringHash,
+    WordCacheKey(const char16_t* aText, uint32_t aLength, uint32_t aStringHash,
                  Script aScriptCode, nsAtom* aLanguage,
-                 int32_t aAppUnitsPerDevUnit,
-                 mozilla::gfx::ShapedTextFlags aFlags, RoundingFlags aRounding)
+                 int32_t aAppUnitsPerDevUnit, ShapedTextFlags aFlags,
+                 RoundingFlags aRounding)
         : mLength(aLength),
           mFlags(aFlags),
           mScript(aScriptCode),
@@ -2148,40 +2155,24 @@ class gfxFont {
       // and we'll have to use an 8-to-16bit comparison in KeyEquals.
       mText.mDouble = aText;
     }
+
+    bool Matches(const WordCacheKey& aLookup) const;
+
+    class HashPolicy {
+     public:
+      typedef WordCacheKey Key;
+      typedef WordCacheKey Lookup;
+      static mozilla::HashNumber hash(const Lookup& aLookup) {
+        return aLookup.mHashKey;
+      }
+      static bool match(const Key& aKey, const Lookup& aLookup);
+    };
   };
 
-  class CacheHashEntry : public PLDHashEntryHdr {
-   public:
-    typedef const CacheHashKey& KeyType;
-    typedef const CacheHashKey* KeyTypePointer;
-
-    // When constructing a new entry in the hashtable, the caller of Put()
-    // will fill us in.
-    explicit CacheHashEntry(KeyTypePointer aKey) {}
-    CacheHashEntry(const CacheHashEntry&) = delete;
-    CacheHashEntry& operator=(const CacheHashEntry&) = delete;
-    CacheHashEntry(CacheHashEntry&&) = default;
-    CacheHashEntry& operator=(CacheHashEntry&&) = default;
-
-    bool KeyEquals(const KeyTypePointer aKey) const;
-
-    static KeyTypePointer KeyToPointer(KeyType aKey) { return &aKey; }
-
-    static PLDHashNumber HashKey(const KeyTypePointer aKey) {
-      return aKey->mHashKey;
-    }
-
-    size_t SizeOfExcludingThis(mozilla::MallocSizeOf aMallocSizeOf) const {
-      return aMallocSizeOf(mShapedWord.get());
-    }
-
-    enum { ALLOW_MEMMOVE = true };
-
-    mozilla::UniquePtr<gfxShapedWord> mShapedWord;
-  };
-
-  mozilla::UniquePtr<nsTHashtable<CacheHashEntry>> mWordCache
-      MOZ_GUARDED_BY(mLock);
+  mozilla::UniquePtr<
+      mozilla::HashMap<WordCacheKey, mozilla::UniquePtr<gfxShapedWord>,
+                       WordCacheKey::HashPolicy>>
+      mWordCache MOZ_GUARDED_BY(mLock);
 
   static const uint32_t kShapedWordCacheMaxAge = 3;
 
@@ -2220,6 +2211,10 @@ class gfxFont {
 
   gfxFontStyle mStyle;
   mutable gfxFloat mAdjustedSize;
+
+  // Tracking adjustment to be applied for CSS px size mCachedTrackingSize.
+  gfxFloat mTracking = 0.0;
+  gfxFloat mCachedTrackingSize = -1.0;
 
   // Conversion factor from font units to dev units; note that this may be
   // zero (in the degenerate case where mAdjustedSize has become zero).
@@ -2324,6 +2319,7 @@ struct MOZ_STACK_CLASS TextRunDrawParams {
   bool isRTL = false;
   bool paintSVGGlyphs = true;
   bool allowGDI = true;
+  bool hasTextShadow = false;
 
   // MRU cache of color-font palettes being used by fonts in the run. We cache
   // these in the TextRunDrawParams so that we can avoid re-creating a new
@@ -2368,6 +2364,7 @@ struct MOZ_STACK_CLASS FontDrawParams {
   bool isVerticalFont;
   bool haveSVGGlyphs;
   bool haveColorGlyphs;
+  bool hasTextShadow;  // whether we're rendering with a text-shadow
 };
 
 struct MOZ_STACK_CLASS EmphasisMarkDrawParams {

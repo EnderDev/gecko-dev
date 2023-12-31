@@ -195,7 +195,7 @@ class TestCapabilityMatching(MarionetteTestCase):
 
         self.delete_session()
 
-        timeouts = {"implicit": 0, "pageLoad": 2.0, "script": 2 ** 53 - 1}
+        timeouts = {"implicit": 0, "pageLoad": 2.0, "script": 2**53 - 1}
         self.marionette.start_session({"timeouts": timeouts})
         self.assertIn("timeouts", self.marionette.session_capabilities)
         self.assertDictEqual(self.marionette.session_capabilities["timeouts"], timeouts)
@@ -264,3 +264,59 @@ class TestCapabilityMatching(MarionetteTestCase):
         self.marionette.start_session({"webSocketUrl": True})
         # Remote Agent is not active by default
         self.assertNotIn("webSocketUrl", self.marionette.session_capabilities)
+
+    def test_webauthn_extension_cred_blob(self):
+        for value in ["", 42, {}, []]:
+            print("  type {}".format(type(value)))
+            with self.assertRaises(errors.SessionNotCreatedException):
+                self.marionette.start_session({"webauthn:extension:credBlob": value})
+
+        self.delete_session()
+        self.marionette.start_session({"webauthn:extension:credBlob": True})
+        self.assertTrue(
+            self.marionette.session_capabilities["webauthn:extension:credBlob"]
+        )
+
+    def test_webauthn_extension_large_blob(self):
+        for value in ["", 42, {}, []]:
+            print("  type {}".format(type(value)))
+            with self.assertRaises(errors.SessionNotCreatedException):
+                self.marionette.start_session({"webauthn:extension:largeBlob": value})
+
+        self.delete_session()
+        self.marionette.start_session({"webauthn:extension:largeBlob": True})
+        self.assertTrue(
+            self.marionette.session_capabilities["webauthn:extension:largeBlob"]
+        )
+
+    def test_webauthn_extension_prf(self):
+        for value in ["", 42, {}, []]:
+            print("  type {}".format(type(value)))
+            with self.assertRaises(errors.SessionNotCreatedException):
+                self.marionette.start_session({"webauthn:extension:prf": value})
+
+        self.delete_session()
+        self.marionette.start_session({"webauthn:extension:prf": True})
+        self.assertTrue(self.marionette.session_capabilities["webauthn:extension:prf"])
+
+    def test_webauthn_extension_uvm(self):
+        for value in ["", 42, {}, []]:
+            print("  type {}".format(type(value)))
+            with self.assertRaises(errors.SessionNotCreatedException):
+                self.marionette.start_session({"webauthn:extension:uvm": value})
+
+        self.delete_session()
+        self.marionette.start_session({"webauthn:extension:uvm": True})
+        self.assertTrue(self.marionette.session_capabilities["webauthn:extension:uvm"])
+
+    def test_webauthn_virtual_authenticators(self):
+        for value in ["", 42, {}, []]:
+            print("  type {}".format(type(value)))
+            with self.assertRaises(errors.SessionNotCreatedException):
+                self.marionette.start_session({"webauthn:virtualAuthenticators": value})
+
+        self.delete_session()
+        self.marionette.start_session({"webauthn:virtualAuthenticators": True})
+        self.assertTrue(
+            self.marionette.session_capabilities["webauthn:virtualAuthenticators"]
+        )

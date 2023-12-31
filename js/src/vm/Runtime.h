@@ -306,8 +306,18 @@ struct JSRuntime {
   /* Space for interpreter frames. */
   js::MainThreadData<js::InterpreterStack> interpreterStack_;
 
+#ifdef ENABLE_PORTABLE_BASELINE_INTERP
+  /* Space for portable baseline interpreter frames. */
+  js::MainThreadData<js::PortableBaselineStack> portableBaselineStack_;
+#endif
+
  public:
   js::InterpreterStack& interpreterStack() { return interpreterStack_.ref(); }
+#ifdef ENABLE_PORTABLE_BASELINE_INTERP
+  js::PortableBaselineStack& portableBaselineStack() {
+    return portableBaselineStack_.ref();
+  }
+#endif
 
   /*
    * If non-null, another runtime guaranteed to outlive this one and whose
@@ -984,7 +994,7 @@ struct JSRuntime {
   // but Ion needs to be able to access addresses inside here, which should be
   // safe, as the actual cache lookups will be performed on the main thread
   // through jitted code.
-  js::MainThreadOrParseOrIonCompileData<js::RuntimeCaches> caches_;
+  js::MainThreadOrIonCompileData<js::RuntimeCaches> caches_;
 
  public:
   js::RuntimeCaches& caches() { return caches_.ref(); }
@@ -1017,8 +1027,7 @@ struct JSRuntime {
 
   // The supported module import assertions.
   // https://tc39.es/proposal-import-assertions/#sec-hostgetsupportedimportassertions
-  js::MainThreadOrParseData<JS::ImportAssertionVector>
-      supportedImportAssertions;
+  js::MainThreadData<JS::ImportAssertionVector> supportedImportAssertions;
 
   // Hooks called when script private references are created and destroyed.
   js::MainThreadData<JS::ScriptPrivateReferenceHook> scriptPrivateAddRefHook;

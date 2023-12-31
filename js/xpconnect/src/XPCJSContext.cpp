@@ -45,7 +45,6 @@
 #include "js/HelperThreadAPI.h"
 #include "js/Initialization.h"
 #include "js/MemoryMetrics.h"
-#include "js/OffThreadScriptCompilation.h"
 #include "js/WasmFeatures.h"
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/ContentChild.h"
@@ -63,7 +62,7 @@
 #include "mozilla/UniquePtrExtensions.h"
 #include "mozilla/Unused.h"
 #include "AccessCheck.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
 #include "nsAboutProtocolUtils.h"
 
 #include "GeckoProfiler.h"
@@ -778,14 +777,12 @@ static mozilla::Atomic<bool> sWeakRefsEnabled(false);
 static mozilla::Atomic<bool> sWeakRefsExposeCleanupSome(false);
 static mozilla::Atomic<bool> sIteratorHelpersEnabled(false);
 static mozilla::Atomic<bool> sShadowRealmsEnabled(false);
-#ifdef NIGHTLY_BUILD
+static mozilla::Atomic<bool> sWellFormedUnicodeStringsEnabled(true);
 static mozilla::Atomic<bool> sArrayGroupingEnabled(false);
-static mozilla::Atomic<bool> sWellFormedUnicodeStringsEnabled(false);
-#endif
-static mozilla::Atomic<bool> sChangeArrayByCopyEnabled(false);
-static mozilla::Atomic<bool> sArrayFromAsyncEnabled(true);
-#ifdef ENABLE_NEW_SET_METHODS
-static mozilla::Atomic<bool> sEnableNewSetMethods(false);
+#ifdef NIGHTLY_BUILD
+static mozilla::Atomic<bool> sNewSetMethodsEnabled(false);
+static mozilla::Atomic<bool> sArrayBufferTransferEnabled(false);
+static mozilla::Atomic<bool> sSymbolsAsWeakMapKeysEnabled(false);
 #endif
 
 static JS::WeakRefSpecifier GetWeakRefsEnabled() {
@@ -810,21 +807,30 @@ void xpc::SetPrefableRealmOptions(JS::RealmOptions& options) {
       .setWeakRefsEnabled(GetWeakRefsEnabled())
       .setIteratorHelpersEnabled(sIteratorHelpersEnabled)
       .setShadowRealmsEnabled(sShadowRealmsEnabled)
-#ifdef NIGHTLY_BUILD
-      .setArrayGroupingEnabled(sArrayGroupingEnabled)
       .setWellFormedUnicodeStringsEnabled(sWellFormedUnicodeStringsEnabled)
-#endif
-      .setChangeArrayByCopyEnabled(sChangeArrayByCopyEnabled)
-      .setArrayFromAsyncEnabled(sArrayFromAsyncEnabled)
-#ifdef ENABLE_NEW_SET_METHODS
-      .setNewSetMethodsEnabled(sEnableNewSetMethods)
+      .setArrayGroupingEnabled(sArrayGroupingEnabled)
+#ifdef NIGHTLY_BUILD
+      .setNewSetMethodsEnabled(sNewSetMethodsEnabled)
+      .setArrayBufferTransferEnabled(sArrayBufferTransferEnabled)
+      .setSymbolsAsWeakMapKeysEnabled(sSymbolsAsWeakMapKeysEnabled)
 #endif
       ;
 }
 
+void xpc::SetPrefableCompileOptions(JS::PrefableCompileOptions& options) {
+  options
+      .setSourcePragmas(StaticPrefs::javascript_options_source_pragmas())
+#ifdef NIGHTLY_BUILD
+      .setImportAssertions(
+          StaticPrefs::javascript_options_experimental_import_assertions())
+#endif
+      .setAsmJS(StaticPrefs::javascript_options_asmjs())
+      .setThrowOnAsmJSValidationFailure(
+          StaticPrefs::javascript_options_throw_on_asmjs_validation_failure());
+}
+
 void xpc::SetPrefableContextOptions(JS::ContextOptions& options) {
   options
-      .setAsmJS(Preferences::GetBool(JS_OPTIONS_DOT_STR "asmjs"))
 #ifdef FUZZING
       .setFuzzing(Preferences::GetBool(JS_OPTIONS_DOT_STR "fuzzing.enabled"))
 #endif
@@ -834,24 +840,17 @@ void xpc::SetPrefableContextOptions(JS::ContextOptions& options) {
       .setWasmIon(Preferences::GetBool(JS_OPTIONS_DOT_STR "wasm_optimizingjit"))
       .setWasmBaseline(
           Preferences::GetBool(JS_OPTIONS_DOT_STR "wasm_baselinejit"))
-#define WASM_FEATURE(NAME, LOWER_NAME, COMPILE_PRED, COMPILER_PRED, FLAG_PRED, \
-                     SHELL, PREF)                                              \
+#define WASM_FEATURE(NAME, LOWER_NAME, STAGE, COMPILE_PRED, COMPILER_PRED, \
+                     FLAG_PRED, FLAG_FORCE_ON, FLAG_FUZZ_ON, SHELL, PREF)  \
   .setWasm##NAME(Preferences::GetBool(JS_OPTIONS_DOT_STR "wasm_" PREF))
-          JS_FOR_WASM_FEATURES(WASM_FEATURE, WASM_FEATURE, WASM_FEATURE)
+          JS_FOR_WASM_FEATURES(WASM_FEATURE)
 #undef WASM_FEATURE
       .setWasmVerbose(Preferences::GetBool(JS_OPTIONS_DOT_STR "wasm_verbose"))
-      .setThrowOnAsmJSValidationFailure(Preferences::GetBool(
-          JS_OPTIONS_DOT_STR "throw_on_asmjs_validation_failure"))
-      .setSourcePragmas(
-          Preferences::GetBool(JS_OPTIONS_DOT_STR "source_pragmas"))
       .setAsyncStack(Preferences::GetBool(JS_OPTIONS_DOT_STR "asyncstack"))
       .setAsyncStackCaptureDebuggeeOnly(Preferences::GetBool(
-          JS_OPTIONS_DOT_STR "asyncstack_capture_debuggee_only"))
-#ifdef NIGHTLY_BUILD
-      .setImportAssertions(Preferences::GetBool(
-          JS_OPTIONS_DOT_STR "experimental.import_assertions"))
-#endif
-      ;
+          JS_OPTIONS_DOT_STR "asyncstack_capture_debuggee_only"));
+
+  SetPrefableCompileOptions(options.compileOptions());
 }
 
 // Mirrored value of javascript.options.self_hosted.use_shared_memory.
@@ -1010,21 +1009,19 @@ static void ReloadPrefsCallback(const char* pref, void* aXpccx) {
       JS_OPTIONS_DOT_STR "experimental.weakrefs.expose_cleanupSome");
   sShadowRealmsEnabled =
       Preferences::GetBool(JS_OPTIONS_DOT_STR "experimental.shadow_realms");
+  sWellFormedUnicodeStringsEnabled =
+      Preferences::GetBool(JS_OPTIONS_DOT_STR "well_formed_unicode_strings");
+  sArrayGroupingEnabled =
+      Preferences::GetBool(JS_OPTIONS_DOT_STR "array_grouping");
 #ifdef NIGHTLY_BUILD
   sIteratorHelpersEnabled =
       Preferences::GetBool(JS_OPTIONS_DOT_STR "experimental.iterator_helpers");
-  sArrayGroupingEnabled =
-      Preferences::GetBool(JS_OPTIONS_DOT_STR "experimental.array_grouping");
-  sWellFormedUnicodeStringsEnabled = Preferences::GetBool(
-      JS_OPTIONS_DOT_STR "experimental.well_formed_unicode_strings");
-#endif
-  sChangeArrayByCopyEnabled = Preferences::GetBool(
-      JS_OPTIONS_DOT_STR "experimental.enable_change_array_by_copy");
-  sArrayFromAsyncEnabled = Preferences::GetBool(
-      JS_OPTIONS_DOT_STR "experimental.enable_array_from_async");
-#ifdef ENABLE_NEW_SET_METHODS
-  sEnableNewSetMethods =
+  sNewSetMethodsEnabled =
       Preferences::GetBool(JS_OPTIONS_DOT_STR "experimental.new_set_methods");
+  sArrayBufferTransferEnabled = Preferences::GetBool(
+      JS_OPTIONS_DOT_STR "experimental.arraybuffer_transfer");
+  sSymbolsAsWeakMapKeysEnabled = Preferences::GetBool(
+      JS_OPTIONS_DOT_STR "experimental.symbols_as_weakmap_keys");
 #endif
 
 #ifdef JS_GC_ZEAL
@@ -1059,7 +1056,7 @@ static void ReloadPrefsCallback(const char* pref, void* aXpccx) {
   }
 
   JS_SetParallelParsingEnabled(
-      cx, Preferences::GetBool(JS_OPTIONS_DOT_STR "parallel_parsing"));
+      cx, StaticPrefs::javascript_options_parallel_parsing());
 }
 
 XPCJSContext::~XPCJSContext() {
@@ -1172,11 +1169,12 @@ CycleCollectedJSRuntime* XPCJSContext::CreateRuntime(JSContext* aCx) {
 
 class HelperThreadTaskHandler : public Task {
  public:
-  bool Run() override {
+  TaskResult Run() override {
     JS::RunHelperThreadTask();
-    return true;
+    return TaskResult::Complete;
   }
-  explicit HelperThreadTaskHandler() : Task(false, EventQueuePriority::Normal) {
+  explicit HelperThreadTaskHandler()
+      : Task(Kind::OffMainThreadOnly, EventQueuePriority::Normal) {
     // Bug 1703185: Currently all tasks are run at the same priority.
   }
 

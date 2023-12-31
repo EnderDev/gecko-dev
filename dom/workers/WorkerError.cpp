@@ -48,7 +48,7 @@
 #include "mozilla/fallible.h"
 #include "nsCOMPtr.h"
 #include "nsDebug.h"
-#include "nsGlobalWindowOuter.h"
+#include "nsGlobalWindowInner.h"
 #include "nsIConsoleService.h"
 #include "nsIScriptError.h"
 #include "nsScriptError.h"
@@ -226,7 +226,7 @@ class ReportGenericErrorRunnable final : public WorkerDebuggeeRunnable {
 void WorkerErrorBase::AssignErrorBase(JSErrorBase* aReport) {
   CopyUTF8toUTF16(MakeStringSpan(aReport->filename.c_str()), mFilename);
   mLineNumber = aReport->lineno;
-  mColumnNumber = aReport->column;
+  mColumnNumber = aReport->column.oneOriginValue();
   mErrorNumber = aReport->errorNumber;
 }
 
@@ -352,10 +352,8 @@ void WorkerErrorReport::ReportError(
             ErrorEvent::Constructor(aTarget, u"error"_ns, init);
         event->SetTrusted(true);
 
-        // TODO: Bug 1506441
         if (NS_FAILED(EventDispatcher::DispatchDOMEvent(
-                MOZ_KnownLive(ToSupports(globalScope)), nullptr, event, nullptr,
-                &status))) {
+                globalScope, nullptr, event, nullptr, &status))) {
           NS_WARNING("Failed to dispatch worker thread error event!");
           status = nsEventStatus_eIgnore;
         }

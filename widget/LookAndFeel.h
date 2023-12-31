@@ -109,47 +109,6 @@ class LookAndFeel {
     WindowsAccentColorInTitlebar,
 
     /*
-     * A Boolean value to determine whether the Windows default theme is
-     * being used.
-     *
-     * The value of this metric is not used on other platforms. These platforms
-     * should return NS_ERROR_NOT_IMPLEMENTED when queried for this metric.
-     */
-    WindowsDefaultTheme,
-
-    /*
-     * A Boolean value to determine whether the DWM compositor is being used
-     *
-     * This metric is not used on non-Windows platforms. These platforms
-     * should return NS_ERROR_NOT_IMPLEMENTED when queried for this metric.
-     */
-    DWMCompositor,
-
-    /*
-     * A Boolean value to determine whether Windows is themed (Classic vs.
-     * uxtheme)
-     *
-     * This is Windows-specific and is not implemented on other platforms
-     * (will return the default of NS_ERROR_FAILURE).
-     */
-    WindowsClassic,
-
-    /*
-     * A Boolean value to determine whether the current Windows desktop theme
-     * supports Aero Glass.
-     *
-     * This is Windows-specific and is not implemented on other platforms
-     * (will return the default of NS_ERROR_FAILURE).
-     */
-    WindowsGlass,
-
-    /*
-     * A Boolean value to determine whether the Mac graphite theme is
-     * being used.
-     */
-    MacGraphiteTheme,
-
-    /*
      * A Boolean value to determine whether the macOS Big Sur-specific
      * theming should be used.
      */
@@ -346,6 +305,9 @@ class LookAndFeel {
     /** Whether XUL panel animations are enabled. */
     PanelAnimations,
 
+    /* Whether we should hide the cursor while typing */
+    HideCursorWhileTyping,
+
     /*
      * Not an ID; used to define the range of valid IDs.  Must be last.
      */
@@ -409,27 +371,12 @@ class LookAndFeel {
 
   using FontID = mozilla::StyleSystemFont;
 
-  static bool WindowsNonNativeMenusEnabled();
-
   static ColorScheme SystemColorScheme() {
     return GetInt(IntID::SystemUsesDarkTheme) ? ColorScheme::Dark
                                               : ColorScheme::Light;
   }
 
   static bool IsDarkColor(nscolor);
-
-  enum class ChromeColorSchemeSetting { Light, Dark, System };
-  static ChromeColorSchemeSetting ColorSchemeSettingForChrome();
-  static ColorScheme ThemeDerivedColorSchemeForContent();
-
-  static ColorScheme ColorSchemeForChrome() {
-    MOZ_ASSERT(sColorSchemeInitialized);
-    return sChromeColorScheme;
-  }
-  static ColorScheme PreferredColorSchemeForContent() {
-    MOZ_ASSERT(sColorSchemeInitialized);
-    return sContentColorScheme;
-  }
 
   static ColorScheme ColorSchemeForStyle(
       const dom::Document&, const StyleColorSchemeFlags&,
@@ -576,20 +523,8 @@ class LookAndFeel {
       DoHandleGlobalThemeChange();
     }
   }
-  static void EnsureColorSchemesInitialized() {
-    if (!sColorSchemeInitialized) {
-      RecomputeColorSchemes();
-    }
-    MOZ_ASSERT(sColorSchemeInitialized);
-  }
-
-  static ColorScheme sChromeColorScheme;
-  static ColorScheme sContentColorScheme;
 
  protected:
-  static void RecomputeColorSchemes();
-  static bool sColorSchemeInitialized;
-
   static void DoHandleGlobalThemeChange();
   // Set to true when ThemeChanged needs to be called on mTheme (and other
   // global LookAndFeel.  This is used because mTheme is a service, so there's

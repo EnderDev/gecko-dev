@@ -1,5 +1,5 @@
-commit d52a5bbbe88b82bee0122689c161f1bf15fe8a0d
-Author: Linus Groh <mail@linusgroh.de>
-Date:   Thu Jun 8 14:19:36 2023 +0200
+commit 873f2604789e40f18e3e4dffd5a7bd6c4bed245f
+Author: André Bargull <andre.bargull@gmail.com>
+Date:   Mon Oct 16 13:28:25 2023 +0200
 
-    Replace arrow function with regular function in harness/sta.js
+    Update likely subtags tests for CLDR 44

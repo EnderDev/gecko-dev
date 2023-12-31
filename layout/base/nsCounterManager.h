@@ -212,7 +212,7 @@ inline bool nsCounterNode::IsUnitializedIncrementNode() {
 class nsCounterList : public nsGenConList {
  public:
   nsCounterList(nsAtom* aCounterName, mozilla::ContainStyleScope* aScope)
-      : nsGenConList(), mCounterName(aCounterName), mScope(aScope) {
+      : mCounterName(aCounterName), mScope(aScope) {
     MOZ_ASSERT(aScope);
   }
 
@@ -344,7 +344,7 @@ class nsCounterManager {
 
  private:
   mozilla::ContainStyleScope* mScope;
-  nsClassHashtable<nsRefPtrHashKey<nsAtom>, nsCounterList> mNames;
+  nsClassHashtable<nsAtomHashKey, nsCounterList> mNames;
 };
 
 #endif /* nsCounterManager_h_ */

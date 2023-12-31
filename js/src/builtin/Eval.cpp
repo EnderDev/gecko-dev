@@ -9,7 +9,7 @@
 #include "mozilla/HashFunctions.h"
 #include "mozilla/Range.h"
 
-#include "frontend/BytecodeCompilation.h"
+#include "frontend/BytecodeCompiler.h"  // frontend::CompileEvalScript
 #include "gc/HashUtil.h"
 #include "js/CompilationAndEvaluation.h"
 #include "js/friend/ErrorMessages.h"   // js::GetErrorMessage, JSMSG_*
@@ -181,8 +181,7 @@ static EvalJSONResult ParseEvalStringAsJSON(
                                            chars.begin().get() + 1U, len - 2);
 
   Rooted<JSONParser<CharT>> parser(
-      cx, JSONParser<CharT>(cx, jsonChars,
-                            JSONParser<CharT>::ParseType::AttemptForEval));
+      cx, cx, jsonChars, JSONParser<CharT>::ParseType::AttemptForEval);
   if (!parser.parse(rval)) {
     return EvalJSONResult::Failure;
   }
@@ -276,7 +275,7 @@ static bool EvalKernel(JSContext* cx, HandleValue v, EvalType evalType,
 
   if (!esg.foundScript()) {
     RootedScript maybeScript(cx);
-    unsigned lineno;
+    uint32_t lineno;
     const char* filename;
     bool mutedErrors;
     uint32_t pcOffset;

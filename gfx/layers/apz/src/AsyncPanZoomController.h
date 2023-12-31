@@ -316,9 +316,18 @@ class AsyncPanZoomController {
    * we asked gecko to paint. In cases where that last request has not yet been
    * processed, this is needed to transform input events properly into a space
    * gecko will understand.
+   *
+   * This is meant to be called in the context of computing a chain of
+   * transforms used for transforming event coordinates (specifically,
+   * APZCTreeManager::GetApzcToGeckoTransform() and
+   * HitTestingTreeNode::GetTransformToGecko()). The caller needs to pass
+   * in |aForLayersId| the LayersId of the content for which the chain will be
+   * used. If this content is in an out-of-process subdocument, the returned
+   * transform includes the painted resolution transform (see bug 1827330 for
+   * details).
    */
   Matrix4x4 GetTransformToLastDispatchedPaint(
-      const AsyncTransformComponents& aComponents = LayoutAndVisual) const;
+      const AsyncTransformComponents& aComponents, LayersId aForLayersId) const;
 
   /**
    * Returns the number of CSS pixels of checkerboard according to the metrics
@@ -421,7 +430,7 @@ class AsyncPanZoomController {
    */
   bool HasTreeManager(const APZCTreeManager* aTreeManager) const;
 
-  void StartAnimation(AsyncPanZoomAnimation* aAnimation);
+  void StartAnimation(already_AddRefed<AsyncPanZoomAnimation> aAnimation);
 
   /**
    * Cancels any currently running animation.
@@ -1114,6 +1123,7 @@ class AsyncPanZoomController {
   // notification.
   CSSToParentLayerScale mLastNotifiedZoom;
 
+  // Accessing mAnimation needs to be protected by mRecursiveMutex
   RefPtr<AsyncPanZoomAnimation> mAnimation;
 
   UniquePtr<OverscrollEffectBase> mOverscrollEffect;
@@ -1164,26 +1174,10 @@ class AsyncPanZoomController {
    * the current async transform state to callers.
    */
  public:
-  /**
-   * Allows consumers of async transforms to specify for what purpose they are
-   * using the async transform:
-   *
-   *   |eForHitTesting| is intended for hit-testing and other uses that need
-   *                    the most up-to-date transform, reflecting all events
-   *                    that have been processed so far, even if the transform
-   *                    is not yet reflected visually.
-   *   |eForCompositing| is intended for the transform that should be reflected
-   *                     visually.
-   *
-   * For example, if an APZC has metrics with the mForceDisableApz flag set,
-   * then the |eForCompositing| async transform will be empty, while the
-   * |eForHitTesting| async transform will reflect processed input events
-   * regardless of mForceDisableApz.
-   */
-  enum AsyncTransformConsumer {
-    eForHitTesting,
-    eForCompositing,
-  };
+  static const AsyncTransformConsumer eForEventHandling =
+      AsyncTransformConsumer::eForEventHandling;
+  static const AsyncTransformConsumer eForCompositing =
+      AsyncTransformConsumer::eForCompositing;
 
   /**
    * Get the current scroll offset of the scrollable frame corresponding
@@ -1229,13 +1223,32 @@ class AsyncPanZoomController {
       std::size_t aSampleIndex = 0) const;
 
   /**
-   * Returns the same transform as GetCurrentAsyncTransform(), but includes
-   * any transform due to axis over-scroll.
+   * A variant of GetCurrentAsyncTransform() intended for use when computing
+   * the screen-to-apzc and apzc-to-gecko transforms. This includes the
+   * overscroll transform, and additionally requires the caller to pass in
+   * the LayersId of the APZC whose screen-to-apzc or apzc-to-gecko transform
+   * is being computed in |aForLayersId|; if that APZC is in an out-of-process
+   * subdocument, and we are the zoomable (root-content) APZC, the returned
+   * transform includes the resolution at painting time, not just the async
+   * change to the resolution since painting. This is done because
+   * out-of-process content expects the screen-to-apzc and apzc-to-gecko
+   * transforms to include the painted resolution (see bug 1827330 for details).
+   *
+   * Should only be called from
+   * APZCTreeManager::{GetScreenToApzcTransform(),GetApzcToGeckoTransform()}.
    */
-  AsyncTransformComponentMatrix GetCurrentAsyncTransformWithOverscroll(
-      AsyncTransformConsumer aMode,
-      AsyncTransformComponents aComponents = LayoutAndVisual,
-      std::size_t aSampleIndex = 0) const;
+  AsyncTransformComponentMatrix GetAsyncTransformForInputTransformation(
+      AsyncTransformComponents aComponents, LayersId aForLayersId) const;
+
+  /**
+   * Returns a transform that scales by the resolution that was in place
+   * at "painting" (display list building) time. This is used as a
+   * component of some transforms related to APZCs in out-of-process
+   * subdocuments.
+   *
+   * Can only be called for the root content APZC.
+   */
+  Matrix4x4 GetPaintedResolutionTransform() const;
 
   AutoTArray<wr::SampledScrollOffset, 2> GetSampledScrollOffsets() const;
 
@@ -1260,6 +1273,11 @@ class AsyncPanZoomController {
   CSSRect GetScrollableRect() const {
     RecursiveMutexAutoLock lock(mRecursiveMutex);
     return mScrollMetadata.GetMetrics().GetScrollableRect();
+  }
+
+  CSSToParentLayerScale GetZoom() const {
+    RecursiveMutexAutoLock lock(mRecursiveMutex);
+    return Metrics().GetZoom();
   }
 
   // Returns the delta for the given InputData.
@@ -1460,6 +1478,13 @@ class AsyncPanZoomController {
    */
   void DispatchStateChangeNotification(PanZoomState aOldState,
                                        PanZoomState aNewState);
+
+  /**
+   * Send a TransformBegin notification followed by a TransformEnd
+   * notification.
+   */
+  void SendTransformBeginAndEnd();
+
   /**
    * Internal helpers for checking general state of this apzc.
    */
@@ -1583,13 +1608,15 @@ class AsyncPanZoomController {
 
   // Start a smooth-scrolling animation to the given destination, with physics
   // based on the prefs for the indicated origin.
-  void SmoothScrollTo(CSSSnapTarget&& aDestination,
+  void SmoothScrollTo(CSSSnapDestination&& aDestination,
                       ScrollTriggeredByScript aTriggeredByScript,
                       const ScrollOrigin& aOrigin);
 
+  ParentLayerPoint ConvertDestinationToDelta(CSSPoint& aDestination) const;
+
   // Start a smooth-scrolling animation to the given destination, with MSD
   // physics that is suited for scroll-snapping.
-  void SmoothMsdScrollTo(CSSSnapTarget&& aDestination,
+  void SmoothMsdScrollTo(CSSSnapDestination&& aDestination,
                          ScrollTriggeredByScript aTriggeredByScript);
 
   // Returns whether overscroll is allowed during an event.
@@ -1892,17 +1919,17 @@ class AsyncPanZoomController {
   // |aUnit| affects the snapping behaviour (see ScrollSnapUtils::
   // GetSnapPointForDestination).
   // Returns true iff. a target snap point was found.
-  Maybe<CSSSnapTarget> MaybeAdjustDeltaForScrollSnapping(
+  Maybe<CSSSnapDestination> MaybeAdjustDeltaForScrollSnapping(
       ScrollUnit aUnit, ScrollSnapFlags aSnapFlags, ParentLayerPoint& aDelta,
       CSSPoint& aStartPosition);
 
   // A wrapper function of MaybeAdjustDeltaForScrollSnapping for
   // ScrollWheelInput.
-  Maybe<CSSSnapTarget> MaybeAdjustDeltaForScrollSnappingOnWheelInput(
+  Maybe<CSSSnapDestination> MaybeAdjustDeltaForScrollSnappingOnWheelInput(
       const ScrollWheelInput& aEvent, ParentLayerPoint& aDelta,
       CSSPoint& aStartPosition);
 
-  Maybe<CSSSnapTarget> MaybeAdjustDestinationForScrollSnapping(
+  Maybe<CSSSnapDestination> MaybeAdjustDestinationForScrollSnapping(
       const KeyboardInput& aEvent, CSSPoint& aDestination,
       ScrollSnapFlags aSnapFlags);
 
@@ -1921,9 +1948,9 @@ class AsyncPanZoomController {
   // |aUnit| affects the snapping behaviour (see ScrollSnapUtils::
   // GetSnapPointForDestination). It should generally be determined by the
   // type of event that's triggering the scroll.
-  Maybe<CSSSnapTarget> FindSnapPointNear(const CSSPoint& aDestination,
-                                         ScrollUnit aUnit,
-                                         ScrollSnapFlags aSnapFlags);
+  Maybe<CSSSnapDestination> FindSnapPointNear(const CSSPoint& aDestination,
+                                              ScrollUnit aUnit,
+                                              ScrollSnapFlags aSnapFlags);
 
   // If |aOriginalEvent| crosses the touch-start tolerance threshold, split it
   // into two events: one that just reaches the threshold, and the remainder.

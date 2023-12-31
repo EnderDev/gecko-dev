@@ -30,7 +30,6 @@
 #include "modules/rtp_rtcp/source/rtp_rtcp_config.h"
 #include "modules/rtp_rtcp/source/rtp_rtcp_interface.h"
 #include "rtc_base/random.h"
-#include "rtc_base/rate_statistics.h"
 #include "rtc_base/synchronization/mutex.h"
 #include "rtc_base/thread_annotations.h"
 
@@ -40,6 +39,9 @@ class FrameEncryptorInterface;
 class RateLimiter;
 class RtcEventLog;
 class RtpPacketToSend;
+
+// Maximum amount of padding in RFC 3550 is 255 bytes.
+constexpr size_t kMaxPaddingLength = 255;
 
 class RTPSender {
  public:
@@ -139,6 +141,10 @@ class RTPSender {
   size_t MaxRtpPacketSize() const RTC_LOCKS_EXCLUDED(send_mutex_);
 
   uint32_t SSRC() const RTC_LOCKS_EXCLUDED(send_mutex_) { return ssrc_; }
+
+  const std::string& Rid() const RTC_LOCKS_EXCLUDED(send_mutex_) {
+    return rid_;
+  }
 
   absl::optional<uint32_t> FlexfecSsrc() const RTC_LOCKS_EXCLUDED(send_mutex_) {
     return flexfec_ssrc_;

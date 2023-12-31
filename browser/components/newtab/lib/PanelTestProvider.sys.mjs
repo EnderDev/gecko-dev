@@ -238,9 +238,6 @@ const MESSAGES = () => [
             hero_text: {
               string_id: "fx100-thank-you-hero-text",
             },
-            help_text: {
-              text: "Some sample help text",
-            },
             primary_button: {
               label: {
                 string_id: "mr2022-onboarding-pin-primary-button-label",
@@ -680,6 +677,44 @@ const MESSAGES = () => [
                 navigate: true,
               },
               has_arrow_icon: true,
+            },
+          },
+        },
+      ],
+    },
+  },
+  {
+    id: "TEST_FEATURE_TOUR",
+    template: "feature_callout",
+    groups: [],
+    content: {
+      id: "TEST_FEATURE_TOUR",
+      template: "multistage",
+      backdrop: "transparent",
+      transitions: false,
+      disableHistoryUpdates: true,
+      screens: [
+        {
+          id: "FEATURE_CALLOUT_1",
+          anchors: [
+            {
+              selector: "#PanelUI-menu-button",
+              panel_position: {
+                anchor_attachment: "bottomcenter",
+                callout_attachment: "topright",
+              },
+            },
+          ],
+          content: {
+            position: "callout",
+            title: { raw: "Panel Feature Callout" },
+            subtitle: { raw: "Hello!" },
+            primary_button: {
+              label: { raw: "Advance" },
+              action: { navigate: true },
+            },
+            dismiss_button: {
+              action: { dismiss: true },
             },
           },
         },

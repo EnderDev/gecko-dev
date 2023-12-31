@@ -301,6 +301,10 @@
       "type": "string"
     },
 
+    "DisableAccounts": {
+      "type": "boolean"
+    },
+
     "DisableAppUpdate": {
       "type": "boolean"
     },
@@ -674,6 +678,24 @@
           "type": "boolean"
         },
         "Snippets": {
+          "type": "boolean"
+        },
+        "Locked": {
+          "type": "boolean"
+        }
+      }
+    },
+
+    "FirefoxSuggest": {
+      "type": "object",
+      "properties": {
+        "WebSuggestions": {
+          "type": "boolean"
+        },
+        "SponsoredSuggestions": {
+          "type": "boolean"
+        },
+        "ImproveSuggest": {
           "type": "boolean"
         },
         "Locked": {
@@ -1120,6 +1142,10 @@
     },
 
     "PrimaryPassword": {
+      "type": "boolean"
+    },
+
+    "PrintingEnabled": {
       "type": "boolean"
     },
 

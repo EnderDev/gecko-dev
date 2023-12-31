@@ -5,6 +5,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include <string.h>
+#include "libavutil/dict.h"
+#include "libavcodec/avcodec.h"
 #ifdef __GNUC__
 #  include <unistd.h>
 #endif
@@ -15,10 +17,29 @@
 #include "mozilla/TaskQueue.h"
 #include "prsystem.h"
 #include "VideoUtils.h"
+#include "FFmpegLibs.h"
 
 namespace mozilla {
 
 StaticMutex FFmpegDataDecoder<LIBAV_VER>::sMutex;
+
+static bool IsVideoCodec(AVCodecID aCodecID) {
+  switch (aCodecID) {
+    case AV_CODEC_ID_H264:
+#if LIBAVCODEC_VERSION_MAJOR >= 54
+    case AV_CODEC_ID_VP8:
+#endif
+#if LIBAVCODEC_VERSION_MAJOR >= 55
+    case AV_CODEC_ID_VP9:
+#endif
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+    case AV_CODEC_ID_AV1:
+#endif
+      return true;
+    default:
+      return false;
+  }
+}
 
 FFmpegDataDecoder<LIBAV_VER>::FFmpegDataDecoder(FFmpegLibWrapper* aLib,
                                                 AVCodecID aCodecID)
@@ -28,6 +49,7 @@ FFmpegDataDecoder<LIBAV_VER>::FFmpegDataDecoder(FFmpegLibWrapper* aLib,
       mFrame(nullptr),
       mExtraData(nullptr),
       mCodecID(aCodecID),
+      mVideoCodec(IsVideoCodec(aCodecID)),
       mTaskQueue(TaskQueue::Create(
           GetMediaThreadPool(MediaThreadType::PLATFORM_DECODER),
           "FFmpegDataDecoder")),
@@ -72,7 +94,7 @@ MediaResult FFmpegDataDecoder<LIBAV_VER>::AllocateExtraData() {
 
 // Note: This doesn't run on the ffmpeg TaskQueue, it runs on some other media
 // taskqueue
-MediaResult FFmpegDataDecoder<LIBAV_VER>::InitDecoder() {
+MediaResult FFmpegDataDecoder<LIBAV_VER>::InitDecoder(AVDictionary** aOptions) {
   FFMPEG_LOG("Initialising FFmpeg decoder");
 
   AVCodec* codec = FindAVCodec(mLib, mCodecID);
@@ -124,7 +146,10 @@ MediaResult FFmpegDataDecoder<LIBAV_VER>::InitDecoder() {
   }
 #endif
 
-  if (mLib->avcodec_open2(mCodecContext, codec, nullptr) < 0) {
+  if (mLib->avcodec_open2(mCodecContext, codec, aOptions) < 0) {
+    if (mCodecContext->extradata) {
+      mLib->av_freep(&mCodecContext->extradata);
+    }
     mLib->av_freep(&mCodecContext);
     FFMPEG_LOG("  Couldn't open avcodec");
     return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
@@ -217,6 +242,7 @@ RefPtr<MediaDataDecoder::DecodePromise> FFmpegDataDecoder<LIBAV_VER>::Drain() {
 RefPtr<MediaDataDecoder::DecodePromise>
 FFmpegDataDecoder<LIBAV_VER>::ProcessDrain() {
   MOZ_ASSERT(mTaskQueue->IsOnCurrentThread());
+  FFMPEG_LOG("FFmpegDataDecoder: draining buffers");
   RefPtr<MediaRawData> empty(new MediaRawData());
   empty->mTimecode = mLastInputDts;
   bool gotFrame = false;

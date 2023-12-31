@@ -36,9 +36,11 @@ function sendFormAutofillMessage(name, data) {
 }
 
 async function removeAutofillRecords() {
-  let addresses = await sendFormAutofillMessage("FormAutofill:GetRecords", {
-    collectionName: "addresses",
-  });
+  let addresses = (
+    await sendFormAutofillMessage("FormAutofill:GetRecords", {
+      collectionName: "addresses",
+    })
+  ).records;
   if (addresses.length) {
     let observePromise = TestUtils.topicObserved(
       "formautofill-storage-changed"
@@ -48,9 +50,11 @@ async function removeAutofillRecords() {
     });
     await observePromise;
   }
-  let creditCards = await sendFormAutofillMessage("FormAutofill:GetRecords", {
-    collectionName: "creditCards",
-  });
+  let creditCards = (
+    await sendFormAutofillMessage("FormAutofill:GetRecords", {
+      collectionName: "creditCards",
+    })
+  ).records;
   if (creditCards.length) {
     let observePromise = TestUtils.topicObserved(
       "formautofill-storage-changed"
@@ -1346,7 +1350,7 @@ add_task(async function test_creditCardsSaved() {
           data: { collectionName: "creditCards" },
         })
       )
-      .resolves([creditcard])
+      .resolves({ records: [creditcard] })
       .callThrough();
 
     is(
@@ -1668,4 +1672,24 @@ add_task(async function check_isDeviceMigration() {
   }
 
   sandbox.restore();
+});
+
+add_task(async function check_primaryResolution() {
+  is(
+    typeof ASRouterTargeting.Environment.primaryResolution,
+    "object",
+    "Should return an object"
+  );
+
+  is(
+    typeof ASRouterTargeting.Environment.primaryResolution.width,
+    "number",
+    "Width property should return a number"
+  );
+
+  is(
+    typeof ASRouterTargeting.Environment.primaryResolution.height,
+    "number",
+    "Height property should return a number"
+  );
 });

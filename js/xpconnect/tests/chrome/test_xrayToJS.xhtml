@@ -32,8 +32,8 @@ https://bugzilla.mozilla.org/show_bug.cgi?id=933681
     }
   }
 
-  var { AppConstants } = SpecialPowers.ChromeUtils.import(
-    "resource://gre/modules/AppConstants.jsm"
+  var { AppConstants } = SpecialPowers.ChromeUtils.importESModule(
+    "resource://gre/modules/AppConstants.sys.mjs"
   );
   var isNightlyBuild = AppConstants.NIGHTLY_BUILD;
   var isReleaseOrBeta = AppConstants.RELEASE_OR_BETA;
@@ -247,7 +247,7 @@ https://bugzilla.mozilla.org/show_bug.cgi?id=933681
                       "getOwnPropertyNames", "getOwnPropertySymbols",
                       "preventExtensions", "freeze", "fromEntries", "isFrozen", "seal",
                       "isSealed", "assign", "getPrototypeOf", "values",
-                      "entries", "isExtensible", "hasOwn"]);
+                      "entries", "isExtensible", "hasOwn", "groupBy"]);
   gPrototypeProperties.Array =
     ["length", "toSource", "toString", "toLocaleString", "join", "reverse", "sort", "push",
       "pop", "shift", "unshift", "splice", "concat", "slice", "lastIndexOf", "indexOf",
@@ -290,7 +290,8 @@ https://bugzilla.mozilla.org/show_bug.cgi?id=933681
   gPrototypeProperties.Promise =
     ["constructor", "catch", "then", "finally", Symbol.toStringTag];
   gConstructorProperties.Promise =
-    constructorProps(["resolve", "reject", "all", "allSettled", "any", "race", Symbol.species]);
+    constructorProps(["resolve", "reject", "all", "allSettled", "any", "race",
+                      "withResolvers", Symbol.species]);
 
   gPrototypeProperties.ArrayBuffer =
     ["constructor", "byteLength", "slice", Symbol.toStringTag];
@@ -304,7 +305,7 @@ https://bugzilla.mozilla.org/show_bug.cgi?id=933681
     ["constructor", "size", Symbol.toStringTag, "get", "has", "set", "delete",
      "keys", "values", "clear", "forEach", "entries", Symbol.iterator];
   gConstructorProperties.Map =
-    constructorProps([Symbol.species]);
+    constructorProps(["groupBy", Symbol.species]);
 
   gPrototypeProperties.Set =
     ["constructor", "size", Symbol.toStringTag, "has", "add", "delete",

@@ -254,8 +254,13 @@ def set_base_revision_in_tgdiff(config, jobs):
             yield job
             continue
 
-        job["run"]["command-context"] = {
-            "base_rev": data["changesets"][0]["parents"][0]
+        job["task-context"] = {
+            "from-object": {
+                "base_rev": data["changesets"][0]["parents"][0],
+            },
+            "substitution-fields": [
+                "run.command",
+            ],
         }
         yield job
 
@@ -267,4 +272,29 @@ def set_worker_exit_code(config, jobs):
         worker.setdefault("retry-exit-status", [])
         if 137 not in worker["retry-exit-status"]:
             worker["retry-exit-status"].append(137)
+        yield job
+
+
+@transforms.add
+def remove_optimization_on_central(config, jobs):
+    """
+    For pushes to mozilla-central run all source-test tasks that are enabled for
+    code-review in order to have the code-review bot populate the DB according
+    with the push hash.
+    """
+    if (
+        config.params["project"] != "mozilla-central"
+        or config.params["tasks_for"] != "hg-push"
+    ):
+        yield from jobs
+        return
+
+    for job in jobs:
+        if not job.get("attributes", {}).get("code-review", False):
+            yield job
+            continue
+        if "when" not in job:
+            yield job
+            continue
+        del job["when"]
         yield job

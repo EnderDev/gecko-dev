@@ -689,7 +689,7 @@ void nsMenuPopupFrame::LayoutPopup(nsPresContext* aPresContext,
     // If there are no transitions, fire the popupshown event right away.
     nsCOMPtr<nsIRunnable> event =
         new nsXULPopupShownEvent(GetContent(), aPresContext);
-    mContent->OwnerDoc()->Dispatch(TaskCategory::Other, event.forget());
+    mContent->OwnerDoc()->Dispatch(event.forget());
   }
 }
 
@@ -759,6 +759,14 @@ void nsMenuPopupFrame::InitPositionFromAnchorAlign(const nsAString& aAnchor,
     mPopupAlignment = POPUPALIGNMENT_BOTTOMLEFT;
   else if (aAlign.EqualsLiteral("bottomright"))
     mPopupAlignment = POPUPALIGNMENT_BOTTOMRIGHT;
+  else if (aAlign.EqualsLiteral("leftcenter"))
+    mPopupAlignment = POPUPALIGNMENT_LEFTCENTER;
+  else if (aAlign.EqualsLiteral("rightcenter"))
+    mPopupAlignment = POPUPALIGNMENT_RIGHTCENTER;
+  else if (aAlign.EqualsLiteral("topcenter"))
+    mPopupAlignment = POPUPALIGNMENT_TOPCENTER;
+  else if (aAlign.EqualsLiteral("bottomcenter"))
+    mPopupAlignment = POPUPALIGNMENT_BOTTOMCENTER;
   else
     mPopupAlignment = POPUPALIGNMENT_NONE;
 
@@ -784,6 +792,7 @@ void nsMenuPopupFrame::InitializePopup(nsIContent* aAnchorContent,
   mIsTopLevelContextMenu = false;
   mVFlip = false;
   mHFlip = false;
+  mConstrainedByLayout = false;
   mAlignmentOffset = 0;
   mPositionedOffset = 0;
   mPositionedByMoveToRect = false;
@@ -982,10 +991,10 @@ void nsMenuPopupFrame::ShowPopup(bool aIsContextMenu) {
       menu->PopupOpened();
     }
 
-    // do we need an actual reflow here?
-    // is SetPopupPosition all that is needed?
-    PresShell()->FrameNeedsReflow(this, IntrinsicDirty::FrameAndAncestors,
-                                  NS_FRAME_IS_DIRTY);
+    // We skip laying out children if we're closed, so make sure that we do a
+    // full dirty reflow when opening to pick up any potential change.
+    PresShell()->FrameNeedsReflow(
+        this, IntrinsicDirty::FrameAncestorsAndDescendants, NS_FRAME_IS_DIRTY);
 
     if (mPopupType == PopupType::Menu) {
       nsCOMPtr<nsISound> sound(do_GetService("@mozilla.org/sound;1"));
@@ -1049,6 +1058,7 @@ void nsMenuPopupFrame::HidePopup(bool aDeselectMenu, nsPopupState aNewState,
 
   mIsOpenChanged = false;
   mHFlip = mVFlip = false;
+  mConstrainedByLayout = false;
 
   if (auto* widget = GetWidget()) {
     // Ideally we should call ClearCachedWebrenderResources but there are
@@ -1134,6 +1144,18 @@ nsPoint nsMenuPopupFrame::AdjustPositionForAnchorAlign(
   // margins of the popup on the edge on which it is aligned.
   nsMargin margin = GetMargin();
   switch (popupAlign) {
+    case POPUPALIGNMENT_LEFTCENTER:
+      pnt.MoveBy(margin.left, -aPrefSize.height / 2);
+      break;
+    case POPUPALIGNMENT_RIGHTCENTER:
+      pnt.MoveBy(-aPrefSize.width - margin.right, -aPrefSize.height / 2);
+      break;
+    case POPUPALIGNMENT_TOPCENTER:
+      pnt.MoveBy(-aPrefSize.width / 2, margin.top);
+      break;
+    case POPUPALIGNMENT_BOTTOMCENTER:
+      pnt.MoveBy(-aPrefSize.width / 2, -aPrefSize.height - margin.bottom);
+      break;
     case POPUPALIGNMENT_TOPRIGHT:
       pnt.MoveBy(-aPrefSize.width - margin.right, margin.top);
       break;
@@ -1556,6 +1578,7 @@ auto nsMenuPopupFrame::GetRects(const nsSize& aPrefSize) const -> Rects {
       if (result.mUsedRect.height > constraintRect->height) {
         result.mUsedRect.height = constraintRect->height;
       }
+      result.mConstrainedByLayout = true;
     }
 
     if (IS_WAYLAND_DISPLAY() && widget) {
@@ -1574,6 +1597,20 @@ auto nsMenuPopupFrame::GetRects(const nsSize& aPrefSize) const -> Rects {
         LOG_WAYLAND("Wayland constraint height [%p]:  %d to %d", widget,
                     result.mUsedRect.height, waylandSize.height);
         result.mUsedRect.height = waylandSize.height;
+      }
+      if (RefPtr<widget::Screen> s = widget->GetWidgetScreen()) {
+        const nsSize screenSize =
+            LayoutDeviceIntSize::ToAppUnits(s->GetAvailRect().Size(), a2d);
+        if (result.mUsedRect.height > screenSize.height) {
+          LOG_WAYLAND("Wayland constraint height to screen [%p]:  %d to %d",
+                      widget, result.mUsedRect.height, screenSize.height);
+          result.mUsedRect.height = screenSize.height;
+        }
+        if (result.mUsedRect.width > screenSize.width) {
+          LOG_WAYLAND("Wayland constraint widthto screen [%p]:  %d to %d",
+                      widget, result.mUsedRect.width, screenSize.width);
+          result.mUsedRect.width = screenSize.width;
+        }
       }
     }
 
@@ -1604,9 +1641,11 @@ auto nsMenuPopupFrame::GetRects(const nsSize& aPrefSize) const -> Rects {
         const bool endAligned =
             IsDirectionRTL()
                 ? mPopupAlignment == POPUPALIGNMENT_TOPLEFT ||
-                      mPopupAlignment == POPUPALIGNMENT_BOTTOMLEFT
+                      mPopupAlignment == POPUPALIGNMENT_BOTTOMLEFT ||
+                      mPopupAlignment == POPUPALIGNMENT_LEFTCENTER
                 : mPopupAlignment == POPUPALIGNMENT_TOPRIGHT ||
-                      mPopupAlignment == POPUPALIGNMENT_BOTTOMRIGHT;
+                      mPopupAlignment == POPUPALIGNMENT_BOTTOMRIGHT ||
+                      mPopupAlignment == POPUPALIGNMENT_RIGHTCENTER;
         result.mUsedRect.width = FlipOrResize(
             result.mUsedRect.x, result.mUsedRect.width, constraintRect->x,
             constraintRect->XMost(), result.mAnchorRect.x,
@@ -1619,7 +1658,8 @@ auto nsMenuPopupFrame::GetRects(const nsSize& aPrefSize) const -> Rects {
             constraintRect->YMost(), &result.mAlignmentOffset);
       } else {
         bool endAligned = mPopupAlignment == POPUPALIGNMENT_BOTTOMLEFT ||
-                          mPopupAlignment == POPUPALIGNMENT_BOTTOMRIGHT;
+                          mPopupAlignment == POPUPALIGNMENT_BOTTOMRIGHT ||
+                          mPopupAlignment == POPUPALIGNMENT_BOTTOMCENTER;
         result.mUsedRect.height = FlipOrResize(
             result.mUsedRect.y, result.mUsedRect.height, constraintRect->y,
             constraintRect->YMost(), result.mAnchorRect.y,
@@ -1710,6 +1750,7 @@ void nsMenuPopupFrame::PerformMove(const Rects& aRects) {
   mLastClientOffset = aRects.mClientOffset;
   mHFlip = aRects.mHFlip;
   mVFlip = aRects.mVFlip;
+  mConstrainedByLayout = aRects.mConstrainedByLayout;
 
   // If this is a noautohide popup, set the screen coordinates of the popup.
   // This way, the popup stays at the location where it was opened even when the
@@ -2136,8 +2177,7 @@ void nsMenuPopupFrame::MoveToAttributePosition() {
       this, IntrinsicDirty::FrameAncestorsAndDescendants, NS_FRAME_IS_DIRTY);
 }
 
-void nsMenuPopupFrame::DestroyFrom(nsIFrame* aDestructRoot,
-                                   PostDestroyData& aPostDestroyData) {
+void nsMenuPopupFrame::Destroy(DestroyContext& aContext) {
   // XXX: Currently we don't fire popuphidden for these popups, that seems wrong
   // but alas, also pre-existing.
   HidePopup(/* aDeselectMenu = */ false, ePopupClosed,
@@ -2147,7 +2187,7 @@ void nsMenuPopupFrame::DestroyFrom(nsIFrame* aDestructRoot,
     pm->PopupDestroyed(this);
   }
 
-  nsBlockFrame::DestroyFrom(aDestructRoot, aPostDestroyData);
+  nsBlockFrame::Destroy(aContext);
 }
 
 nsMargin nsMenuPopupFrame::GetMargin() const {

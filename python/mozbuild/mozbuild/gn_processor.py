@@ -180,6 +180,8 @@ def filter_gn_config(path, gn_result, sandbox_vars, input_vars, gn_target):
     cpus = {
         "arm64": "aarch64",
         "x64": "x86_64",
+        "mipsel": "mips32",
+        "mips64el": "mips64",
     }
     oses = {
         "android": "Android",
@@ -295,7 +297,6 @@ def process_gn_config(
 
     # Process all targets from the given gn project and its dependencies.
     for target_fullname, spec in six.iteritems(targets):
-
         target_path, target_name = target_info(target_fullname)
         context_attrs = {}
 
@@ -394,7 +395,7 @@ def process_gn_config(
             ".mm": ("CMMFLAGS", ["cflags", "cflags_objcc"]),
         }
         variables = (suffix_map[e] for e in extensions if e in suffix_map)
-        for (var, flag_keys) in variables:
+        for var, flag_keys in variables:
             flags = [
                 _f for _k in flag_keys for _f in spec.get(_k, []) if _f in mozilla_flags
             ]
@@ -520,7 +521,6 @@ def write_mozbuild(
     mozilla_flags,
     write_mozbuild_variables,
 ):
-
     all_mozbuild_results = []
 
     for gn_config in gn_configs:
@@ -624,7 +624,6 @@ def write_mozbuild(
             ("OS_TARGET", "CPU_ARCH"),
             ("OS_TARGET", "CPU_ARCH", "MOZ_X11"),
         ):
-
             conditions = set()
             for args in dirs_by_config.keys():
                 cond = tuple(((k, dict(args).get(k) or "") for k in attrs))
@@ -742,7 +741,7 @@ def main():
             if target_os in ("android", "linux", "win"):
                 target_cpus.append("x86")
             if target_os == "linux":
-                target_cpus.extend(["ppc64", "riscv64"])
+                target_cpus.extend(["ppc64", "riscv64", "mipsel", "mips64el"])
             for target_cpu in target_cpus:
                 vars = {
                     "host_cpu": "x64",

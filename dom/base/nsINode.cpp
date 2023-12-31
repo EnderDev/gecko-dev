@@ -103,7 +103,7 @@
 #include "nsWrapperCacheInlines.h"
 #include "WrapperFactory.h"
 #include <algorithm>
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
 #include "GeometryUtils.h"
 #include "nsIAnimationObserver.h"
 #include "nsChildContentList.h"
@@ -227,6 +227,7 @@ nsINode::nsINode(already_AddRefed<mozilla::dom::NodeInfo>&& aNodeInfo)
       mPreviousOrLastSibling(nullptr),
       mSubtreeRoot(this),
       mSlots(nullptr) {
+  SetIsOnMainThread();
 }
 #endif
 
@@ -1532,7 +1533,7 @@ static void AdoptNodeIntoOwnerDoc(nsINode* aParent, nsINode* aNode,
 
   Document* doc = aParent->OwnerDoc();
 
-  DebugOnly<nsINode*> adoptedNode = doc->AdoptNode(*aNode, aError);
+  DebugOnly<nsINode*> adoptedNode = doc->AdoptNode(*aNode, aError, true);
 
 #ifdef DEBUG
   if (!aError.Failed()) {
@@ -2762,7 +2763,7 @@ nsINode* nsINode::ReplaceOrInsertBefore(bool aReplace, nsINode* aNewChild,
   // ownerDocument according to the DOM spec, and we need to allow
   // inserting them w/o calling AdoptNode().
   Document* doc = OwnerDoc();
-  if (doc != newContent->OwnerDoc()) {
+  if (doc != newContent->OwnerDoc() && nodeType != DOCUMENT_FRAGMENT_NODE) {
     AdoptNodeIntoOwnerDoc(this, aNewChild, aError);
     if (aError.Failed()) {
       return nullptr;
@@ -3450,6 +3451,9 @@ already_AddRefed<nsINode> nsINode::CloneAndAdopt(
       EventListenerManager* elm = aNode->GetExistingListenerManager();
       if (elm) {
         window->SetMutationListeners(elm->MutationListenerBits());
+        if (elm->MayHaveDOMActivateListeners()) {
+          window->SetHasDOMActivateEventListeners();
+        }
         if (elm->MayHavePaintEventListener()) {
           window->SetHasPaintEventListeners();
         }

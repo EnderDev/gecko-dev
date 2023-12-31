@@ -65,7 +65,7 @@ class RecordedDrawTargetCreation
   BackendType mBackendType;
   IntRect mRect;
   SurfaceFormat mFormat;
-  bool mHasExistingData;
+  bool mHasExistingData = false;
   RefPtr<SourceSurface> mExistingData;
 
  private:
@@ -2132,6 +2132,9 @@ inline bool RecordedCreateDrawTargetForFilter::PlayEvent(
 
   RefPtr<DrawTarget> newDT =
       dt->CreateSimilarDrawTarget(transformedRect.Size(), mFormat);
+  if (!newDT) {
+    return false;
+  }
   newDT =
       gfx::Factory::CreateOffsetDrawTarget(newDT, transformedRect.TopLeft());
 
@@ -3110,7 +3113,7 @@ inline bool RecordedPathCreation::PlayEvent(Translator* aTranslator) const {
   }
 
   RefPtr<PathBuilder> builder = drawTarget->CreatePathBuilder(mFillRule);
-  if (!mPathOps->StreamToSink(*builder)) {
+  if (!mPathOps->CheckedStreamToSink(*builder)) {
     return false;
   }
 
@@ -3206,6 +3209,13 @@ RecordedSourceSurfaceCreation::RecordedSourceSurfaceCreation(S& aStream)
   ReadElement(aStream, mSize);
   ReadElementConstrained(aStream, mFormat, SurfaceFormat::A8R8G8B8_UINT32,
                          SurfaceFormat::UNKNOWN);
+
+  if (!Factory::AllowedSurfaceSize(mSize)) {
+    gfxCriticalNote << "RecordedSourceSurfaceCreation read invalid size "
+                    << mSize;
+    aStream.SetIsBad();
+  }
+
   if (!aStream.good()) {
     return;
   }

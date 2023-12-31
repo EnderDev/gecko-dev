@@ -6,6 +6,7 @@
 
 include protocol PBackgroundStarter;
 include protocol PBrowser;
+include protocol PClipboardReadRequest;
 include protocol PClipboardWriteRequest;
 include protocol PCompositorManager;
 include protocol PContentPermissionRequest;
@@ -19,7 +20,6 @@ include protocol PHeapSnapshotTempFileHelper;
 include protocol PProcessHangMonitor;
 include protocol PImageBridge;
 include protocol PRemotePrintJob;
-include protocol PLoginReputation;
 include protocol PMedia;
 include protocol PNecko;
 include protocol PStreamFilter;
@@ -278,7 +278,7 @@ struct BlobURLRegistrationData
   nsCString url;
   IPCBlob blob;
   nullable nsIPrincipal principal;
-  nsID? agentClusterId;
+  nsCString partitionKey;
   bool revoked;
 };
 
@@ -462,8 +462,8 @@ struct IPCImage {
     ImageIntSize size;
 };
 
-union IPCTransferableDataOrError {
-    IPCTransferableData;
+union PClipboardReadRequestOrError {
+    PClipboardReadRequest;
     nsresult;
 };
 
@@ -476,6 +476,7 @@ union IPCTransferableDataOrError {
 sync protocol PContent
 {
     manages PBrowser;
+    manages PClipboardReadRequest;
     manages PClipboardWriteRequest;
     manages PContentPermissionRequest;
     manages PCycleCollectWithLogs;
@@ -499,7 +500,6 @@ sync protocol PContent
     manages PURLClassifier;
     manages PURLClassifierLocal;
     manages PScriptCache;
-    manages PLoginReputation;
     manages PSessionStorageObserver;
     manages PBenchmarkStorage;
 
@@ -867,8 +867,7 @@ child:
     async GetFilesResponse(nsID aID, GetFilesResponseResult aResult);
 
     async BlobURLRegistration(nsCString aURI, IPCBlob aBlob,
-                              nullable nsIPrincipal aPrincipal,
-                              nsID? aAgentClusterId);
+                              nullable nsIPrincipal aPrincipal, nsCString aPartitionKey);
 
     async BlobURLUnregistration(nsCString aURI);
 
@@ -1046,10 +1045,11 @@ child:
     // details.
     async InitNextGenLocalStorageEnabled(bool enabled);
 
-  async PRemotePrintJob();
+    async PRemotePrintJob();
+
+    async PClipboardReadRequest(nsCString[] aTypes);
 
 parent:
-
     async SynchronizeLayoutHistoryState(MaybeDiscardedBrowsingContext aContext,
                                         nullable nsILayoutHistoryState aState);
 
@@ -1114,8 +1114,6 @@ parent:
         returns (bool success);
 
     async PURLClassifierLocal(nullable nsIURI uri, IPCURLClassifierFeature[] features);
-
-    async PLoginReputation(nullable nsIURI formURI);
 
     async PSessionStorageObserver();
 
@@ -1185,7 +1183,7 @@ parent:
     // Pass true for aShouldCloseWindow to specify that aContext was opened specifically
     // for this load, and should be closed once we've handled it.
     async PExternalHelperApp(nullable nsIURI uri,
-                             LoadInfoArgs? loadInfoArgs,
+                             LoadInfoArgs loadInfoArgs,
                              nsCString aMimeContentType,
                              nsCString aContentDisposition,
                              uint32_t aContentDispositionHint,
@@ -1221,9 +1219,9 @@ parent:
     // Returns a list of formats supported by the clipboard
     sync GetExternalClipboardFormats(int32_t aWhichClipboard, bool aPlainTextOnly) returns (nsCString[] aTypes);
 
-    // Given a list of supported types, returns the clipboard data for the
-    // first type that matches.
-    async GetClipboardAsync(nsCString[] aTypes, int32_t aWhichClipboard) returns (IPCTransferableDataOrError transferableData);
+    // Requests getting data from clipboard.
+    async GetClipboardAsync(nsCString[] aTypes, int32_t aWhichClipboard)
+        returns (PClipboardReadRequestOrError aClipboardReadRequest);
 
     // Clears the clipboard.
     async EmptyClipboard(int32_t aWhichClipboard);
@@ -1231,11 +1229,6 @@ parent:
     // Returns true if data of one of the specified types is on the clipboard.
     sync ClipboardHasType(nsCString[] aTypes, int32_t aWhichClipboard)
         returns (bool hasType);
-
-    // Given a list of supported types, returns a list of types that clipboard
-    // constains the data for the specified type.
-    async ClipboardHasTypesAsync(nsCString [] aTypes, int32_t aWhichClipboard)
-        returns (nsCString [] types);
 
     /**
      * Notify the parent that the child has started a clipboard write request,
@@ -1245,36 +1238,16 @@ parent:
      */
     async PClipboardWriteRequest(int32_t aClipboardType);
 
-    // 'Play', 'Beep' and 'PlayEventSound' are the only nsISound methods used in
-    // the content process.
-    [Compress] async PlaySound(nullable nsIURI aURL);
-    [Compress] async Beep();
-    [Compress] async PlayEventSound(uint32_t aEventId);
-
     sync GetIconForExtension(nsCString aFileExt, uint32_t aIconSize)
         returns (uint8_t[] bits);
 
     // Tell the parent that the child has gone idle for the first time.
     async FirstIdle();
 
-    async DeviceReset();
-
     async CopyFavicon(nullable nsIURI oldURI, nullable nsIURI newURI, bool isPrivate);
 
     async FindImageText(IPCImage image, nsCString[] languages)
         returns (TextRecognitionResultOrError result);
-
-    /**
-     * Notifies the parent about a recording device is starting or shutdown.
-     * @param recordingStatus starting or shutdown
-     * @param pageURL URL that request that changing the recording status
-     * @param isAudio recording start with microphone
-     * @param isVideo recording start with camera
-     */
-    async RecordingDeviceEvents(nsString recordingStatus,
-                                nsString pageURL,
-                                bool isAudio,
-                                bool isVideo);
 
     // Graphics errors
     async GraphicsError(nsCString aError);
@@ -1583,8 +1556,6 @@ parent:
       nullable nsIReferrerInfo aReferrerInfo,
       OriginAttributes aOriginAttributes);
 
-    sync RemovePermission(nullable nsIPrincipal principal, nsCString permissionType) returns (nsresult rv);
-
     /**
      * Tell the parent that a decoder's' benchmark has been completed.
      * The result can then be stored in permanent storage.
@@ -1613,8 +1584,7 @@ parent:
      async DeleteGetFilesRequest(nsID aID);
 
      async StoreAndBroadcastBlobURLRegistration(nsCString url, IPCBlob blob,
-                                                nullable nsIPrincipal principal,
-                                                nsID? aAgentClusterId);
+                                                nullable nsIPrincipal principal, nsCString aPartitionKey);
 
      async UnstoreAndBroadcastBlobURLUnregistration(nsCString url, nullable nsIPrincipal principal);
 
@@ -1818,7 +1788,7 @@ parent:
                              nullable nsIPrincipal aLoadingPrincipal,
                              OriginAttributes aOriginAttributes,
                              uint64_t aInnerWindowId,
-                             nsID? aAgentClusterId)
+                             nsCString aPartitionKey)
       returns (BlobURLDataRequestResult aResult);
 
     async SetActiveSessionHistoryEntry(MaybeDiscardedBrowsingContext context,
@@ -1853,7 +1823,7 @@ both:
      * loadInfo is passed in order to enforce same-origin security checks
      * aData must be non-null.
      */
-    async ReportFrameTimingData(LoadInfoArgs? loadInfo, nsString entryName,
+    async ReportFrameTimingData(LoadInfoArgs loadInfo, nsString entryName,
                                 nsString initiatorType,
                                 UniquePtr<PerformanceTimingData> aData);
 

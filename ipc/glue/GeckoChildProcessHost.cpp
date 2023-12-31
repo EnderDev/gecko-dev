@@ -7,6 +7,7 @@
 #include "GeckoChildProcessHost.h"
 
 #include "base/command_line.h"
+#include "base/process.h"
 #include "base/process_util.h"
 #include "base/string_util.h"
 #include "base/task.h"
@@ -415,7 +416,7 @@ GeckoChildProcessHost::GeckoChildProcessHost(GeckoProcessType aProcessType,
   }
 #endif
 #if defined(MOZ_ENABLE_FORKSERVER)
-  if (aProcessType == GeckoProcessType_Content && ForkServiceChild::Get()) {
+  if (aProcessType != GeckoProcessType_ForkServer && ForkServiceChild::Get()) {
     mLaunchOptions->use_forkserver = true;
   }
 #endif
@@ -755,10 +756,15 @@ bool GeckoChildProcessHost::AsyncLaunch(std::vector<std::string> aExtraOpts) {
 
 #ifdef XP_MACOSX
                     this->mChildTask = aResults.mChildTask;
-                    if (mNodeChannel) {
-                      mNodeChannel->SetMachTaskPort(this->mChildTask);
-                    }
 #endif
+
+                    if (mNodeChannel) {
+                      mNodeChannel->SetOtherPid(
+                          base::GetProcId(this->mChildProcessHandle));
+#ifdef XP_MACOSX
+                      mNodeChannel->SetMachTaskPort(this->mChildTask);
+#endif
+                    }
                   }
 #if defined(XP_WIN) && defined(MOZ_SANDBOX)
                   this->mSandboxBroker = std::move(aResults.mSandboxBroker);
@@ -875,7 +881,8 @@ void GeckoChildProcessHost::InitializeChannel(
   // Create the IPC channel which will be used for communication with this
   // process.
   mozilla::UniquePtr<IPC::Channel> channel = MakeUnique<IPC::Channel>(
-      std::move(aServerHandle), IPC::Channel::MODE_SERVER);
+      std::move(aServerHandle), IPC::Channel::MODE_SERVER,
+      base::kInvalidProcessId);
 #if defined(XP_WIN)
   channel->StartAcceptingHandles(IPC::Channel::MODE_SERVER);
 #elif defined(XP_DARWIN)
@@ -1248,19 +1255,23 @@ Result<Ok, LaunchError> PosixProcessLauncher::DoSetup() {
 
   mChildArgv.insert(mChildArgv.end(), mExtraOpts.begin(), mExtraOpts.end());
 
-  if (mProcessType != GeckoProcessType_GMPlugin) {
-#  if defined(MOZ_WIDGET_ANDROID)
-    if (Omnijar::IsInitialized()) {
-      // Make sure that child processes can find the omnijar
-      // See XRE_InitCommandLine in nsAppRunner.cpp
-      nsAutoCString path;
-      nsCOMPtr<nsIFile> file = Omnijar::GetPath(Omnijar::GRE);
-      if (file && NS_SUCCEEDED(file->GetNativePath(path))) {
-        mChildArgv.push_back("-greomni");
-        mChildArgv.push_back(path.get());
-      }
+  if ((mProcessType == GeckoProcessType_Content ||
+       mProcessType == GeckoProcessType_ForkServer) &&
+      Omnijar::IsInitialized()) {
+    // Make sure that child processes can find the omnijar, if they
+    // use full XPCOM.  See Omnijar::ChildProcessInit and its callers.
+    nsAutoCString path;
+    nsCOMPtr<nsIFile> greFile = Omnijar::GetPath(Omnijar::GRE);
+    if (greFile && NS_SUCCEEDED(greFile->GetNativePath(path))) {
+      geckoargs::sGREOmni.Put(path.get(), mChildArgv);
     }
-#  endif
+    nsCOMPtr<nsIFile> appFile = Omnijar::GetPath(Omnijar::APP);
+    if (appFile && NS_SUCCEEDED(appFile->GetNativePath(path))) {
+      geckoargs::sAppOmni.Put(path.get(), mChildArgv);
+    }
+  }
+
+  if (mProcessType != GeckoProcessType_GMPlugin) {
     // Add the application directory path (-appdir path)
 #  ifdef XP_MACOSX
     AddAppDirToCommandLine(mChildArgv, mAppDir, mProfileDir);

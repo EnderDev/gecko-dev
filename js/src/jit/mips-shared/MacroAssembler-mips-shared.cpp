@@ -1825,10 +1825,10 @@ void MacroAssembler::comment(const char* msg) { Assembler::comment(msg); }
 // ===============================================================
 // WebAssembly
 
-CodeOffset MacroAssembler::wasmTrapInstruction() {
-  CodeOffset offset(currentOffset());
+FaultingCodeOffset MacroAssembler::wasmTrapInstruction() {
+  FaultingCodeOffset fco = FaultingCodeOffset(currentOffset());
   as_teq(zero, zero, WASM_TRAP);
-  return offset;
+  return fco;
 }
 
 void MacroAssembler::wasmTruncateDoubleToInt32(FloatRegister input,
@@ -2089,8 +2089,8 @@ void MacroAssembler::wasmUnalignedStoreFP(const wasm::MemoryAccessDesc& access,
 void MacroAssemblerMIPSShared::wasmLoadImpl(
     const wasm::MemoryAccessDesc& access, Register memoryBase, Register ptr,
     Register ptrScratch, AnyRegister output, Register tmp) {
+  access.assertOffsetInGuardPages();
   uint32_t offset = access.offset();
-  MOZ_ASSERT(offset < asMasm().wasmMaxOffsetGuardLimit());
   MOZ_ASSERT_IF(offset, ptrScratch != InvalidReg);
 
   // Maybe add the offset.
@@ -2171,8 +2171,8 @@ void MacroAssemblerMIPSShared::wasmLoadImpl(
 void MacroAssemblerMIPSShared::wasmStoreImpl(
     const wasm::MemoryAccessDesc& access, AnyRegister value,
     Register memoryBase, Register ptr, Register ptrScratch, Register tmp) {
+  access.assertOffsetInGuardPages();
   uint32_t offset = access.offset();
-  MOZ_ASSERT(offset < asMasm().wasmMaxOffsetGuardLimit());
   MOZ_ASSERT_IF(offset, ptrScratch != InvalidReg);
 
   // Maybe add the offset.

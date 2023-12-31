@@ -37,8 +37,9 @@
 #include "vm/PlainObject.h"  // js::PlainObject
 #include "vm/Uint8Clamped.h"
 #include "wasm/WasmCode.h"
+#include "wasm/WasmFeatures.h"  // for wasm::ReportSimdAnalysis
 
-#include "vm/JSAtom-inl.h"
+#include "vm/JSAtomUtils-inl.h"  // TypeName
 #include "wasm/WasmInstance-inl.h"
 
 using namespace js;
@@ -781,12 +782,6 @@ void MDefinition::dumpLocation() const {
 }
 #endif
 
-#ifdef DEBUG
-bool MDefinition::trackedSiteMatchesBlock(const BytecodeSite* site) const {
-  return site == block()->trackedSite();
-}
-#endif
-
 #if defined(DEBUG) || defined(JS_JITSPEW)
 size_t MDefinition::useCount() const {
   size_t count = 0;
@@ -1216,9 +1211,9 @@ void MConstant::printOpcode(GenericPrinter& out) const {
     case MIRType::Object:
       if (toObject().is<JSFunction>()) {
         JSFunction* fun = &toObject().as<JSFunction>();
-        if (fun->displayAtom()) {
+        if (fun->maybePartialDisplayAtom()) {
           out.put("function ");
-          EscapedStringPrinter(out, fun->displayAtom(), 0);
+          EscapedStringPrinter(out, fun->maybePartialDisplayAtom(), 0);
         } else {
           out.put("unnamed function");
         }
@@ -1379,7 +1374,7 @@ bool MWasmFloatConstant::congruentTo(const MDefinition* ins) const {
 }
 
 HashNumber MWasmNullConstant::valueHash() const {
-  return ConstantValueHash(MIRType::RefOrNull, 0);
+  return ConstantValueHash(MIRType::WasmAnyRef, 0);
 }
 
 #ifdef JS_JITSPEW
@@ -1873,6 +1868,13 @@ MGoto* MGoto::New(TempAllocator::Fallible alloc, MBasicBlock* target) {
 }
 
 MGoto* MGoto::New(TempAllocator& alloc) { return new (alloc) MGoto(nullptr); }
+
+MDefinition* MBox::foldsTo(TempAllocator& alloc) {
+  if (input()->isUnbox()) {
+    return input()->toUnbox()->input();
+  }
+  return this;
+}
 
 #ifdef JS_JITSPEW
 void MUnbox::printOpcode(GenericPrinter& out) const {
@@ -2708,36 +2710,6 @@ MDefinition* MMinMax::foldsTo(TempAllocator& alloc) {
     return lhs();
   }
 
-  // Fold min/max operations with same inputs.
-  if (lhs()->isMinMax() || rhs()->isMinMax()) {
-    auto* other = lhs()->isMinMax() ? lhs()->toMinMax() : rhs()->toMinMax();
-    auto* operand = lhs()->isMinMax() ? rhs() : lhs();
-
-    if (operand == other->lhs() || operand == other->rhs()) {
-      if (isMax() == other->isMax()) {
-        // min(x, min(x, y)) = min(x, y)
-        // max(x, max(x, y)) = max(x, y)
-        return other;
-      }
-      if (!IsFloatingPointType(type())) {
-        // When neither value is NaN:
-        // max(x, min(x, y)) = x
-        // min(x, max(x, y)) = x
-
-        // Ensure that any bailouts that we depend on to guarantee that |y| is
-        // Int32 are not removed.
-        auto* otherOp = operand == other->lhs() ? other->rhs() : other->lhs();
-        otherOp->setGuardRangeBailoutsUnchecked();
-
-        return operand;
-      }
-    }
-  }
-
-  if (!lhs()->isConstant() && !rhs()->isConstant()) {
-    return this;
-  }
-
   auto foldConstants = [&alloc](MDefinition* lhs, MDefinition* rhs,
                                 bool isMax) -> MConstant* {
     MOZ_ASSERT(lhs->type() == rhs->type());
@@ -2769,6 +2741,77 @@ MDefinition* MMinMax::foldsTo(TempAllocator& alloc) {
     MOZ_ASSERT(lhs->type() == MIRType::Double);
     return MConstant::New(alloc, DoubleValue(result));
   };
+
+  // Try to fold the following patterns when |x| and |y| are constants.
+  //
+  // min(min(x, z), min(y, z)) = min(min(x, y), z)
+  // max(max(x, z), max(y, z)) = max(max(x, y), z)
+  // max(min(x, z), min(y, z)) = min(max(x, y), z)
+  // min(max(x, z), max(y, z)) = max(min(x, y), z)
+  if (lhs()->isMinMax() && rhs()->isMinMax()) {
+    do {
+      auto* left = lhs()->toMinMax();
+      auto* right = rhs()->toMinMax();
+      if (left->isMax() != right->isMax()) {
+        break;
+      }
+
+      MDefinition* x;
+      MDefinition* y;
+      MDefinition* z;
+      if (left->lhs() == right->lhs()) {
+        std::tie(x, y, z) = std::tuple{left->rhs(), right->rhs(), left->lhs()};
+      } else if (left->lhs() == right->rhs()) {
+        std::tie(x, y, z) = std::tuple{left->rhs(), right->lhs(), left->lhs()};
+      } else if (left->rhs() == right->lhs()) {
+        std::tie(x, y, z) = std::tuple{left->lhs(), right->rhs(), left->rhs()};
+      } else if (left->rhs() == right->rhs()) {
+        std::tie(x, y, z) = std::tuple{left->lhs(), right->lhs(), left->rhs()};
+      } else {
+        break;
+      }
+
+      if (!x->isConstant() || !x->toConstant()->isTypeRepresentableAsDouble() ||
+          !y->isConstant() || !y->toConstant()->isTypeRepresentableAsDouble()) {
+        break;
+      }
+
+      if (auto* folded = foldConstants(x, y, isMax())) {
+        block()->insertBefore(this, folded);
+        return MMinMax::New(alloc, folded, z, type(), left->isMax());
+      }
+    } while (false);
+  }
+
+  // Fold min/max operations with same inputs.
+  if (lhs()->isMinMax() || rhs()->isMinMax()) {
+    auto* other = lhs()->isMinMax() ? lhs()->toMinMax() : rhs()->toMinMax();
+    auto* operand = lhs()->isMinMax() ? rhs() : lhs();
+
+    if (operand == other->lhs() || operand == other->rhs()) {
+      if (isMax() == other->isMax()) {
+        // min(x, min(x, y)) = min(x, y)
+        // max(x, max(x, y)) = max(x, y)
+        return other;
+      }
+      if (!IsFloatingPointType(type())) {
+        // When neither value is NaN:
+        // max(x, min(x, y)) = x
+        // min(x, max(x, y)) = x
+
+        // Ensure that any bailouts that we depend on to guarantee that |y| is
+        // Int32 are not removed.
+        auto* otherOp = operand == other->lhs() ? other->rhs() : other->lhs();
+        otherOp->setGuardRangeBailoutsUnchecked();
+
+        return operand;
+      }
+    }
+  }
+
+  if (!lhs()->isConstant() && !rhs()->isConstant()) {
+    return this;
+  }
 
   // Directly apply math utility to compare the rhs() and lhs() when
   // they are both constants.
@@ -2872,6 +2915,18 @@ MDefinition* MMinMax::foldsTo(TempAllocator& alloc) {
 
   return this;
 }
+
+#ifdef JS_JITSPEW
+void MMinMax::printOpcode(GenericPrinter& out) const {
+  MDefinition::printOpcode(out);
+  out.printf(" (%s)", isMax() ? "max" : "min");
+}
+
+void MMinMaxArray::printOpcode(GenericPrinter& out) const {
+  MDefinition::printOpcode(out);
+  out.printf(" (%s)", isMax() ? "max" : "min");
+}
+#endif
 
 MDefinition* MPow::foldsConstant(TempAllocator& alloc) {
   // Both `x` and `p` in `x^p` must be constants in order to precompute.
@@ -3413,6 +3468,17 @@ bool MGuardArgumentsObjectFlags::congruentTo(const MDefinition* ins) const {
 AliasSet MGuardArgumentsObjectFlags::getAliasSet() const {
   // The flags are packed with the length in a fixed private slot.
   return AliasSet::Load(AliasSet::FixedSlot);
+}
+
+MDefinition* MIdToStringOrSymbol::foldsTo(TempAllocator& alloc) {
+  if (idVal()->isBox()) {
+    MIRType idType = idVal()->toBox()->input()->type();
+    if (idType == MIRType::String || idType == MIRType::Symbol) {
+      return idVal();
+    }
+  }
+
+  return this;
 }
 
 MDefinition* MReturnFromCtor::foldsTo(TempAllocator& alloc) {
@@ -5879,6 +5945,23 @@ MWasmCallUncatchable* MWasmCallUncatchable::NewBuiltinInstanceMethodCall(
   return call;
 }
 
+MWasmReturnCall* MWasmReturnCall::New(TempAllocator& alloc,
+                                      const wasm::CallSiteDesc& desc,
+                                      const wasm::CalleeDesc& callee,
+                                      const Args& args,
+                                      uint32_t stackArgAreaSizeUnaligned,
+                                      MDefinition* tableIndexOrRef) {
+  MWasmReturnCall* call =
+      new (alloc) MWasmReturnCall(desc, callee, stackArgAreaSizeUnaligned);
+
+  MOZ_ASSERT_IF(callee.isTable() || callee.isFuncRef(), tableIndexOrRef);
+  if (!call->initWithArgs(alloc, call, args, tableIndexOrRef)) {
+    return nullptr;
+  }
+
+  return call;
+}
+
 void MSqrt::trySpecializeFloat32(TempAllocator& alloc) {
   if (EnsureFloatConsumersAndInputOrConvert(this, alloc)) {
     setResultType(MIRType::Float32);
@@ -6474,9 +6557,10 @@ bool MGuardFunctionScript::congruentTo(const MDefinition* ins) const {
 
 AliasSet MGuardFunctionScript::getAliasSet() const {
   // A JSFunction's BaseScript pointer is immutable. Relazification of
-  // self-hosted functions is an exception to this, but we don't use this
-  // guard for self-hosted functions.
-  MOZ_ASSERT(!flags_.isSelfHostedOrIntrinsic());
+  // top-level/named self-hosted functions is an exception to this, but we don't
+  // use this guard for those self-hosted functions.
+  // See IRGenerator::emitCalleeGuard.
+  MOZ_ASSERT_IF(flags_.isSelfHostedOrIntrinsic(), flags_.isLambda());
   return AliasSet::None();
 }
 
@@ -6659,6 +6743,16 @@ MDefinition* MCheckIsObj::foldsTo(TempAllocator& alloc) {
 
   return this;
 }
+
+AliasSet MCheckIsObj::getAliasSet() const {
+  return AliasSet::Store(AliasSet::ExceptionState);
+}
+
+#ifdef JS_PUNBOX64
+AliasSet MCheckScriptedProxyGetResult::getAliasSet() const {
+  return AliasSet::Store(AliasSet::ExceptionState);
+}
+#endif
 
 static bool IsBoxedObject(MDefinition* def) {
   MOZ_ASSERT(def->type() == MIRType::Value);
@@ -7188,16 +7282,25 @@ MDefinition* MNormalizeSliceTerm::foldsTo(TempAllocator& alloc) {
 }
 
 bool MWasmShiftSimd128::congruentTo(const MDefinition* ins) const {
+  if (!ins->isWasmShiftSimd128()) {
+    return false;
+  }
   return ins->toWasmShiftSimd128()->simdOp() == simdOp_ &&
          congruentIfOperandsEqual(ins);
 }
 
 bool MWasmShuffleSimd128::congruentTo(const MDefinition* ins) const {
+  if (!ins->isWasmShuffleSimd128()) {
+    return false;
+  }
   return ins->toWasmShuffleSimd128()->shuffle().equals(&shuffle_) &&
          congruentIfOperandsEqual(ins);
 }
 
 bool MWasmUnarySimd128::congruentTo(const MDefinition* ins) const {
+  if (!ins->isWasmUnarySimd128()) {
+    return false;
+  }
   return ins->toWasmUnarySimd128()->simdOp() == simdOp_ &&
          congruentIfOperandsEqual(ins);
 }
@@ -7244,7 +7347,7 @@ static MDefinition* FoldTrivialWasmCasts(TempAllocator& alloc,
   return nullptr;
 }
 
-MDefinition* MWasmGcObjectIsSubtypeOfAbstract::foldsTo(TempAllocator& alloc) {
+MDefinition* MWasmRefIsSubtypeOfAbstract::foldsTo(TempAllocator& alloc) {
   MDefinition* folded = FoldTrivialWasmCasts(alloc, sourceType(), destType());
   if (folded) {
     return folded;
@@ -7252,7 +7355,7 @@ MDefinition* MWasmGcObjectIsSubtypeOfAbstract::foldsTo(TempAllocator& alloc) {
   return this;
 }
 
-MDefinition* MWasmGcObjectIsSubtypeOfConcrete::foldsTo(TempAllocator& alloc) {
+MDefinition* MWasmRefIsSubtypeOfConcrete::foldsTo(TempAllocator& alloc) {
   MDefinition* folded = FoldTrivialWasmCasts(alloc, sourceType(), destType());
   if (folded) {
     return folded;

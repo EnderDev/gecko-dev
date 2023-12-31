@@ -305,7 +305,8 @@ void DownsampleImage2_Sharper(const ImageF& input, ImageF* output) {
   int64_t xsize = input.xsize();
   int64_t ysize = input.ysize();
 
-  ImageF box_downsample = CopyImage(input);
+  ImageF box_downsample(xsize, ysize);
+  CopyImageTo(input, &box_downsample);
   DownsampleImage(&box_downsample, 2);
 
   ImageF mask(box_downsample.xsize(), box_downsample.ysize());
@@ -616,7 +617,8 @@ void DownsampleImage2_Iterative(const ImageF& orig, ImageF* output) {
   int64_t xsize2 = DivCeil(orig.xsize(), 2);
   int64_t ysize2 = DivCeil(orig.ysize(), 2);
 
-  ImageF box_downsample = CopyImage(orig);
+  ImageF box_downsample(xsize, ysize);
+  CopyImageTo(orig, &box_downsample);
   DownsampleImage(&box_downsample, 2);
   ImageF mask(box_downsample.xsize(), box_downsample.ysize());
   CreateMask(box_downsample, mask);
@@ -630,7 +632,8 @@ void DownsampleImage2_Iterative(const ImageF& orig, ImageF* output) {
   initial.ShrinkTo(initial.xsize() - kBlockDim, initial.ysize() - kBlockDim);
   DownsampleImage2_Sharper(orig, &initial);
 
-  ImageF down = CopyImage(initial);
+  ImageF down(initial.xsize(), initial.ysize());
+  CopyImageTo(initial, &down);
   ImageF up(xsize, ysize);
   ImageF corr(xsize, ysize);
   ImageF corr2(xsize2, ysize2);
@@ -683,7 +686,7 @@ void DownsampleImage2_Iterative(Image3F* opsin) {
                        downsampled.ysize() - kBlockDim);
 
   Image3F rgb(opsin->xsize(), opsin->ysize());
-  OpsinParams opsin_params;  // TODO: use the ones that are actually used
+  OpsinParams opsin_params;  // TODO(user): use the ones that are actually used
   opsin_params.Init(kDefaultIntensityTarget);
   OpsinToLinear(*opsin, Rect(rgb), nullptr, &rgb, opsin_params);
 
@@ -825,14 +828,12 @@ Status DefaultEncoderHeuristics::LossyFrameHeuristics(
   // Call InitialQuantField only in Hare mode or slower. Otherwise, rely
   // on simple heuristics in FindBestAcStrategy, or set a constant for Falcon
   // mode.
-  if (cparams.speed_tier > SpeedTier::kHare || cparams.uniform_quant > 0) {
+  if (cparams.speed_tier > SpeedTier::kHare) {
     enc_state->initial_quant_field =
         ImageF(shared.frame_dim.xsize_blocks, shared.frame_dim.ysize_blocks);
     enc_state->initial_quant_masking =
         ImageF(shared.frame_dim.xsize_blocks, shared.frame_dim.ysize_blocks);
-    float q = cparams.uniform_quant > 0
-                  ? cparams.uniform_quant
-                  : kAcQuant / cparams.butteraugli_distance;
+    float q = kAcQuant / cparams.butteraugli_distance;
     FillImage(q, &enc_state->initial_quant_field);
     FillImage(1.0f / (q + 0.001f), &enc_state->initial_quant_masking);
   } else {
@@ -843,7 +844,8 @@ Status DefaultEncoderHeuristics::LossyFrameHeuristics(
     }
     enc_state->initial_quant_field = InitialQuantField(
         butteraugli_distance_for_iqf, *opsin, shared.frame_dim, pool, 1.0f,
-        &enc_state->initial_quant_masking);
+        &enc_state->initial_quant_masking,
+        &enc_state->initial_quant_masking1x1);
     quantizer.SetQuantField(quant_dc, enc_state->initial_quant_field, nullptr);
   }
 

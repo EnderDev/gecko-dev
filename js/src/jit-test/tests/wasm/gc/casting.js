@@ -1,17 +1,5 @@
 // |jit-test| skip-if: !wasmGcEnabled()
 
-// Test the maximum depth limit
-{
-  const MaxDepth = 31;
-  let types = `(type (struct))\n`;
-  for (let depth = 1; depth <= MaxDepth + 1; depth++) {
-    types += `(type (sub ${depth - 1} (struct)))\n`;
-  }
-  wasmFailValidateText(`(module
-    ${types}
-  )`, /too deep/);
-}
-
 // Test all possible casting combinations of the following graph:
 //
 //  A1       A2
@@ -83,7 +71,7 @@ function testAllCasts(types) {
   for (let name in types) {
     let type = types[name];
     if (type.super === null) {
-      typeSection += `(type \$${name} (struct))\n`;
+      typeSection += `(type \$${name} (sub (struct)))\n`;
     } else {
       typeSection += `(type \$${name} (sub \$${type.super} (struct)))\n`;
     }

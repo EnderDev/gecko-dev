@@ -4,7 +4,34 @@
 
 "use strict";
 
+XPCOMUtils.defineLazyScriptGetter(
+  this,
+  ["FullScreen"],
+  "chrome://browser/content/browser-fullScreenAndPointerLock.js"
+);
+
 const TEST_URL = "https://example.com/";
+var gAuthenticatorId;
+
+/**
+ * Waits for the PopupNotifications button enable delay to expire so the
+ * Notification can be interacted with using the buttons.
+ */
+async function waitForPopupNotificationSecurityDelay() {
+  let notification = PopupNotifications.panel.firstChild.notification;
+  let notificationEnableDelayMS = Services.prefs.getIntPref(
+    "security.notification_enable_delay"
+  );
+  await TestUtils.waitForCondition(
+    () => {
+      let timeSinceShown = performance.now() - notification.timeShown;
+      return timeSinceShown > notificationEnableDelayMS;
+    },
+    "Wait for security delay to expire",
+    500,
+    50
+  );
+}
 
 add_task(async function test_setup_usbtoken() {
   return SpecialPowers.pushPrefEnv({
@@ -16,12 +43,25 @@ add_task(async function test_setup_usbtoken() {
 });
 add_task(test_register);
 add_task(test_register_escape);
+add_task(test_register_direct_cancel);
+add_task(test_register_direct_presence);
 add_task(test_sign);
 add_task(test_sign_escape);
-add_task(test_register_direct_cancel);
 add_task(test_tab_switching);
 add_task(test_window_switching);
+add_task(async function test_setup_fullscreen() {
+  return SpecialPowers.pushPrefEnv({
+    set: [
+      ["browser.fullscreen.autohide", true],
+      ["full-screen-api.enabled", true],
+      ["full-screen-api.allow-trusted-requests-only", false],
+    ],
+  });
+});
+add_task(test_fullscreen_show_nav_toolbar);
+add_task(test_no_fullscreen_dom);
 add_task(async function test_setup_softtoken() {
+  gAuthenticatorId = add_virtual_authenticator();
   return SpecialPowers.pushPrefEnv({
     set: [
       ["security.webauth.webauthn_enable_softtoken", true],
@@ -31,6 +71,7 @@ add_task(async function test_setup_softtoken() {
 });
 add_task(test_register_direct_proceed);
 add_task(test_register_direct_proceed_anon);
+add_task(test_select_sign_result);
 
 function promiseNotification(id) {
   return new Promise(resolve => {
@@ -45,6 +86,20 @@ function promiseNotification(id) {
   });
 }
 
+function promiseNavToolboxStatus(aExpectedStatus) {
+  let navToolboxStatus;
+  return TestUtils.topicObserved("fullscreen-nav-toolbox", (subject, data) => {
+    navToolboxStatus = data;
+    return data == aExpectedStatus;
+  }).then(() =>
+    ok(navToolboxStatus == aExpectedStatus, "nav toolbox is " + aExpectedStatus)
+  );
+}
+
+function promiseFullScreenPaint(aExpectedStatus) {
+  return TestUtils.topicObserved("fullscreen-painted");
+}
+
 function triggerMainPopupCommand(popup) {
   info("triggering main command");
   let notifications = popup.childNodes;
@@ -57,23 +112,32 @@ function triggerMainPopupCommand(popup) {
 
 let expectNotAllowedError = expectError("NotAllowed");
 
-function verifyAnonymizedCertificate(result) {
-  let { attObj, rawId } = result;
-  return webAuthnDecodeCBORAttestation(attObj).then(({ fmt, attStmt }) => {
-    is("none", fmt, "Is a None Attestation");
-    is("object", typeof attStmt, "attStmt is a map");
-    is(0, Object.keys(attStmt).length, "attStmt is empty");
-  });
+function verifyAnonymizedCertificate(aResult) {
+  return webAuthnDecodeCBORAttestation(aResult.attObj).then(
+    ({ fmt, attStmt }) => {
+      is(fmt, "none", "Is a None Attestation");
+      is(typeof attStmt, "object", "attStmt is a map");
+      is(Object.keys(attStmt).length, 0, "attStmt is empty");
+    }
+  );
 }
 
-function verifyDirectCertificate(result) {
-  let { attObj, rawId } = result;
-  return webAuthnDecodeCBORAttestation(attObj).then(({ fmt, attStmt }) => {
-    is("fido-u2f", fmt, "Is a FIDO U2F Attestation");
-    is("object", typeof attStmt, "attStmt is a map");
-    ok(attStmt.hasOwnProperty("x5c"), "attStmt.x5c exists");
-    ok(attStmt.hasOwnProperty("sig"), "attStmt.sig exists");
-  });
+async function verifyDirectCertificate(aResult) {
+  let clientDataHash = await crypto.subtle
+    .digest("SHA-256", aResult.clientDataJSON)
+    .then(digest => new Uint8Array(digest));
+  let { fmt, attStmt, authData, authDataObj } =
+    await webAuthnDecodeCBORAttestation(aResult.attObj);
+  is(fmt, "packed", "Is a Packed Attestation");
+  let signedData = new Uint8Array(authData.length + clientDataHash.length);
+  signedData.set(authData);
+  signedData.set(clientDataHash, authData.length);
+  let valid = await verifySignature(
+    authDataObj.publicKeyHandle,
+    signedData,
+    new Uint8Array(attStmt.sig)
+  );
+  ok(valid, "Signature is valid.");
 }
 
 async function test_register() {
@@ -82,7 +146,7 @@ async function test_register() {
 
   // Request a new credential and wait for the prompt.
   let active = true;
-  let request = promiseWebAuthnMakeCredential(tab, "none", {})
+  let request = promiseWebAuthnMakeCredential(tab)
     .then(arrivingHereIsBad)
     .catch(expectNotAllowedError)
     .then(() => (active = false));
@@ -103,7 +167,7 @@ async function test_register_escape() {
 
   // Request a new credential and wait for the prompt.
   let active = true;
-  let request = promiseWebAuthnMakeCredential(tab, "none", {})
+  let request = promiseWebAuthnMakeCredential(tab)
     .then(arrivingHereIsBad)
     .catch(expectNotAllowedError)
     .then(() => (active = false));
@@ -166,7 +230,7 @@ async function test_register_direct_cancel() {
 
   // Request a new credential with direct attestation and wait for the prompt.
   let active = true;
-  let promise = promiseWebAuthnMakeCredential(tab, "direct", {})
+  let promise = promiseWebAuthnMakeCredential(tab, "direct")
     .then(arrivingHereIsBad)
     .catch(expectNotAllowedError)
     .then(() => (active = false));
@@ -181,6 +245,32 @@ async function test_register_direct_cancel() {
   await BrowserTestUtils.removeTab(tab);
 }
 
+async function test_register_direct_presence() {
+  // Open a new tab.
+  let tab = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_URL);
+
+  // Request a new credential with direct attestation and wait for the prompt.
+  let active = true;
+  let promise = promiseWebAuthnMakeCredential(tab, "direct")
+    .then(arrivingHereIsBad)
+    .catch(expectNotAllowedError)
+    .then(() => (active = false));
+  await promiseNotification("webauthn-prompt-register-direct");
+
+  // Click "proceed" and wait for presence prompt
+  let presence = promiseNotification("webauthn-prompt-presence");
+  PopupNotifications.panel.firstElementChild.button.click();
+  await presence;
+
+  // Cancel the request.
+  ok(active, "request should still be active");
+  PopupNotifications.panel.firstElementChild.button.click();
+  await promise;
+
+  // Close tab.
+  await BrowserTestUtils.removeTab(tab);
+}
+
 // Add two tabs, open WebAuthn in the first, switch, assert the prompt is
 // not visible, switch back, assert the prompt is there and cancel it.
 async function test_tab_switching() {
@@ -189,7 +279,7 @@ async function test_tab_switching() {
 
   // Request a new credential and wait for the prompt.
   let active = true;
-  let request = promiseWebAuthnMakeCredential(tab_one, "none", {})
+  let request = promiseWebAuthnMakeCredential(tab_one)
     .then(arrivingHereIsBad)
     .catch(expectNotAllowedError)
     .then(() => (active = false));
@@ -235,7 +325,7 @@ async function test_window_switching() {
 
   // Request a new credential and wait for the prompt.
   let active = true;
-  let request = promiseWebAuthnMakeCredential(tab, "none", {})
+  let request = promiseWebAuthnMakeCredential(tab)
     .then(arrivingHereIsBad)
     .catch(expectNotAllowedError)
     .then(() => (active = false));
@@ -283,7 +373,7 @@ async function test_register_direct_proceed() {
   let tab = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_URL);
 
   // Request a new credential with direct attestation and wait for the prompt.
-  let request = promiseWebAuthnMakeCredential(tab, "direct", {});
+  let request = promiseWebAuthnMakeCredential(tab, "direct");
   await promiseNotification("webauthn-prompt-register-direct");
 
   // Proceed.
@@ -301,7 +391,7 @@ async function test_register_direct_proceed_anon() {
   let tab = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_URL);
 
   // Request a new credential with direct attestation and wait for the prompt.
-  let request = promiseWebAuthnMakeCredential(tab, "direct", {});
+  let request = promiseWebAuthnMakeCredential(tab, "direct");
   await promiseNotification("webauthn-prompt-register-direct");
 
   // Check "anonymize anyway" and proceed.
@@ -310,6 +400,110 @@ async function test_register_direct_proceed_anon() {
 
   // Ensure we got "none" attestation.
   await request.then(verifyAnonymizedCertificate);
+
+  // Close tab.
+  await BrowserTestUtils.removeTab(tab);
+}
+
+async function test_select_sign_result() {
+  // Open a new tab.
+  let tab = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_URL);
+
+  // Make two discoverable credentials for the same RP ID so that
+  // the user has to select one to return.
+  let cred1 = await addCredential(gAuthenticatorId, "example.com");
+  let cred2 = await addCredential(gAuthenticatorId, "example.com");
+
+  let active = true;
+  let request = promiseWebAuthnGetAssertionDiscoverable(tab)
+    .then(arrivingHereIsBad)
+    .catch(expectNotAllowedError)
+    .then(() => (active = false));
+
+  // Ensure the selection prompt is shown
+  await promiseNotification("webauthn-prompt-select-sign-result");
+
+  ok(active, "request is active");
+
+  // Cancel the request
+  PopupNotifications.panel.firstElementChild.button.click();
+  await request;
+
+  await removeCredential(gAuthenticatorId, cred1);
+  await removeCredential(gAuthenticatorId, cred2);
+  await BrowserTestUtils.removeTab(tab);
+}
+
+async function test_fullscreen_show_nav_toolbar() {
+  let tab = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_URL);
+
+  // Start with the window fullscreen and the nav toolbox hidden
+  let fullscreenState = window.fullScreen;
+
+  let navToolboxHiddenPromise = promiseNavToolboxStatus("hidden");
+
+  window.fullScreen = true;
+  FullScreen.hideNavToolbox(false);
+
+  await navToolboxHiddenPromise;
+
+  // Request a new credential and wait for the direct attestation consent
+  // prompt.
+  let promptPromise = promiseNotification("webauthn-prompt-register-direct");
+  let navToolboxShownPromise = promiseNavToolboxStatus("shown");
+
+  let active = true;
+  let requestPromise = promiseWebAuthnMakeCredential(tab, "direct")
+    .then(arrivingHereIsBad)
+    .catch(expectNotAllowedError)
+    .then(() => (active = false));
+
+  await Promise.all([promptPromise, navToolboxShownPromise]);
+
+  ok(active, "request is active");
+  ok(window.fullScreen, "window is fullscreen");
+
+  // Cancel the request.
+  PopupNotifications.panel.firstElementChild.secondaryButton.click();
+  await requestPromise;
+
+  window.fullScreen = fullscreenState;
+
+  // Close tab.
+  await BrowserTestUtils.removeTab(tab);
+}
+
+async function test_no_fullscreen_dom() {
+  let tab = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_URL);
+
+  let fullScreenPaintPromise = promiseFullScreenPaint();
+  // Make a DOM element fullscreen
+  await ContentTask.spawn(tab.linkedBrowser, [], () => {
+    return content.document.body.requestFullscreen();
+  });
+  await fullScreenPaintPromise;
+  ok(!!document.fullscreenElement, "a DOM element is fullscreen");
+
+  // Request a new credential and wait for the direct attestation consent
+  // prompt.
+  let promptPromise = promiseNotification("webauthn-prompt-register-direct");
+  fullScreenPaintPromise = promiseFullScreenPaint();
+
+  let active = true;
+  let requestPromise = promiseWebAuthnMakeCredential(tab, "direct")
+    .then(arrivingHereIsBad)
+    .catch(expectNotAllowedError)
+    .then(() => (active = false));
+
+  await Promise.all([promptPromise, fullScreenPaintPromise]);
+
+  ok(active, "request is active");
+  ok(!document.fullscreenElement, "no DOM element is fullscreen");
+
+  // Cancel the request.
+  await waitForPopupNotificationSecurityDelay();
+  PopupNotifications.panel.firstElementChild.secondaryButton.click();
+  await requestPromise;
 
   // Close tab.
   await BrowserTestUtils.removeTab(tab);

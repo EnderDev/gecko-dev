@@ -6,9 +6,11 @@
 #include "WorkletFetchHandler.h"
 
 #include "js/loader/ModuleLoadRequest.h"
+#include "js/ContextOptions.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Fetch.h"
 #include "mozilla/dom/Request.h"
+#include "mozilla/dom/RequestBinding.h"
 #include "mozilla/dom/Response.h"
 #include "mozilla/dom/RootedDictionary.h"
 #include "mozilla/dom/ScriptLoader.h"
@@ -24,8 +26,10 @@
 #include "mozilla/TaskQueue.h"
 #include "nsIInputStreamPump.h"
 #include "nsIThreadRetargetableRequest.h"
+#include "xpcpublic.h"
 
 using JS::loader::ModuleLoadRequest;
+using JS::loader::ParserMetadata;
 using JS::loader::ScriptFetchOptions;
 using mozilla::dom::loader::WorkletModuleLoader;
 
@@ -49,6 +53,7 @@ class StartModuleLoadRunnable final : public Runnable {
             JS_GetParentRuntime(CycleCollectedJSContext::Get()->Context())) {
     MOZ_ASSERT(NS_IsMainThread());
     MOZ_ASSERT(mParentRuntime);
+    xpc::SetPrefableContextOptions(mContextOptions);
   }
 
   ~StartModuleLoadRunnable() = default;
@@ -64,6 +69,7 @@ class StartModuleLoadRunnable final : public Runnable {
   nsCOMPtr<nsIURI> mReferrer;
   const nsTArray<nsString>& mLocalizedStrs;
   JSRuntime* mParentRuntime;
+  JS::ContextOptions mContextOptions;
 };
 
 NS_IMETHODIMP
@@ -78,7 +84,7 @@ StartModuleLoadRunnable::Run() {
 
 NS_IMETHODIMP StartModuleLoadRunnable::RunOnWorkletThread() {
   // This can be called on a GraphRunner thread or a DOM Worklet thread.
-  WorkletThread::EnsureCycleCollectedJSContext(mParentRuntime);
+  WorkletThread::EnsureCycleCollectedJSContext(mParentRuntime, mContextOptions);
 
   WorkletGlobalScope* globalScope = mWorkletImpl->GetGlobalScope();
   if (!globalScope) {
@@ -87,11 +93,14 @@ NS_IMETHODIMP StartModuleLoadRunnable::RunOnWorkletThread() {
 
   // To fetch a worklet/module worker script graph:
   // https://html.spec.whatwg.org/multipage/webappapis.html#fetch-a-worklet/module-worker-script-graph
-  // Step 1. Let options be a script fetch options. And referrer policy is the
-  // empty string.
-  ReferrerPolicy referrerPolicy = ReferrerPolicy::_empty;
+  // Step 1. Let options be a script fetch options whose cryptographic nonce is
+  // the empty string, integrity metadata is the empty string, parser metadata
+  // is "not-parser-inserted", credentials mode is credentials mode, referrer
+  // policy is the empty string, and fetch priority is "auto".
   RefPtr<ScriptFetchOptions> fetchOptions = new ScriptFetchOptions(
-      CORSMode::CORS_NONE, referrerPolicy, /*triggeringPrincipal*/ nullptr);
+      CORSMode::CORS_NONE, /* aNonce = */ u""_ns, RequestPriority::Auto,
+      ParserMetadata::NotParserInserted,
+      /*triggeringPrincipal*/ nullptr);
 
   WorkletModuleLoader* moduleLoader =
       static_cast<WorkletModuleLoader*>(globalScope->GetModuleLoader());
@@ -105,9 +114,9 @@ NS_IMETHODIMP StartModuleLoadRunnable::RunOnWorkletThread() {
 
   // Part of Step 2. This sets the Top-level flag to true
   RefPtr<ModuleLoadRequest> request = new ModuleLoadRequest(
-      mURI, fetchOptions, SRIMetadata(), mReferrer, loadContext,
-      true,  /* is top level */
-      false, /* is dynamic import */
+      mURI, ReferrerPolicy::_empty, fetchOptions, SRIMetadata(), mReferrer,
+      loadContext, true, /* is top level */
+      false,             /* is dynamic import */
       moduleLoader, ModuleLoadRequest::NewVisitedSetForTopLevelImport(mURI),
       nullptr);
 

@@ -104,7 +104,7 @@ class InspectorUtils {
 
   // Utilities for working with CSS colors
   static void RgbToColorName(GlobalObject& aGlobal, uint8_t aR, uint8_t aG,
-                             uint8_t aB, nsAString& aResult);
+                             uint8_t aB, nsACString& aResult);
 
   // Convert a given CSS color string to rgba. Returns null on failure or an
   // InspectorRGBATuple on success.
@@ -225,6 +225,9 @@ class InspectorUtils {
 
   static Element* ContainingBlockOf(GlobalObject&, Element&);
 
+  static void GetBlockLineCounts(GlobalObject& aGlobal, Element& aElement,
+                                 Nullable<nsTArray<uint32_t>>& aResult);
+
   MOZ_CAN_RUN_SCRIPT
   static already_AddRefed<nsINodeList> GetOverflowingChildrenOfElement(
       GlobalObject& aGlobal, Element& element);
@@ -244,6 +247,19 @@ class InspectorUtils {
    */
   static bool IsCustomElementName(GlobalObject&, const nsAString& aName,
                                   const nsAString& aNamespaceURI);
+
+  /**
+   * Get the names of registered Highlights
+   */
+  static void GetRegisteredCssHighlights(GlobalObject& aGlobal,
+                                         Document& aDocument, bool aActiveOnly,
+                                         nsTArray<nsString>& aResult);
+  /**
+   * Get registered CSS properties (via CSS.registerProperty or @property)
+   */
+  static void GetCSSRegisteredProperties(
+      GlobalObject& aGlobal, Document& aDocument,
+      nsTArray<InspectorCSSPropertyDefinition>& aResult);
 };
 
 }  // namespace mozilla::dom

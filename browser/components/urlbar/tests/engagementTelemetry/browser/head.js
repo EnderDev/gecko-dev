@@ -14,7 +14,7 @@ ChromeUtils.defineESModuleGetters(this, {
 
 const lazy = {};
 
-XPCOMUtils.defineLazyGetter(lazy, "QuickSuggestTestUtils", () => {
+ChromeUtils.defineLazyGetter(lazy, "QuickSuggestTestUtils", () => {
   const { QuickSuggestTestUtils: module } = ChromeUtils.importESModule(
     "resource://testing-common/QuickSuggestTestUtils.sys.mjs"
   );
@@ -22,7 +22,7 @@ XPCOMUtils.defineLazyGetter(lazy, "QuickSuggestTestUtils", () => {
   return module;
 });
 
-XPCOMUtils.defineLazyGetter(this, "MerinoTestUtils", () => {
+ChromeUtils.defineLazyGetter(this, "MerinoTestUtils", () => {
   const { MerinoTestUtils: module } = ChromeUtils.importESModule(
     "resource://testing-common/MerinoTestUtils.sys.mjs"
   );
@@ -33,6 +33,12 @@ XPCOMUtils.defineLazyGetter(this, "MerinoTestUtils", () => {
 ChromeUtils.defineESModuleGetters(lazy, {
   UrlbarTestUtils: "resource://testing-common/UrlbarTestUtils.sys.mjs",
   sinon: "resource://testing-common/Sinon.sys.mjs",
+});
+
+ChromeUtils.defineLazyGetter(this, "PlacesFrecencyRecalculator", () => {
+  return Cc["@mozilla.org/places/frecency-recalculator;1"].getService(
+    Ci.nsIObserver
+  ).wrappedJSObject;
 });
 
 async function addTopSites(url) {
@@ -84,14 +90,10 @@ function _assertGleanTelemetry(telemetryName, expectedExtraList) {
   }
 }
 
-async function ensureQuickSuggestInit({
-  merinoSuggestions = undefined,
-  config = undefined,
-} = {}) {
+async function ensureQuickSuggestInit({ ...args } = {}) {
   return lazy.QuickSuggestTestUtils.ensureQuickSuggestInit({
-    config,
-    merinoSuggestions,
-    remoteSettingsResults: [
+    ...args,
+    remoteSettingsRecords: [
       {
         type: "data",
         attachment: [
@@ -104,6 +106,7 @@ async function ensureQuickSuggestInit({
             impression_url: "https://example.com/impression",
             advertiser: "TestAdvertiser",
             iab_category: "22 - Shopping",
+            icon: "1234",
           },
           {
             id: 2,
@@ -112,8 +115,9 @@ async function ensureQuickSuggestInit({
             keywords: ["nonsponsored"],
             click_url: "https://example.com/click",
             impression_url: "https://example.com/impression",
-            advertiser: "TestAdvertiser",
+            advertiser: "Wikipedia",
             iab_category: "5 - Education",
+            icon: "1234",
           },
         ],
       },
@@ -253,6 +257,15 @@ async function initSapTest() {
   /* import-globals-from head-sap.js */
   Services.scriptloader.loadSubScript(
     "chrome://mochitests/content/browser/browser/components/urlbar/tests/engagementTelemetry/browser/head-sap.js",
+    this
+  );
+  await setup();
+}
+
+async function initSearchEngineDefaultIdTest() {
+  /* import-globals-from head-search_engine_default_id.js */
+  Services.scriptloader.loadSubScript(
+    "chrome://mochitests/content/browser/browser/components/urlbar/tests/engagementTelemetry/browser/head-search_engine_default_id.js",
     this
   );
   await setup();

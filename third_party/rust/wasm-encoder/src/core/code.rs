@@ -322,9 +322,9 @@ pub enum Instruction<'a> {
     BrOnNonNull(u32),
     Return,
     Call(u32),
-    CallRef(HeapType),
+    CallRef(u32),
     CallIndirect { ty: u32, table: u32 },
-    ReturnCallRef(HeapType),
+    ReturnCallRef(u32),
     ReturnCall(u32),
     ReturnCallIndirect { ty: u32, table: u32 },
     Throw(u32),
@@ -521,6 +521,11 @@ pub enum Instruction<'a> {
     RefIsNull,
     RefFunc(u32),
     RefAsNonNull,
+
+    // GC types instructions.
+    RefI31,
+    I31GetS,
+    I31GetU,
 
     // Bulk memory instructions.
     TableInit { elem_index: u32, table: u32 },
@@ -912,7 +917,7 @@ impl Encode for Instruction<'_> {
                 l.encode(sink);
             }
             Instruction::BrOnNull(l) => {
-                sink.push(0xD4);
+                sink.push(0xD5);
                 l.encode(sink);
             }
             Instruction::BrOnNonNull(l) => {
@@ -1313,7 +1318,21 @@ impl Encode for Instruction<'_> {
                 sink.push(0xd2);
                 f.encode(sink);
             }
-            Instruction::RefAsNonNull => sink.push(0xD3),
+            Instruction::RefAsNonNull => sink.push(0xd4),
+
+            // GC instructions.
+            Instruction::RefI31 => {
+                sink.push(0xfb);
+                sink.push(0x1c)
+            }
+            Instruction::I31GetS => {
+                sink.push(0xfb);
+                sink.push(0x1d)
+            }
+            Instruction::I31GetU => {
+                sink.push(0xfb);
+                sink.push(0x1e)
+            }
 
             // Bulk memory instructions.
             Instruction::TableInit { elem_index, table } => {

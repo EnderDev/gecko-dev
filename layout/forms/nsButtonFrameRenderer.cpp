@@ -81,12 +81,9 @@ nsresult nsButtonFrameRenderer::DisplayButton(nsDisplayListBuilder* aBuilder,
 
   // Only display focus rings if we actually have them. Since at most one
   // button would normally display a focus ring, most buttons won't have them.
-  const auto* disp = mFrame->StyleDisplay();
-  nsPresContext* pc = mFrame->PresContext();
   if (mInnerFocusStyle && mInnerFocusStyle->StyleBorder()->HasBorder() &&
-      mFrame->IsThemed(disp) &&
-      pc->Theme()->ThemeWantsButtonInnerFocusRing(
-          mFrame, disp->EffectiveAppearance())) {
+      mFrame->IsThemed() &&
+      mFrame->PresContext()->Theme()->ThemeWantsButtonInnerFocusRing()) {
     aForeground->AppendNewToTop<nsDisplayButtonForeground>(aBuilder, GetFrame(),
                                                            this);
   }
@@ -194,7 +191,7 @@ void nsButtonFrameRenderer::ReResolveStyles(nsPresContext* aPresContext) {
   // get styles assigned to -moz-focus-inner (ie dotted border on Windows)
   mInnerFocusStyle = styleSet->ProbePseudoElementStyle(
       *mFrame->GetContent()->AsElement(), PseudoStyleType::mozFocusInner,
-      mFrame->Style());
+      nullptr, mFrame->Style());
 }
 
 ComputedStyle* nsButtonFrameRenderer::GetComputedStyle(int32_t aIndex) const {
@@ -342,8 +339,6 @@ class nsDisplayButtonBorder final : public nsPaintedDisplayItem {
     MOZ_COUNT_CTOR(nsDisplayButtonBorder);
   }
   MOZ_COUNTED_DTOR_OVERRIDE(nsDisplayButtonBorder)
-
-  virtual bool MustPaintOnContentSide() const override { return true; }
 
   virtual void HitTest(nsDisplayListBuilder* aBuilder, const nsRect& aRect,
                        HitTestState* aState,

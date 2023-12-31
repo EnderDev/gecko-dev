@@ -5,7 +5,7 @@
 # NOTE: For English locales, strings in this file should be in APA-style Title Case.
 # See https://apastyle.apa.org/style-grammar-guidelines/capitalization/title-case
 #
-# NOTE: For Engineers, please don't re-use these strings outside of the menubar.
+# NOTE: For Engineers, please don't reuse these strings outside of the menubar.
 
 ## Application Menu (macOS only)
 
@@ -219,6 +219,9 @@ menu-history-undo-menu =
     .label = Recently Closed Tabs
 menu-history-undo-window-menu =
     .label = Recently Closed Windows
+# "Search" is a verb, as in "Search in History"
+menu-history-search =
+    .label = Search History
 
 ## Bookmarks Menu
 
@@ -337,3 +340,5 @@ menu-help-report-deceptive-site =
 menu-help-not-deceptive =
     .label = This Isn’t a Deceptive Site…
     .accesskey = D
+menu-report-broken-site =
+  .label = Report Broken Site

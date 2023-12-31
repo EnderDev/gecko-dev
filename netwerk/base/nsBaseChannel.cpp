@@ -898,7 +898,9 @@ NS_IMETHODIMP
 nsBaseChannel::RetargetDeliveryTo(nsISerialEventTarget* aEventTarget) {
   MOZ_ASSERT(NS_IsMainThread());
 
-  NS_ENSURE_TRUE(mRequest, NS_ERROR_NOT_INITIALIZED);
+  if (!mRequest) {
+    return NS_ERROR_NOT_INITIALIZED;
+  }
 
   nsCOMPtr<nsIThreadRetargetableRequest> req;
   if (mAllowThreadRetargeting) {
@@ -940,12 +942,86 @@ nsBaseChannel::CheckListenerChain() {
   return listener->CheckListenerChain();
 }
 
+NS_IMETHODIMP
+nsBaseChannel::OnDataFinished(nsresult aStatus) {
+  if (!mListener) {
+    return NS_ERROR_FAILURE;
+  }
+
+  if (!mAllowThreadRetargeting) {
+    return NS_ERROR_NOT_IMPLEMENTED;
+  }
+
+  nsCOMPtr<nsIThreadRetargetableStreamListener> listener =
+      do_QueryInterface(mListener);
+  if (listener) {
+    return listener->OnDataFinished(aStatus);
+  }
+
+  return NS_OK;
+}
+
 NS_IMETHODIMP nsBaseChannel::GetCanceled(bool* aCanceled) {
   *aCanceled = mCanceled;
   return NS_OK;
 }
 
 void nsBaseChannel::SetupNeckoTarget() {
-  mNeckoTarget =
-      nsContentUtils::GetEventTargetByLoadInfo(mLoadInfo, TaskCategory::Other);
+  mNeckoTarget = GetMainThreadSerialEventTarget();
+}
+
+nsBaseChannel::ContentRange::ContentRange(const nsACString& aRangeHeader,
+                                          uint64_t aSize)
+    : mStart(0), mEnd(0), mSize(0) {
+  auto parsed = nsContentUtils::ParseSingleRangeRequest(aRangeHeader, true);
+  // https://fetch.spec.whatwg.org/#ref-for-simple-range-header-value%E2%91%A1
+  // If rangeValue is failure, then return a network error.
+  if (!parsed) {
+    return;
+  }
+
+  // Sanity check: ParseSingleRangeRequest should handle these two cases.
+  // If rangeEndValue and rangeStartValue are null, then return failure.
+  MOZ_ASSERT(parsed->Start().isSome() || parsed->End().isSome());
+  // If rangeStartValue and rangeEndValue are numbers, and rangeStartValue
+  // is greater than rangeEndValue, then return failure.
+  MOZ_ASSERT(parsed->Start().isNothing() || parsed->End().isNothing() ||
+             *parsed->Start() <= *parsed->End());
+
+  // https://fetch.spec.whatwg.org/#ref-for-simple-range-header-value%E2%91%A1
+  // If rangeStart is null:
+  if (parsed->Start().isNothing()) {
+    // Set rangeStart to fullLength − rangeEnd.
+    mStart = aSize - *parsed->End();
+
+    // Set rangeEnd to rangeStart + rangeEnd − 1.
+    mEnd = mStart + *parsed->End() - 1;
+
+    // Otherwise:
+  } else {
+    // If rangeStart is greater than or equal to fullLength, then return a
+    // network error.
+    if (*parsed->Start() >= aSize) {
+      return;
+    }
+    mStart = *parsed->Start();
+
+    // If rangeEnd is null or rangeEnd is greater than or equal to fullLength,
+    // then set rangeEnd to fullLength − 1.
+    if (parsed->End().isNothing() || *parsed->End() >= aSize) {
+      mEnd = aSize - 1;
+    } else {
+      mEnd = *parsed->End();
+    }
+  }
+  mSize = aSize;
+}
+
+void nsBaseChannel::ContentRange::AsHeader(nsACString& aOutString) const {
+  aOutString.Assign("bytes "_ns);
+  aOutString.AppendInt(mStart);
+  aOutString.AppendLiteral("-");
+  aOutString.AppendInt(mEnd);
+  aOutString.AppendLiteral("/");
+  aOutString.AppendInt(mSize);
 }

@@ -6,6 +6,7 @@
 
 #include "mozilla/dom/MouseEvent.h"
 #include "mozilla/MouseEvents.h"
+#include "mozilla/BasePrincipal.h"
 #include "nsContentUtils.h"
 #include "nsIContent.h"
 #include "nsIScreenManager.h"
@@ -303,7 +304,7 @@ float MouseEvent::MozPressure() const {
   return mEvent->AsMouseEventBase()->mPressure;
 }
 
-uint16_t MouseEvent::MozInputSource() const {
+uint16_t MouseEvent::InputSource() const {
   return mEvent->AsMouseEventBase()->mInputSource;
 }
 

@@ -68,35 +68,22 @@ using namespace mozilla::dom;
  * returned by the getComputedStyle() function.
  */
 
-static bool ShouldReturnEmptyStyleForInvalidPseudoElement(
-    const nsAString& aPseudoElt) {
-  // Old behavior is historical. New behavior is as discussed in
-  // https://github.com/w3c/csswg-drafts/issues/6501.
-  if (!StaticPrefs::
-          layout_css_computed_style_new_invalid_pseudo_element_behavior()) {
-    if (aPseudoElt.Length() < 2) {
-      return false;
-    }
-    const char16_t* chars = aPseudoElt.BeginReading();
-    return chars[0] == u':' && chars[1] == u':';
-  }
-  return !aPseudoElt.IsEmpty() && aPseudoElt.First() == u':';
-}
-
 already_AddRefed<nsComputedDOMStyle> NS_NewComputedDOMStyle(
     dom::Element* aElement, const nsAString& aPseudoElt, Document* aDocument,
     nsComputedDOMStyle::StyleType aStyleType, mozilla::ErrorResult&) {
-  Maybe<PseudoStyleType> pseudo = nsCSSPseudoElements::GetPseudoType(
-      aPseudoElt, CSSEnabledState::ForAllContent);
+  auto [pseudo, functionalPseudoParameter] =
+      nsCSSPseudoElements::ParsePseudoElement(aPseudoElt,
+                                              CSSEnabledState::ForAllContent);
   auto returnEmpty = nsComputedDOMStyle::AlwaysReturnEmptyStyle::No;
   if (!pseudo) {
-    if (ShouldReturnEmptyStyleForInvalidPseudoElement(aPseudoElt)) {
+    if (!aPseudoElt.IsEmpty() && aPseudoElt.First() == u':') {
       returnEmpty = nsComputedDOMStyle::AlwaysReturnEmptyStyle::Yes;
     }
     pseudo.emplace(PseudoStyleType::NotPseudo);
   }
-  RefPtr<nsComputedDOMStyle> computedStyle = new nsComputedDOMStyle(
-      aElement, *pseudo, aDocument, aStyleType, returnEmpty);
+  RefPtr<nsComputedDOMStyle> computedStyle =
+      new nsComputedDOMStyle(aElement, *pseudo, functionalPseudoParameter,
+                             aDocument, aStyleType, returnEmpty);
   return computedStyle.forget();
 }
 
@@ -332,6 +319,7 @@ void ComputedStyleMap::Update() {
 
 nsComputedDOMStyle::nsComputedDOMStyle(dom::Element* aElement,
                                        PseudoStyleType aPseudo,
+                                       nsAtom* aFunctionalPseudoParameter,
                                        Document* aDocument,
                                        StyleType aStyleType,
                                        AlwaysReturnEmptyStyle aAlwaysEmpty)
@@ -340,6 +328,7 @@ nsComputedDOMStyle::nsComputedDOMStyle(dom::Element* aElement,
       mInnerFrame(nullptr),
       mPresShell(nullptr),
       mPseudo(aPseudo),
+      mFunctionalPseudoParameter(aFunctionalPseudoParameter),
       mStyleType(aStyleType),
       mAlwaysReturnEmpty(aAlwaysEmpty) {
   MOZ_ASSERT(aElement);
@@ -401,9 +390,9 @@ NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(nsComputedDOMStyle)
   NS_INTERFACE_MAP_ENTRY(nsIMutationObserver)
 NS_INTERFACE_MAP_END_INHERITING(nsDOMCSSDeclaration)
 
-NS_IMPL_MAIN_THREAD_ONLY_CYCLE_COLLECTING_ADDREF(nsComputedDOMStyle)
-NS_IMPL_MAIN_THREAD_ONLY_CYCLE_COLLECTING_RELEASE_WITH_LAST_RELEASE(
-    nsComputedDOMStyle, ClearComputedStyle())
+NS_IMPL_CYCLE_COLLECTING_ADDREF(nsComputedDOMStyle)
+NS_IMPL_CYCLE_COLLECTING_RELEASE_WITH_LAST_RELEASE(nsComputedDOMStyle,
+                                                   ClearComputedStyle())
 
 void nsComputedDOMStyle::GetPropertyValue(const nsCSSPropertyID aPropID,
                                           nsACString& aValue) {
@@ -477,7 +466,8 @@ void nsComputedDOMStyle::GetPropertyValue(
     MOZ_ASSERT(nsCSSProps::IsCustomPropertyName(aMaybeCustomPropertyName));
     const nsACString& name =
         Substring(aMaybeCustomPropertyName, CSS_CUSTOM_NAME_PREFIX_LENGTH);
-    Servo_GetCustomPropertyValue(mComputedStyle, &name, &aReturn);
+    Servo_GetCustomPropertyValue(
+        mComputedStyle, mPresShell->StyleSet()->RawData(), &name, &aReturn);
     return;
   }
 
@@ -511,11 +501,13 @@ void nsComputedDOMStyle::GetPropertyValue(
 
 /* static */
 already_AddRefed<const ComputedStyle> nsComputedDOMStyle::GetComputedStyle(
-    Element* aElement, PseudoStyleType aPseudo, StyleType aStyleType) {
+    Element* aElement, PseudoStyleType aPseudo,
+    nsAtom* aFunctionalPseudoParameter, StyleType aStyleType) {
   if (Document* doc = aElement->GetComposedDoc()) {
     doc->FlushPendingNotifications(FlushType::Style);
   }
-  return GetComputedStyleNoFlush(aElement, aPseudo, aStyleType);
+  return GetComputedStyleNoFlush(aElement, aPseudo, aFunctionalPseudoParameter,
+                                 aStyleType);
 }
 
 /**
@@ -552,10 +544,10 @@ static bool IsInFlatTree(const Element& aElement) {
 }
 
 already_AddRefed<const ComputedStyle>
-nsComputedDOMStyle::DoGetComputedStyleNoFlush(const Element* aElement,
-                                              PseudoStyleType aPseudo,
-                                              PresShell* aPresShell,
-                                              StyleType aStyleType) {
+nsComputedDOMStyle::DoGetComputedStyleNoFlush(
+    const Element* aElement, PseudoStyleType aPseudo,
+    nsAtom* aFunctionalPseudoParameter, PresShell* aPresShell,
+    StyleType aStyleType) {
   MOZ_ASSERT(aElement, "NULL element");
 
   // If the content has a pres shell, we must use it.  Otherwise we'd
@@ -581,8 +573,7 @@ nsComputedDOMStyle::DoGetComputedStyleNoFlush(const Element* aElement,
     return nullptr;
   }
 
-  if (!StaticPrefs::layout_css_computed_style_styles_outside_flat_tree() &&
-      !IsInFlatTree(*aElement)) {
+  if (!IsInFlatTree(*aElement)) {
     return nullptr;
   }
 
@@ -607,16 +598,17 @@ nsComputedDOMStyle::DoGetComputedStyleNoFlush(const Element* aElement,
   StyleRuleInclusion rules = aStyleType == StyleType::DefaultOnly
                                  ? StyleRuleInclusion::DefaultOnly
                                  : StyleRuleInclusion::All;
-  RefPtr<ComputedStyle> result =
-      styleSet->ResolveStyleLazily(*aElement, aPseudo, rules);
+  RefPtr<ComputedStyle> result = styleSet->ResolveStyleLazily(
+      *aElement, aPseudo, aFunctionalPseudoParameter, rules);
   return result.forget();
 }
 
 already_AddRefed<const ComputedStyle>
-nsComputedDOMStyle::GetUnanimatedComputedStyleNoFlush(Element* aElement,
-                                                      PseudoStyleType aPseudo) {
+nsComputedDOMStyle::GetUnanimatedComputedStyleNoFlush(
+    Element* aElement, PseudoStyleType aPseudo,
+    nsAtom* aFunctionalPseudoParameter) {
   RefPtr<const ComputedStyle> style =
-      GetComputedStyleNoFlush(aElement, aPseudo);
+      GetComputedStyleNoFlush(aElement, aPseudo, aFunctionalPseudoParameter);
   if (!style) {
     return nullptr;
   }
@@ -944,7 +936,7 @@ bool nsComputedDOMStyle::NeedsToFlushLayout(nsCSSPropertyID aPropID) const {
     case eCSSProperty_height:
       return !IsNonReplacedInline(frame);
     case eCSSProperty_line_height:
-      return frame->StyleText()->mLineHeight.IsMozBlockHeight();
+      return frame->StyleFont()->mLineHeight.IsMozBlockHeight();
     case eCSSProperty_grid_template_rows:
     case eCSSProperty_grid_template_columns:
       return !!nsGridContainerFrame::GetGridContainerFrame(frame);
@@ -1117,7 +1109,7 @@ void nsComputedDOMStyle::UpdateCurrentStyleSources(nsCSSPropertyID aPropID) {
     // Need to resolve a style.
     RefPtr<const ComputedStyle> resolvedComputedStyle =
         DoGetComputedStyleNoFlush(
-            mElement, mPseudo,
+            mElement, mPseudo, mFunctionalPseudoParameter,
             presShellForContent ? presShellForContent : mPresShell, mStyleType);
     if (!resolvedComputedStyle) {
       ClearComputedStyle();

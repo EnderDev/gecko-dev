@@ -14,6 +14,7 @@
 #include "Quaternion.h"
 #include "UserData.h"
 #include "FontVariation.h"
+#include <functional>
 #include <vector>
 
 // GenericRefCountedBase allows us to hold on to refcounted objects of any type
@@ -84,8 +85,10 @@ namespace mozilla {
 class Mutex;
 
 namespace layers {
+class MemoryOrShmem;
+class SurfaceDescriptorBuffer;
 class TextureData;
-}
+}  // namespace layers
 
 namespace wr {
 struct FontInstanceOptions;
@@ -1007,7 +1010,7 @@ class Path : public external::AtomicRefCounted<Path> {
 
   virtual Point ComputePointAtLength(Float aLength, Point* aTangent = nullptr);
 
-  virtual bool IsEmpty() const { return false; }
+  virtual bool IsEmpty() const = 0;
 
  protected:
   Path();
@@ -1028,6 +1031,8 @@ class PathBuilder : public PathSink {
   virtual already_AddRefed<Path> Finish() = 0;
 
   virtual BackendType GetBackendType() const = 0;
+
+  virtual bool IsActive() const = 0;
 };
 
 struct Glyph {
@@ -2076,7 +2081,6 @@ class GFX2D_API Factory {
 #ifdef XP_DARWIN
   static already_AddRefed<ScaledFont> CreateScaledFontForMacFont(
       CGFontRef aCGFont, const RefPtr<UnscaledFont>& aUnscaledFont, Float aSize,
-      const DeviceColor& aFontSmoothingBackgroundColor,
       bool aUseFontSmoothing = true, bool aApplySyntheticBold = false,
       bool aHasColorGlyphs = false);
 #endif
@@ -2253,6 +2257,11 @@ class GFX2D_API Factory {
   static already_AddRefed<DataSourceSurface>
   CreateBGRA8DataSourceSurfaceForD3D11Texture(ID3D11Texture2D* aSrcTexture,
                                               uint32_t aArrayIndex = 0);
+
+  static nsresult CreateSdbForD3D11Texture(
+      ID3D11Texture2D* aSrcTexture, const IntSize& aSrcSize,
+      layers::SurfaceDescriptorBuffer& aSdBuffer,
+      const std::function<layers::MemoryOrShmem(uint32_t)>& aAllocate);
 
   static bool ReadbackTexture(layers::TextureData* aDestCpuTexture,
                               ID3D11Texture2D* aSrcTexture);

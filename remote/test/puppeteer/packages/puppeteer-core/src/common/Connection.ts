@@ -18,12 +18,14 @@ import {Protocol} from 'devtools-protocol';
 import {ProtocolMapping} from 'devtools-protocol/types/protocol-mapping.js';
 
 import {assert} from '../util/assert.js';
-import {createDeferredPromise} from '../util/util.js';
+import {Deferred} from '../util/Deferred.js';
 
 import {ConnectionTransport} from './ConnectionTransport.js';
 import {debug} from './Debug.js';
-import {ProtocolError} from './Errors.js';
+import {TargetCloseError, ProtocolError} from './Errors.js';
 import {EventEmitter} from './EventEmitter.js';
+import {CDPTarget} from './Target.js';
+import {debugError} from './util.js';
 
 const debugProtocolSend = debug('puppeteer:protocol:SEND ►');
 const debugProtocolReceive = debug('puppeteer:protocol:RECV ◀');
@@ -60,10 +62,10 @@ function createIncrementalIdGenerator(): GetIdFn {
 /**
  * @internal
  */
-class Callback {
+export class Callback {
   #id: number;
   #error = new ProtocolError();
-  #promise = createDeferredPromise<unknown>();
+  #deferred = Deferred.create<unknown>();
   #timer?: ReturnType<typeof setTimeout>;
   #label: string;
 
@@ -72,7 +74,7 @@ class Callback {
     this.#label = label;
     if (timeout) {
       this.#timer = setTimeout(() => {
-        this.#promise.reject(
+        this.#deferred.reject(
           rewriteError(
             this.#error,
             `${label} timed out. Increase the 'protocolTimeout' setting in launch/connect calls for a higher timeout if needed.`
@@ -84,20 +86,20 @@ class Callback {
 
   resolve(value: unknown): void {
     clearTimeout(this.#timer);
-    this.#promise.resolve(value);
+    this.#deferred.resolve(value);
   }
 
   reject(error: Error): void {
     clearTimeout(this.#timer);
-    this.#promise.reject(error);
+    this.#deferred.reject(error);
   }
 
   get id(): number {
     return this.#id;
   }
 
-  get promise(): Promise<unknown> {
-    return this.#promise;
+  get promise(): Deferred<unknown> {
+    return this.#deferred;
   }
 
   get error(): ProtocolError {
@@ -115,7 +117,7 @@ class Callback {
  * @internal
  */
 export class CallbackRegistry {
-  #callbacks: Map<number, Callback> = new Map();
+  #callbacks = new Map<number, Callback>();
   #idGenerator = createIncrementalIdGenerator();
 
   create(
@@ -130,14 +132,17 @@ export class CallbackRegistry {
     } catch (error) {
       // We still throw sync errors synchronously and clean up the scheduled
       // callback.
-      callback.promise.catch(() => {
-        this.#callbacks.delete(callback.id);
-      });
+      callback.promise
+        .valueOrThrow()
+        .catch(debugError)
+        .finally(() => {
+          this.#callbacks.delete(callback.id);
+        });
       callback.reject(error as Error);
       throw error;
     }
     // Must only have sync code up until here.
-    return callback.promise.finally(() => {
+    return callback.promise.valueOrThrow().finally(() => {
       this.#callbacks.delete(callback.id);
     });
   }
@@ -150,10 +155,25 @@ export class CallbackRegistry {
     this._reject(callback, message, originalMessage);
   }
 
-  _reject(callback: Callback, message: string, originalMessage?: string): void {
+  _reject(
+    callback: Callback,
+    errorMessage: string | ProtocolError,
+    originalMessage?: string
+  ): void {
+    let error: ProtocolError;
+    let message: string;
+    if (errorMessage instanceof ProtocolError) {
+      error = errorMessage;
+      error.cause = callback.error;
+      message = errorMessage.message;
+    } else {
+      error = callback.error;
+      message = errorMessage;
+    }
+
     callback.reject(
       rewriteError(
-        callback.error,
+        error,
         `Protocol error (${callback.label}): ${message}`,
         originalMessage
       )
@@ -171,7 +191,7 @@ export class CallbackRegistry {
   clear(): void {
     for (const callback of this.#callbacks.values()) {
       // TODO: probably we can accept error messages as params.
-      this._reject(callback, 'Target closed');
+      this._reject(callback, new TargetCloseError('Target closed'));
     }
     this.#callbacks.clear();
   }
@@ -185,7 +205,7 @@ export class Connection extends EventEmitter {
   #transport: ConnectionTransport;
   #delay: number;
   #timeout: number;
-  #sessions: Map<string, CDPSessionImpl> = new Map();
+  #sessions = new Map<string, CDPSessionImpl>();
   #closed = false;
   #manuallyAttached = new Set<string>();
   #callbacks = new CallbackRegistry();
@@ -287,8 +307,8 @@ export class Connection extends EventEmitter {
    */
   protected async onMessage(message: string): Promise<void> {
     if (this.#delay) {
-      await new Promise(f => {
-        return setTimeout(f, this.#delay);
+      await new Promise(r => {
+        return setTimeout(r, this.#delay);
       });
     }
     debugProtocolReceive(message);
@@ -298,7 +318,8 @@ export class Connection extends EventEmitter {
       const session = new CDPSessionImpl(
         this,
         object.params.targetInfo.type,
-        sessionId
+        sessionId,
+        object.sessionId
       );
       this.#sessions.set(sessionId, session);
       this.emit('sessionattached', session);
@@ -399,7 +420,7 @@ export class Connection extends EventEmitter {
 }
 
 /**
- * @public
+ * @internal
  */
 export interface CDPSessionOnMessageObject {
   id?: number;
@@ -416,6 +437,12 @@ export interface CDPSessionOnMessageObject {
  */
 export const CDPSessionEmittedEvents = {
   Disconnected: Symbol('CDPSession.Disconnected'),
+  Swapped: Symbol('CDPSession.Swapped'),
+  /**
+   * Emitted when the session is ready to be configured during the auto-attach
+   * process. Right after the event is handled, the session will be resumed.
+   */
+  Ready: Symbol('CDPSession.Ready'),
 } as const;
 
 /**
@@ -458,6 +485,15 @@ export class CDPSession extends EventEmitter {
     throw new Error('Not implemented');
   }
 
+  /**
+   * Parent session in terms of CDP's auto-attach mechanism.
+   *
+   * @internal
+   */
+  parentSession(): CDPSession | undefined {
+    return undefined;
+  }
+
   send<T extends keyof ProtocolMapping.Commands>(
     method: T,
     ...paramArgs: ProtocolMapping.Commands[T]['paramsType']
@@ -492,19 +528,54 @@ export class CDPSessionImpl extends CDPSession {
   #targetType: string;
   #callbacks = new CallbackRegistry();
   #connection?: Connection;
+  #parentSessionId?: string;
+  #target?: CDPTarget;
 
   /**
    * @internal
    */
-  constructor(connection: Connection, targetType: string, sessionId: string) {
+  constructor(
+    connection: Connection,
+    targetType: string,
+    sessionId: string,
+    parentSessionId: string | undefined
+  ) {
     super();
     this.#connection = connection;
     this.#targetType = targetType;
     this.#sessionId = sessionId;
+    this.#parentSessionId = parentSessionId;
+  }
+
+  /**
+   * Sets the CDPTarget associated with the session instance.
+   *
+   * @internal
+   */
+  _setTarget(target: CDPTarget): void {
+    this.#target = target;
+  }
+
+  /**
+   * Gets the CDPTarget associated with the session instance.
+   *
+   * @internal
+   */
+  _target(): CDPTarget {
+    assert(this.#target, 'Target must exist');
+    return this.#target;
   }
 
   override connection(): Connection | undefined {
     return this.#connection;
+  }
+
+  override parentSession(): CDPSession | undefined {
+    if (!this.#parentSessionId) {
+      return;
+    }
+    const parent = this.#connection?.session(this.#parentSessionId);
+    return parent ?? undefined;
   }
 
   override send<T extends keyof ProtocolMapping.Commands>(
@@ -513,7 +584,7 @@ export class CDPSessionImpl extends CDPSession {
   ): Promise<ProtocolMapping.Commands[T]['returnType']> {
     if (!this.#connection) {
       return Promise.reject(
-        new Error(
+        new TargetCloseError(
           `Protocol error (${method}): Session closed. Most likely the ${
             this.#targetType
           } has been closed.`
@@ -588,7 +659,13 @@ function createProtocolErrorMessage(object: {
   error: {message: string; data: any; code: number};
 }): string {
   let message = `${object.error.message}`;
-  if ('data' in object.error) {
+  // TODO: remove the type checks when we stop connecting to BiDi with a CDP
+  // client.
+  if (
+    object.error &&
+    typeof object.error === 'object' &&
+    'data' in object.error
+  ) {
     message += ` ${object.error.data}`;
   }
   return message;
@@ -607,9 +684,6 @@ function rewriteError(
 /**
  * @internal
  */
-export function isTargetClosedError(err: Error): boolean {
-  return (
-    err.message.includes('Target closed') ||
-    err.message.includes('Session closed')
-  );
+export function isTargetClosedError(error: Error): boolean {
+  return error instanceof TargetCloseError;
 }

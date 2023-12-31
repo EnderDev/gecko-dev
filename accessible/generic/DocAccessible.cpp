@@ -12,20 +12,15 @@
 #include "EventTree.h"
 #include "HTMLImageMapAccessible.h"
 #include "mozilla/ProfilerMarkers.h"
-#include "nsAccCache.h"
 #include "nsAccUtils.h"
 #include "nsEventShell.h"
 #include "nsIIOService.h"
 #include "nsLayoutUtils.h"
 #include "nsTextEquivUtils.h"
-#include "Pivot.h"
-#include "Role.h"
-#include "RootAccessible.h"
+#include "mozilla/a11y/Role.h"
 #include "TreeWalker.h"
 #include "xpcAccessibleDocument.h"
 
-#include "nsCommandManager.h"
-#include "nsContentUtils.h"
 #include "nsIDocShell.h"
 #include "mozilla/dom/Document.h"
 #include "nsPIDOMWindow.h"
@@ -36,24 +31,21 @@
 #include "nsImageFrame.h"
 #include "nsViewManager.h"
 #include "nsIScrollableFrame.h"
-#include "nsUnicharUtils.h"
 #include "nsIURI.h"
 #include "nsIWebNavigation.h"
 #include "nsFocusManager.h"
-#include "nsTHashSet.h"
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/Components.h"  // for mozilla::components
 #include "mozilla/EditorBase.h"
 #include "mozilla/HTMLEditor.h"
 #include "mozilla/ipc/ProcessChild.h"
+#include "mozilla/PerfStats.h"
 #include "mozilla/PresShell.h"
 #include "nsAccessibilityService.h"
 #include "mozilla/a11y/DocAccessibleChild.h"
-#include "mozilla/a11y/DocAccessibleParent.h"
 #include "mozilla/dom/AncestorIterator.h"
 #include "mozilla/dom/BrowserChild.h"
-#include "mozilla/dom/BrowserParent.h"
 #include "mozilla/dom/DocumentType.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/HTMLSelectElement.h"
@@ -88,7 +80,7 @@ DocAccessible::DocAccessible(dom::Document* aDocument,
        // before setting up the vtable we will call LocalAccessible::AddRef()
        // but not the overrides of it for subclasses.  It is important to call
        // those overrides to avoid confusing leak checking machinary.
-      HyperTextAccessibleWrap(nullptr, nullptr),
+      HyperTextAccessible(nullptr, nullptr),
       // XXX aaronl should we use an algorithm for the initial cache size?
       mAccessibleCache(kDefaultCacheLength),
       mNodeToAccessibleMap(kDefaultCacheLength),
@@ -367,7 +359,27 @@ void DocAccessible::QueueCacheUpdate(LocalAccessible* aAcc,
   if (!mIPCDoc) {
     return;
   }
-  uint64_t& domain = mQueuedCacheUpdates.LookupOrInsert(aAcc, 0);
+  // These strong references aren't necessary because WithEntryHandle is
+  // guaranteed to run synchronously. However, static analysis complains without
+  // them.
+  RefPtr<DocAccessible> self = this;
+  RefPtr<LocalAccessible> acc = aAcc;
+  size_t arrayIndex =
+      mQueuedCacheUpdatesHash.WithEntryHandle(aAcc, [self, acc](auto&& entry) {
+        if (entry.HasEntry()) {
+          // This LocalAccessible has already been queued. Return its index in
+          // the queue array so we can update its queued domains.
+          return entry.Data();
+        }
+        // Add this LocalAccessible to the queue array.
+        size_t index = self->mQueuedCacheUpdatesArray.Length();
+        self->mQueuedCacheUpdatesArray.EmplaceBack(std::make_pair(acc, 0));
+        // Also add it to the hash map so we can avoid processing the same
+        // LocalAccessible twice.
+        return entry.Insert(index);
+      });
+  auto& [arrayAcc, domain] = mQueuedCacheUpdatesArray[arrayIndex];
+  MOZ_ASSERT(arrayAcc == aAcc);
   domain |= aNewDomain;
   Controller()->ScheduleProcessing();
 }
@@ -484,10 +496,11 @@ void DocAccessible::Shutdown() {
   }
 
   mChildDocuments.Clear();
-  // mQueuedCacheUpdates can contain a reference to this document (ex. if the
+  // mQueuedCacheUpdates* can contain a reference to this document (ex. if the
   // doc is scrollable and we're sending a scroll position update). Clear the
   // map here to avoid creating ref cycles.
-  mQueuedCacheUpdates.Clear();
+  mQueuedCacheUpdatesArray.Clear();
+  mQueuedCacheUpdatesHash.Clear();
 
   // XXX thinking about ordering?
   if (mIPCDoc) {
@@ -529,7 +542,7 @@ void DocAccessible::Shutdown() {
     iter.Remove();
   }
 
-  HyperTextAccessibleWrap::Shutdown();
+  HyperTextAccessible::Shutdown();
 
   MOZ_ASSERT(GetAccService());
   GetAccService()->NotifyOfDocumentShutdown(
@@ -1465,12 +1478,13 @@ void DocAccessible::ProcessInvalidationList() {
 void DocAccessible::ProcessQueuedCacheUpdates() {
   AUTO_PROFILER_MARKER_TEXT("DocAccessible::ProcessQueuedCacheUpdates", A11Y,
                             {}, ""_ns);
+  PerfStats::AutoMetricRecording<
+      PerfStats::Metric::A11Y_ProcessQueuedCacheUpdate>
+      autoRecording;
   // DO NOT ADD CODE ABOVE THIS BLOCK: THIS CODE IS MEASURING TIMINGS.
 
   nsTArray<CacheData> data;
-  for (auto iter = mQueuedCacheUpdates.Iter(); !iter.Done(); iter.Next()) {
-    LocalAccessible* acc = iter.Key();
-    uint64_t domain = iter.UserData();
+  for (auto [acc, domain] : mQueuedCacheUpdatesArray) {
     if (acc && acc->IsInDocument() && !acc->IsDefunct()) {
       RefPtr<AccAttributes> fields =
           acc->BundleFieldsForCache(domain, CacheUpdateType::Update);
@@ -1483,7 +1497,8 @@ void DocAccessible::ProcessQueuedCacheUpdates() {
     }
   }
 
-  mQueuedCacheUpdates.Clear();
+  mQueuedCacheUpdatesArray.Clear();
+  mQueuedCacheUpdatesHash.Clear();
 
   if (mViewportCacheDirty) {
     RefPtr<AccAttributes> fields =
@@ -1572,6 +1587,8 @@ void DocAccessible::NotifyOfLoading(bool aIsReloading) {
 
 void DocAccessible::DoInitialUpdate() {
   AUTO_PROFILER_MARKER_TEXT("DocAccessible::DoInitialUpdate", A11Y, {}, ""_ns);
+  PerfStats::AutoMetricRecording<PerfStats::Metric::A11Y_DoInitialUpdate>
+      autoRecording;
   // DO NOT ADD CODE ABOVE THIS BLOCK: THIS CODE IS MEASURING TIMINGS.
 
   if (nsCoreUtils::IsTopLevelContentDocInProcess(mDocumentNode)) {
@@ -1638,7 +1655,7 @@ void DocAccessible::DoInitialUpdate() {
       SendCache(CacheDomain::All, CacheUpdateType::Initial);
 
       for (auto idx = 0U; idx < mChildren.Length(); idx++) {
-        ipcDoc->InsertIntoIpcTree(this, mChildren.ElementAt(idx), idx, true);
+        ipcDoc->InsertIntoIpcTree(mChildren.ElementAt(idx), true);
       }
     }
   }
@@ -1810,6 +1827,33 @@ bool DocAccessible::UpdateAccessibleOnAttrChange(dom::Element* aElement,
     // If the input[type] changes, we should recreate the accessible.
     RecreateAccessible(aElement);
     return true;
+  }
+
+  if (aAttribute == nsGkAtoms::href &&
+      !nsCoreUtils::HasClickListener(aElement)) {
+    // If the href is added or removed for a or area elements without click
+    // listeners, we need to recreate the accessible since the role might have
+    // changed. Without an href or click listener, the accessible must be a
+    // generic.
+    if (aElement->IsHTMLElement(nsGkAtoms::a)) {
+      LocalAccessible* acc = GetAccessible(aElement);
+      if (!acc) {
+        return false;
+      }
+      if (acc->IsHTMLLink() != aElement->HasAttr(nsGkAtoms::href)) {
+        RecreateAccessible(aElement);
+        return true;
+      }
+    } else if (aElement->IsHTMLElement(nsGkAtoms::area)) {
+      // For area accessibles, we have to recreate the entire image map, since
+      // the image map accessible manages the tree itself.
+      LocalAccessible* areaAcc = GetAccessibleEvenIfNotInMap(aElement);
+      if (!areaAcc || !areaAcc->LocalParent()) {
+        return false;
+      }
+      RecreateAccessible(areaAcc->LocalParent()->GetContent());
+      return true;
+    }
   }
 
   if (aElement->IsHTMLElement(nsGkAtoms::img) && aAttribute == nsGkAtoms::alt) {
@@ -2600,6 +2644,7 @@ void DocAccessible::UncacheChildrenInSubtree(LocalAccessible* aRoot) {
 }
 
 void DocAccessible::ShutdownChildrenInSubtree(LocalAccessible* aAccessible) {
+  MOZ_ASSERT(!nsAccessibilityService::IsShutdown());
   // Traverse through children and shutdown them before this accessible. When
   // child gets shutdown then it removes itself from children array of its
   // parent. Use jdx index to process the cases if child is not attached to the
@@ -2614,7 +2659,16 @@ void DocAccessible::ShutdownChildrenInSubtree(LocalAccessible* aAccessible) {
 
     // Don't cross document boundaries. The outerdoc shutdown takes care about
     // its subdocument.
-    if (!child->IsDoc()) ShutdownChildrenInSubtree(child);
+    if (!child->IsDoc()) {
+      ShutdownChildrenInSubtree(child);
+      if (nsAccessibilityService::IsShutdown()) {
+        // If XPCOM is the only consumer (devtools & mochitests), shutting down
+        // the child's subtree can cause a11y to shut down because the last
+        // xpcom accessibles will be removed. In that case, return early, our
+        // work is done.
+        return;
+      }
+    }
   }
 
   UnbindFromDocument(aAccessible);

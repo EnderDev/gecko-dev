@@ -50,6 +50,7 @@ use core::time::Duration;
 
 use crate::render_api::{DebugCommand, ApiMsg, MemoryReport};
 use crate::batch::{AlphaBatchContainer, BatchKind, BatchFeatures, BatchTextures, BrushBatchKind, ClipBatchList};
+use crate::batch::{ClipMaskInstanceList};
 #[cfg(any(feature = "capture", feature = "replay"))]
 use crate::capture::{CaptureConfig, ExternalCaptureImage, PlainExternalImage};
 use crate::composite::{CompositeState, CompositeTileSurface, ResolvedExternalSurface, CompositorSurfaceTransform};
@@ -67,7 +68,7 @@ use crate::frame_builder::Frame;
 use glyph_rasterizer::GlyphFormat;
 use crate::gpu_cache::{GpuCacheUpdate, GpuCacheUpdateList};
 use crate::gpu_cache::{GpuCacheDebugChunk, GpuCacheDebugCmd};
-use crate::gpu_types::{ScalingInstance, SvgFilterInstance, CopyInstance, MaskInstance, PrimitiveInstanceData};
+use crate::gpu_types::{ScalingInstance, SvgFilterInstance, CopyInstance, PrimitiveInstanceData};
 use crate::gpu_types::{BlurInstance, ClearInstance, CompositeInstance, CompositorTransform};
 use crate::internal_types::{TextureSource, TextureCacheCategory, FrameId};
 #[cfg(any(feature = "capture", feature = "replay"))]
@@ -301,16 +302,12 @@ fn flag_changed(before: DebugFlags, after: DebugFlags, select: DebugFlags) -> Op
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub enum ShaderColorMode {
-    FromRenderPassMode = 0,
-    Alpha = 1,
-    SubpixelWithBgColorPass0 = 2,
-    SubpixelWithBgColorPass1 = 3,
-    SubpixelWithBgColorPass2 = 4,
-    SubpixelDualSource = 5,
-    BitmapShadow = 6,
-    ColorBitmap = 7,
-    Image = 8,
-    MultiplyDualSource = 9,
+    Alpha = 0,
+    SubpixelDualSource = 1,
+    BitmapShadow = 2,
+    ColorBitmap = 3,
+    Image = 4,
+    MultiplyDualSource = 5,
 }
 
 impl From<GlyphFormat> for ShaderColorMode {
@@ -644,7 +641,6 @@ pub enum BlendMode {
     PremultipliedAlpha,
     PremultipliedDestOut,
     SubpixelDualSource,
-    SubpixelWithBgColor,
     Advanced(MixBlendMode),
     MultiplyDualSource,
     Screen,
@@ -2174,33 +2170,26 @@ impl Renderer {
         &mut self,
         draw_target: &DrawTarget,
         prim_instances: &[PrimitiveInstanceData],
-        mask_instances_fast: &[MaskInstance],
-        mask_instances_slow: &[MaskInstance],
         prim_instances_with_scissor: &FastHashMap<DeviceIntRect, Vec<PrimitiveInstanceData>>,
-        mask_instances_fast_with_scissor: &FastHashMap<DeviceIntRect, Vec<MaskInstance>>,
-        mask_instances_slow_with_scissor: &FastHashMap<DeviceIntRect, Vec<MaskInstance>>,
         projection: &default::Transform3D<f32>,
         stats: &mut RendererStats,
     ) {
-        if prim_instances.is_empty() && prim_instances_with_scissor.is_empty() {
-            return;
-        }
+        self.device.disable_depth_write();
 
         {
             let _timer = self.gpu_profiler.start_timer(GPU_TAG_INDIRECT_PRIM);
 
-            self.device.disable_depth_write();
-            self.set_blend(false, FramebufferKind::Other);
-
-            self.shaders.borrow_mut().ps_quad_textured.bind(
-                &mut self.device,
-                projection,
-                None,
-                &mut self.renderer_errors,
-                &mut self.profile,
-            );
-
             if !prim_instances.is_empty() {
+                self.set_blend(false, FramebufferKind::Other);
+
+                self.shaders.borrow_mut().ps_quad_textured.bind(
+                    &mut self.device,
+                    projection,
+                    None,
+                    &mut self.renderer_errors,
+                    &mut self.profile,
+                );
+
                 self.draw_instanced_batch(
                     prim_instances,
                     VertexArrayKind::Primitive,
@@ -2210,7 +2199,17 @@ impl Renderer {
             }
 
             if !prim_instances_with_scissor.is_empty() {
+                self.set_blend(true, FramebufferKind::Other);
+                self.device.set_blend_mode_premultiplied_alpha();
                 self.device.enable_scissor();
+
+                self.shaders.borrow_mut().ps_quad_textured.bind(
+                    &mut self.device,
+                    projection,
+                    None,
+                    &mut self.renderer_errors,
+                    &mut self.profile,
+                );
 
                 for (scissor_rect, prim_instances) in prim_instances_with_scissor {
                     self.device.set_scissor_rect(draw_target.to_framebuffer_rect(*scissor_rect));
@@ -2226,6 +2225,16 @@ impl Renderer {
                 self.device.disable_scissor();
             }
         }
+    }
+
+    fn handle_clips(
+        &mut self,
+        draw_target: &DrawTarget,
+        masks: &ClipMaskInstanceList,
+        projection: &default::Transform3D<f32>,
+        stats: &mut RendererStats,
+    ) {
+        self.device.disable_depth_write();
 
         {
             let _timer = self.gpu_profiler.start_timer(GPU_TAG_INDIRECT_MASK);
@@ -2233,7 +2242,7 @@ impl Renderer {
             self.set_blend(true, FramebufferKind::Other);
             self.set_blend_mode_multiply(FramebufferKind::Other);
 
-            if !mask_instances_fast.is_empty() {
+            if !masks.mask_instances_fast.is_empty() {
                 self.shaders.borrow_mut().ps_mask_fast.bind(
                     &mut self.device,
                     projection,
@@ -2243,14 +2252,14 @@ impl Renderer {
                 );
 
                 self.draw_instanced_batch(
-                    mask_instances_fast,
+                    &masks.mask_instances_fast,
                     VertexArrayKind::Mask,
                     &BatchTextures::empty(),
                     stats,
                 );
             }
 
-            if !mask_instances_fast_with_scissor.is_empty() {
+            if !masks.mask_instances_fast_with_scissor.is_empty() {
                 self.shaders.borrow_mut().ps_mask_fast.bind(
                     &mut self.device,
                     projection,
@@ -2261,7 +2270,7 @@ impl Renderer {
 
                 self.device.enable_scissor();
 
-                for (scissor_rect, instances) in mask_instances_fast_with_scissor {
+                for (scissor_rect, instances) in &masks.mask_instances_fast_with_scissor {
                     self.device.set_scissor_rect(draw_target.to_framebuffer_rect(*scissor_rect));
 
                     self.draw_instanced_batch(
@@ -2275,7 +2284,51 @@ impl Renderer {
                 self.device.disable_scissor();
             }
 
-            if !mask_instances_slow.is_empty() {
+            if !masks.image_mask_instances.is_empty() {
+                self.shaders.borrow_mut().ps_quad_textured.bind(
+                    &mut self.device,
+                    projection,
+                    None,
+                    &mut self.renderer_errors,
+                    &mut self.profile,
+                );
+
+                for (texture, prim_instances) in &masks.image_mask_instances {
+                    self.draw_instanced_batch(
+                        prim_instances,
+                        VertexArrayKind::Primitive,
+                        &BatchTextures::composite_rgb(*texture),
+                        stats,
+                    );
+                }
+            }
+
+            if !masks.image_mask_instances_with_scissor.is_empty() {
+                self.device.enable_scissor();
+
+                self.shaders.borrow_mut().ps_quad_textured.bind(
+                    &mut self.device,
+                    projection,
+                    None,
+                    &mut self.renderer_errors,
+                    &mut self.profile,
+                );
+
+                for ((scissor_rect, texture), prim_instances) in &masks.image_mask_instances_with_scissor {
+                    self.device.set_scissor_rect(draw_target.to_framebuffer_rect(*scissor_rect));
+
+                    self.draw_instanced_batch(
+                        prim_instances,
+                        VertexArrayKind::Primitive,
+                        &BatchTextures::composite_rgb(*texture),
+                        stats,
+                    );
+                }
+
+                self.device.disable_scissor();
+            }
+
+            if !masks.mask_instances_slow.is_empty() {
                 self.shaders.borrow_mut().ps_mask.bind(
                     &mut self.device,
                     projection,
@@ -2285,14 +2338,14 @@ impl Renderer {
                 );
 
                 self.draw_instanced_batch(
-                    mask_instances_slow,
+                    &masks.mask_instances_slow,
                     VertexArrayKind::Mask,
                     &BatchTextures::empty(),
                     stats,
                 );
             }
 
-            if !mask_instances_slow_with_scissor.is_empty() {
+            if !masks.mask_instances_slow_with_scissor.is_empty() {
                 self.shaders.borrow_mut().ps_mask.bind(
                     &mut self.device,
                     projection,
@@ -2303,7 +2356,7 @@ impl Renderer {
 
                 self.device.enable_scissor();
 
-                for (scissor_rect, instances) in mask_instances_slow_with_scissor {
+                for (scissor_rect, instances) in &masks.mask_instances_slow_with_scissor {
                     self.device.set_scissor_rect(draw_target.to_framebuffer_rect(*scissor_rect));
 
                     self.draw_instanced_batch(
@@ -2779,23 +2832,6 @@ impl Renderer {
                         BlendMode::SubpixelDualSource => {
                             self.device.set_blend_mode_subpixel_dual_source();
                         }
-                        BlendMode::SubpixelWithBgColor => {
-                            // Using the three pass "component alpha with font smoothing
-                            // background color" rendering technique:
-                            //
-                            // /webrender/doc/text-rendering.md
-                            //
-                            self.device.set_blend_mode_subpixel_with_bg_color_pass0();
-                            // need to make sure the shader is bound
-                            shader.bind(
-                                &mut self.device,
-                                projection,
-                                None,
-                                &mut self.renderer_errors,
-                                &mut self.profile,
-                            );
-                            self.device.switch_mode(ShaderColorMode::SubpixelWithBgColorPass0 as _);
-                        }
                         BlendMode::Advanced(mode) => {
                             if self.enable_advanced_blend_barriers {
                                 self.device.gl().blend_barrier_khr();
@@ -2846,44 +2882,6 @@ impl Renderer {
                     &batch.key.textures,
                     stats
                 );
-
-                if batch.key.blend_mode == BlendMode::SubpixelWithBgColor {
-                    self.set_blend_mode_subpixel_with_bg_color_pass1(framebuffer_kind);
-                    // re-binding the shader after the blend mode change
-                    shader.bind(
-                        &mut self.device,
-                        projection,
-                        None,
-                        &mut self.renderer_errors,
-                        &mut self.profile,
-                    );
-                    self.device.switch_mode(ShaderColorMode::SubpixelWithBgColorPass1 as _);
-
-                    // When drawing the 2nd and 3rd passes, we know that the VAO, textures etc
-                    // are all set up from the previous draw_instanced_batch call,
-                    // so just issue a draw call here to avoid re-uploading the
-                    // instances and re-binding textures etc.
-                    self.device
-                        .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
-
-                    self.set_blend_mode_subpixel_with_bg_color_pass2(framebuffer_kind);
-                    // re-binding the shader after the blend mode change
-                    shader.bind(
-                        &mut self.device,
-                        projection,
-                        None,
-                        &mut self.renderer_errors,
-                        &mut self.profile,
-                    );
-                    self.device.switch_mode(ShaderColorMode::SubpixelWithBgColorPass2 as _);
-
-                    self.device
-                        .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
-                }
-
-                if batch.key.blend_mode == BlendMode::SubpixelWithBgColor {
-                    prev_blend_mode = BlendMode::None;
-                }
             }
 
             self.set_blend(false, framebuffer_kind);
@@ -3573,14 +3571,19 @@ impl Renderer {
         self.handle_prims(
             &draw_target,
             &target.prim_instances,
-            &target.mask_instances_fast,
-            &target.mask_instances_slow,
             &target.prim_instances_with_scissor,
-            &target.mask_instances_fast_with_scissor,
-            &target.mask_instances_slow_with_scissor,
             projection,
             stats,
         );
+
+        for clip_masks in &target.clip_masks {
+            self.handle_clips(
+                &draw_target,
+                clip_masks,
+                projection,
+                stats,
+            );
+        }
 
         if clear_depth.is_some() {
             self.device.invalidate_depth_target();
@@ -3873,6 +3876,15 @@ impl Renderer {
                 projection,
                 stats,
             );
+
+            for clip_masks in &target.clip_masks {
+                self.handle_clips(
+                    &draw_target,
+                    clip_masks,
+                    projection,
+                    stats,
+                );
+            }
         }
 
         self.gpu_profiler.finish_sampler(alpha_sampler);
@@ -5382,24 +5394,6 @@ impl Renderer {
         }
     }
 
-    fn set_blend_mode_subpixel_with_bg_color_pass1(&mut self, framebuffer_kind: FramebufferKind) {
-        if framebuffer_kind == FramebufferKind::Main &&
-                self.debug_flags.contains(DebugFlags::SHOW_OVERDRAW) {
-            self.device.set_blend_mode_show_overdraw();
-        } else {
-            self.device.set_blend_mode_subpixel_with_bg_color_pass1();
-        }
-    }
-
-    fn set_blend_mode_subpixel_with_bg_color_pass2(&mut self, framebuffer_kind: FramebufferKind) {
-        if framebuffer_kind == FramebufferKind::Main &&
-                self.debug_flags.contains(DebugFlags::SHOW_OVERDRAW) {
-            self.device.set_blend_mode_show_overdraw();
-        } else {
-            self.device.set_blend_mode_subpixel_with_bg_color_pass2();
-        }
-    }
-
     /// Clears the texture with a given color.
     fn clear_texture(&mut self, texture: &Texture, color: [f32; 4]) {
         self.device.bind_draw_target(DrawTarget::from_texture(
@@ -5412,7 +5406,7 @@ impl Renderer {
 
 bitflags! {
     /// Flags that control how shaders are pre-cached, if at all.
-    #[derive(Default)]
+    #[derive(Default, Debug, Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash)]
     pub struct ShaderPrecacheFlags: u32 {
         /// Needed for const initialization
         const EMPTY                 = 0;

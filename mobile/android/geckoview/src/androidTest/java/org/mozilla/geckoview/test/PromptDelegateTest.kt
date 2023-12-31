@@ -4,6 +4,7 @@
 
 package org.mozilla.geckoview.test
 
+import android.view.KeyEvent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.MediumTest
 import org.hamcrest.Matchers.* // ktlint-disable no-wildcard-imports
@@ -24,10 +25,21 @@ import org.mozilla.geckoview.GeckoSession.PromptDelegate.PromptResponse
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.AssertCalled
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.WithDisplay
+import org.mozilla.geckoview.test.util.TestServer
+import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 @MediumTest
-class PromptDelegateTest : BaseSessionTest() {
+class PromptDelegateTest : BaseSessionTest(
+    serverCustomHeaders = mapOf(
+        "Access-Control-Allow-Origin" to "*",
+    ),
+    responseModifiers = mapOf(
+        "/assets/www/fedcm_accounts_endpoint.json" to TestServer.ResponseModifier { response ->
+            response.replace("\$RANDOM_ID", UUID.randomUUID().toString())
+        },
+    ),
+) {
     @Test fun popupTestAllow() {
         // Ensure popup blocking is enabled for this test.
         sessionRule.setPrefsUntilTestEnd(mapOf("dom.disable_open_during_load" to true))
@@ -579,6 +591,11 @@ class PromptDelegateTest : BaseSessionTest() {
                 "dom.security.credentialmanagement.identity.enabled" to true,
             ),
         )
+        sessionRule.setPrefsUntilTestEnd(
+            mapOf(
+                "dom.security.credentialmanagement.identity.test_ignore_well_known" to true,
+            ),
+        )
         mainSession.loadTestPath(FEDCM_RP_HTML_PATH)
 
         sessionRule.delegateDuringNextWait(object : PromptDelegate {
@@ -590,40 +607,52 @@ class PromptDelegateTest : BaseSessionTest() {
                 prompt.providers.mapIndexed { index, item ->
                     assertThat("ID should match", index, equalTo(item.id))
                     assertThat(
-                        "Name should be the URL of the current page",
+                        "Name should be the name of the IDP taken from the manifest",
                         item.name,
-                        containsString("$TEST_HOST:$TEST_PORT"),
+                        containsString("Demo IDP"),
                     )
-                    assertThat("Icon should be null", item.icon, isEmptyOrNullString())
+                    assertThat("Icon should contain a valid image", item.icon ?: "", containsString("data:image"))
                 }
                 return GeckoResult.fromValue(prompt.confirm(0))
             }
+
+            @AssertCalled(count = 1)
+            override fun onSelectIdentityCredentialAccount(
+                session: GeckoSession,
+                prompt: PromptDelegate.IdentityCredential.AccountSelectorPrompt,
+            ): GeckoResult<PromptResponse> {
+                prompt.accounts.forEachIndexed { index, item ->
+                    assertThat("ID should match", index, equalTo(item.id))
+                }
+                return GeckoResult.fromValue(prompt.confirm(0))
+            }
+
+            @AssertCalled(count = 1)
+            override fun onShowPrivacyPolicyIdentityCredential(
+                session: GeckoSession,
+                prompt: PromptDelegate.IdentityCredential.PrivacyPolicyPrompt,
+            ): GeckoResult<PromptResponse> {
+                assertThat("Host should be localhost", prompt.host, equalTo("localhost"))
+                assertThat("Privacy policy url should be the same as specified in fedcm_idp_metadata.json ", prompt.privacyPolicyUrl, equalTo("privacy_policy"))
+                assertThat("Terms of service url should be the same as specified in fedcm_idp_metadata.json ", prompt.termsOfServiceUrl, equalTo("terms_of_service"))
+                assertThat("Icon should contain a valid image", prompt.icon ?: "", containsString("data:image"))
+                return GeckoResult.fromValue(prompt.confirm(true))
+            }
         })
 
-        try {
-            mainSession.waitForJS(
-                """  
-            navigator.credentials.get({
-            identity: {
-              providers: [{
-                configURL: "${createTestUrl(FEDCM_IDP_MANIFEST_PATH)}",
-                clientId: "CLIENT_ID",
-                nonce: "nonce",
-              }]
-            }
-          });
-                """.trimIndent(),
-            )
-        } catch (e: GeckoSessionTestRule.RejectedPromiseException) {
-            // As the FedCM flow is not currently completely implemented, it is expected to fail with this exception.
-            // This test will be updated and test the rest of the flow, so after the PolicyPrompt is correctly implemented
-            // and tested we can remove this code. (see bug 1840082)
-            assertThat(
-                "Error should be correct",
-                e.reason as String,
-                containsString("UnknownError: The operation failed for an unknown transient reason"),
-            )
+        mainSession.waitForJS(
+            """
+        navigator.credentials.get({
+        identity: {
+          providers: [{
+            configURL: "${createTestUrl(FEDCM_IDP_MANIFEST_PATH)}",
+            clientId: "localhost",
+            nonce: "nonce",
+          }]
         }
+      });
+            """.trimIndent(),
+        )
     }
 
     @Test
@@ -885,6 +914,72 @@ class PromptDelegateTest : BaseSessionTest() {
         )
         mainSession.synthesizeTap(10, 10)
         sessionRule.waitForResult(result)
+    }
+
+    @WithDisplay(width = 100, height = 100)
+    @Test
+    fun dateMonthTestShowPicker() {
+        mainSession.loadTestPath(PROMPT_HTML_PATH)
+        mainSession.waitForPageStop()
+
+        // type=month and type=week have no custom controls on all platforms.
+        // But mobile has the picker with dom.forms.datetime.others=true
+
+        mainSession.evaluateJS(
+            """
+            document.body.focus();
+            document.body.addEventListener('keydown', () => {
+                document.getElementById('monthexample').showPicker()
+            }, { once: true });
+            """.trimIndent(),
+        )
+        mainSession.pressKey(KeyEvent.KEYCODE_SPACE)
+
+        sessionRule.waitUntilCalled(object : PromptDelegate {
+            @AssertCalled(count = 1)
+            override fun onDateTimePrompt(session: GeckoSession, prompt: PromptDelegate.DateTimePrompt): GeckoResult<PromptDelegate.PromptResponse> {
+                assertThat("showPicker for <input type=month>", prompt.type, equalTo(PromptDelegate.DateTimePrompt.Type.MONTH))
+                return GeckoResult.fromValue(prompt.dismiss())
+            }
+        })
+
+        mainSession.evaluateJS(
+            """
+            document.body.focus();
+            document.body.addEventListener('keydown', () => {
+                document.getElementById('weekexample').showPicker()
+            }, { once: true });
+            """.trimIndent(),
+        )
+        mainSession.pressKey(KeyEvent.KEYCODE_SPACE)
+
+        sessionRule.waitUntilCalled(object : PromptDelegate {
+            @AssertCalled(count = 1)
+            override fun onDateTimePrompt(session: GeckoSession, prompt: PromptDelegate.DateTimePrompt): GeckoResult<PromptDelegate.PromptResponse> {
+                assertThat("showPicker for <input type=week>", prompt.type, equalTo(PromptDelegate.DateTimePrompt.Type.WEEK))
+                return GeckoResult.fromValue(prompt.dismiss())
+            }
+        })
+
+        // desktop has no type=time picker, but mobile has.
+
+        mainSession.evaluateJS(
+            """
+            document.body.focus();
+            document.body.addEventListener('keydown', () => {
+                document.getElementById('timeexample').showPicker()
+            }, { once: true });
+            """.trimIndent(),
+        )
+        mainSession.pressKey(KeyEvent.KEYCODE_SPACE)
+
+        sessionRule.waitUntilCalled(object : PromptDelegate {
+            @AssertCalled(count = 1)
+            override fun onDateTimePrompt(session: GeckoSession, prompt: PromptDelegate.DateTimePrompt): GeckoResult<PromptDelegate.PromptResponse> {
+                assertThat("showPicker for <input type=time>", prompt.type, equalTo(PromptDelegate.DateTimePrompt.Type.TIME))
+                return GeckoResult.fromValue(prompt.dismiss())
+            }
+        })
     }
 
     @Test fun fileTest() {

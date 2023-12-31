@@ -3,10 +3,13 @@ use crate::device::trace;
 use crate::{
     device::{
         queue::{EncoderInFlight, SubmittedWorkDoneClosure, TempResource},
-        DeviceError,
+        DeviceError, DeviceLostClosure,
     },
-    hub::{GlobalIdentityHandlerFactory, HalApi, Hub, Token},
-    id, resource,
+    hal_api::HalApi,
+    hub::{Hub, Token},
+    id,
+    identity::GlobalIdentityHandlerFactory,
+    resource,
     track::{BindGroupStates, RenderBundleScope, Tracker},
     RefCount, Stored, SubmissionIndex,
 };
@@ -216,6 +219,9 @@ struct ActiveSubmission<A: hal::Api> {
     mapped: Vec<id::Valid<id::BufferId>>,
 
     encoders: Vec<EncoderInFlight<A>>,
+
+    /// List of queue "on_submitted_work_done" closures to be called once this
+    /// submission has completed.
     work_done_closures: SmallVec<[SubmittedWorkDoneClosure; 1]>,
 }
 
@@ -301,6 +307,17 @@ pub(super) struct LifetimeTracker<A: hal::Api> {
     /// Buffers the user has asked us to map, and which are not used by any
     /// queue submission still in flight.
     ready_to_map: Vec<id::Valid<id::BufferId>>,
+
+    /// Queue "on_submitted_work_done" closures that were initiated for while there is no
+    /// currently pending submissions. These cannot be immeidately invoked as they
+    /// must happen _after_ all mapped buffer callbacks are mapped, so we defer them
+    /// here until the next time the device is maintained.
+    work_done_closures: SmallVec<[SubmittedWorkDoneClosure; 1]>,
+
+    /// Closure to be called on "lose the device". This is invoked directly by
+    /// device.lose or by the UserCallbacks returned from maintain when the device
+    /// has been destroyed and its queues are empty.
+    pub device_lost_closure: Option<DeviceLostClosure>,
 }
 
 impl<A: hal::Api> LifetimeTracker<A> {
@@ -313,6 +330,8 @@ impl<A: hal::Api> LifetimeTracker<A> {
             active: Vec::new(),
             free_resources: NonReferencedResources::new(),
             ready_to_map: Vec::new(),
+            work_done_closures: SmallVec::new(),
+            device_lost_closure: None,
         }
     }
 
@@ -402,7 +421,7 @@ impl<A: hal::Api> LifetimeTracker<A> {
             .position(|a| a.index > last_done)
             .unwrap_or(self.active.len());
 
-        let mut work_done_closures = SmallVec::new();
+        let mut work_done_closures: SmallVec<_> = self.work_done_closures.drain(..).collect();
         for a in self.active.drain(..done_count) {
             log::trace!("Active submission {} is done", a.index);
             self.free_resources.extend(a.last_resources);
@@ -442,18 +461,16 @@ impl<A: hal::Api> LifetimeTracker<A> {
         }
     }
 
-    pub fn add_work_done_closure(
-        &mut self,
-        closure: SubmittedWorkDoneClosure,
-    ) -> Option<SubmittedWorkDoneClosure> {
+    pub fn add_work_done_closure(&mut self, closure: SubmittedWorkDoneClosure) {
         match self.active.last_mut() {
             Some(active) => {
                 active.work_done_closures.push(closure);
-                None
             }
-            // Note: we can't immediately invoke the closure, since it assumes
-            // nothing is currently locked in the hubs.
-            None => Some(closure),
+            // We must defer the closure until all previously occuring map_async closures
+            // have fired. This is required by the spec.
+            None => {
+                self.work_done_closures.push(closure);
+            }
         }
     }
 }
@@ -759,14 +776,26 @@ impl<A: HalApi> LifetimeTracker<A> {
                 //Note: nothing else can bump the refcount since the guard is locked exclusively
                 //Note: same BGL can appear multiple times in the list, but only the last
                 // encounter could drop the refcount to 0.
-                if guard[id].multi_ref_count.dec_and_check_empty() {
-                    log::debug!("Bind group layout {:?} will be destroyed", id);
-                    #[cfg(feature = "trace")]
-                    if let Some(t) = trace {
-                        t.lock().add(trace::Action::DestroyBindGroupLayout(id.0));
-                    }
-                    if let Some(lay) = hub.bind_group_layouts.unregister_locked(id.0, &mut *guard) {
-                        self.free_resources.bind_group_layouts.push(lay.raw);
+                let mut bgl_to_check = Some(id);
+                while let Some(id) = bgl_to_check.take() {
+                    let bgl = &guard[id];
+                    if bgl.multi_ref_count.dec_and_check_empty() {
+                        // If This layout points to a compatible one, go over the latter
+                        // to decrement the ref count and potentially destroy it.
+                        bgl_to_check = bgl.as_duplicate();
+
+                        log::debug!("Bind group layout {:?} will be destroyed", id);
+                        #[cfg(feature = "trace")]
+                        if let Some(t) = trace {
+                            t.lock().add(trace::Action::DestroyBindGroupLayout(id.0));
+                        }
+                        if let Some(lay) =
+                            hub.bind_group_layouts.unregister_locked(id.0, &mut *guard)
+                        {
+                            if let Some(inner) = lay.into_inner() {
+                                self.free_resources.bind_group_layouts.push(inner.raw);
+                            }
+                        }
                     }
                 }
             }
@@ -811,21 +840,22 @@ impl<A: HalApi> LifetimeTracker<A> {
 
         for stored in self.mapped.drain(..) {
             let resource_id = stored.value;
-            let buf = &buffer_guard[resource_id];
+            // The buffer may have been destroyed since the map request.
+            if let Ok(buf) = buffer_guard.get(resource_id.0) {
+                let submit_index = buf.life_guard.life_count();
+                log::trace!(
+                    "Mapping of {:?} at submission {:?} gets assigned to active {:?}",
+                    resource_id,
+                    submit_index,
+                    self.active.iter().position(|a| a.index == submit_index)
+                );
 
-            let submit_index = buf.life_guard.life_count();
-            log::trace!(
-                "Mapping of {:?} at submission {:?} gets assigned to active {:?}",
-                resource_id,
-                submit_index,
-                self.active.iter().position(|a| a.index == submit_index)
-            );
-
-            self.active
-                .iter_mut()
-                .find(|a| a.index == submit_index)
-                .map_or(&mut self.ready_to_map, |a| &mut a.mapped)
-                .push(resource_id);
+                self.active
+                    .iter_mut()
+                    .find(|a| a.index == submit_index)
+                    .map_or(&mut self.ready_to_map, |a| &mut a.mapped)
+                    .push(resource_id);
+            }
         }
     }
 
@@ -850,7 +880,13 @@ impl<A: HalApi> LifetimeTracker<A> {
             Vec::with_capacity(self.ready_to_map.len());
         let mut trackers = trackers.lock();
         for buffer_id in self.ready_to_map.drain(..) {
-            let buffer = &mut buffer_guard[buffer_id];
+            let buffer = match buffer_guard.get_occupied_or_destroyed_mut(buffer_id.0) {
+                Ok(buf) => buf,
+                Err(..) => {
+                    // The buffer may have been destroyed since the map request.
+                    continue;
+                }
+            };
             if buffer.life_guard.ref_count.is_none() && trackers.buffers.remove_abandoned(buffer_id)
             {
                 buffer.map_state = resource::BufferMapState::Idle;

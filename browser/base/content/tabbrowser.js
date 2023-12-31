@@ -7,7 +7,7 @@
   // start private scope for gBrowser
   /**
    * A set of known icons to use for internal pages. These are hardcoded so we can
-   * start loading them faster than ContentLinkHandler would normally find them.
+   * start loading them faster than FaviconLoader would normally find them.
    */
   const FAVICON_DEFAULTS = {
     "about:newtab": "chrome://branding/content/icon32.png",
@@ -92,12 +92,24 @@
           "nsIMacSharingService",
         ],
       });
-      XPCOMUtils.defineLazyGetter(this, "tabLocalization", () => {
+      ChromeUtils.defineLazyGetter(this, "tabLocalization", () => {
         return new Localization(
           ["browser/tabbrowser.ftl", "branding/brand.ftl"],
           true
         );
       });
+      XPCOMUtils.defineLazyPreferenceGetter(
+        this,
+        "_shouldExposeContentTitle",
+        "privacy.exposeContentTitleInWindow",
+        true
+      );
+      XPCOMUtils.defineLazyPreferenceGetter(
+        this,
+        "_shouldExposeContentTitlePbm",
+        "privacy.exposeContentTitleInWindow.pbm",
+        true
+      );
 
       if (AppConstants.MOZ_CRASHREPORTER) {
         ChromeUtils.defineESModuleGetters(this, {
@@ -111,6 +123,8 @@
       Services.els.addSystemEventListener(document, "keypress", this, false);
       document.addEventListener("visibilitychange", this);
       window.addEventListener("framefocusrequested", this);
+      window.addEventListener("activate", this);
+      window.addEventListener("deactivate", this);
 
       this.tabContainer.init();
       this._setupInitialBrowserAndTab();
@@ -299,10 +313,6 @@
 
     _hoverTabTimer: null,
 
-    _featureCallout: null,
-
-    _featureCalloutPanelId: null,
-
     get tabContainer() {
       delete this.tabContainer;
       return (this.tabContainer = document.getElementById("tabbrowser-tabs"));
@@ -367,37 +377,6 @@
       return this._selectedBrowser;
     },
 
-    get featureCallout() {
-      return this._featureCallout;
-    },
-
-    set featureCallout(val) {
-      this._featureCallout = val;
-    },
-
-    get instantiateFeatureCalloutTour() {
-      return this._instantiateFeatureCalloutTour;
-    },
-
-    get featureCalloutPanelId() {
-      return this._featureCalloutPanelId;
-    },
-
-    _instantiateFeatureCalloutTour(browser, panelId) {
-      this._featureCalloutPanelId = panelId;
-      const { FeatureCallout } = ChromeUtils.importESModule(
-        "resource:///modules/FeatureCallout.sys.mjs"
-      );
-      // Note - once we have additional browser chrome messages,
-      // only use PDF.js pref value when navigating to PDF viewer
-      this._featureCallout = new FeatureCallout({
-        win: window,
-        browser,
-        prefName: "browser.pdfjs.feature-tour",
-        page: "chrome",
-        theme: { preset: "pdfjs", simulateContent: true },
-      });
-    },
     _setupInitialBrowserAndTab() {
       // See browser.js for the meaning of window.arguments.
       // Bug 1485961 covers making this more sane.
@@ -615,10 +594,6 @@
       return this.selectedBrowser.sessionHistory;
     },
 
-    get markupDocumentViewer() {
-      return this.selectedBrowser.markupDocumentViewer;
-    },
-
     get contentDocument() {
       return this.selectedBrowser.contentDocument;
     },
@@ -752,7 +727,10 @@
     },
 
     _notifyPinnedStatus(aTab) {
-      aTab.linkedBrowser.browsingContext.isAppTab = aTab.pinned;
+      // browsingContext is expected to not be defined on discarded tabs.
+      if (aTab.linkedBrowser.browsingContext) {
+        aTab.linkedBrowser.browsingContext.isAppTab = aTab.pinned;
+      }
 
       let event = document.createEvent("Events");
       event.initEvent(aTab.pinned ? "TabPinned" : "TabUnpinned", true, false);
@@ -1062,6 +1040,19 @@
     getWindowTitleForBrowser(aBrowser) {
       let docElement = document.documentElement;
       let title = "";
+      let dataSuffix =
+        docElement.getAttribute("privatebrowsingmode") == "temporary"
+          ? "Private"
+          : "Default";
+      let defaultTitle = docElement.dataset["title" + dataSuffix];
+
+      if (
+        !this._shouldExposeContentTitle ||
+        (PrivateBrowsingUtils.isWindowPrivate(window) &&
+          !this._shouldExposeContentTitlePbm)
+      ) {
+        return defaultTitle;
+      }
 
       // If location bar is hidden and the URL type supports a host,
       // add the scheme and host to the title to prevent spoofing.
@@ -1099,10 +1090,6 @@
         title += tab.getAttribute("label").replace(/\0/g, "");
       }
 
-      let dataSuffix =
-        docElement.getAttribute("privatebrowsingmode") == "temporary"
-          ? "Private"
-          : "Default";
       if (title) {
         // We're using a function rather than just using `title` as the
         // new substring to avoid `$$`, `$'` etc. having a special
@@ -1115,7 +1102,7 @@
         );
       }
 
-      return docElement.dataset["title" + dataSuffix];
+      return defaultTitle;
     },
 
     updateTitlebar() {
@@ -1129,25 +1116,6 @@
       }
 
       let newTab = this.getTabForBrowser(newBrowser);
-
-      if (
-        this._featureCallout &&
-        this._featureCalloutPanelId !== newTab.linkedPanel
-      ) {
-        this._featureCallout.endTour(true);
-        this._featureCallout = null;
-      }
-
-      // For now, only check for Feature Callout messages
-      // when viewing PDFs. Later, we can expand this to check
-      // for callout messages on every change of tab location.
-      if (
-        !this._featureCallout &&
-        newBrowser.contentPrincipal.originNoSuffix === "resource://pdf.js"
-      ) {
-        this._instantiateFeatureCalloutTour(newBrowser, newTab.linkedPanel);
-        window.gBrowser.featureCallout.showFeatureCallout();
-      }
 
       if (!aForceUpdate) {
         TelemetryStopwatch.start("FX_TAB_SWITCH_UPDATE_MS");
@@ -1256,6 +1224,11 @@
         newTab.recordTimeFromUnloadToReload();
         newTab.updateLastAccessed();
         oldTab.updateLastAccessed();
+        // if this is the foreground window, update the last-seen timestamps.
+        if (this.ownerGlobal == BrowserWindowTracker.getTopWindow()) {
+          newTab.updateLastSeenActive();
+          oldTab.updateLastSeenActive();
+        }
 
         let oldFindBar = oldTab._findBar;
         if (
@@ -2638,6 +2611,7 @@
         insertTab = true,
         globalHistoryOptions,
         triggeringRemoteType,
+        wasSchemelessInput,
       } = {}
     ) {
       // all callers of addTab that pass a params object need to pass
@@ -2827,6 +2801,7 @@
           csp,
           globalHistoryOptions,
           triggeringRemoteType,
+          wasSchemelessInput,
         });
       }
 
@@ -3035,6 +3010,10 @@
         usingPreloadedContent,
       };
 
+      if (BookmarkingUI.isOnNewTabPage(uri)) {
+        this.getPanel(b).classList.add("newTabBrowserPanel");
+      }
+
       // Hack to ensure that the about:newtab, and about:welcome favicon is loaded
       // instantaneously, to avoid flickering and improve perceived performance.
       this.setDefaultIcon(tab, uri);
@@ -3064,6 +3043,7 @@
         csp,
         globalHistoryOptions,
         triggeringRemoteType,
+        wasSchemelessInput,
       }
     ) {
       if (
@@ -3127,6 +3107,7 @@
             csp,
             globalHistoryOptions,
             triggeringRemoteType,
+            wasSchemelessInput,
           });
         } catch (ex) {
           console.error(ex);
@@ -3225,7 +3206,7 @@
           if (!tab.parentNode) {
             tab._tPos = this._numPinnedTabs;
             this.tabContainer.insertBefore(tab, this.tabs[this._numPinnedTabs]);
-            tab.setAttribute("pinned", "true");
+            tab.toggleAttribute("pinned", true);
             this.tabContainer._invalidateCachedTabs();
             // Then ensure all the tab open/pinning information is sent.
             this._fireTabOpen(tab, {});
@@ -3598,28 +3579,44 @@
     },
 
     /**
-     * In a multi-select context, all unpinned and unselected tabs are removed.
-     * Otherwise all unpinned tabs except aTab are removed.
+     * Remove all tabs but aTab. By default, in a multi-select context, all
+     * unpinned and unselected tabs are removed. Otherwise all unpinned tabs
+     * except aTab are removed. This behavior can be changed using the the bool
+     * flags below.
      *
-     * @param   aTab
-     *          The tab we will skip removing
-     * @param   aParams
-     *          An optional set of parameters that will be passed to the
+     * @param   aTab The tab we will skip removing
+     * @param   aParams An optional set of parameters that will be passed to the
      *          removeTabs function.
+     * @param   {boolean} [aParams.skipWarnAboutClosingTabs=false] Skip showing
+     *          the tab close warning prompt.
+     * @param   {boolean} [aParams.skipPinnedOrSelectedTabs=true] Skip closing
+     *          tabs that are selected or pinned.
      */
-    removeAllTabsBut(aTab, aParams) {
-      let tabsToRemove = [];
-      if (aTab && aTab.multiselected) {
-        tabsToRemove = this.visibleTabs.filter(
-          tab => !tab.multiselected && !tab.pinned
-        );
+    removeAllTabsBut(aTab, aParams = {}) {
+      let {
+        skipWarnAboutClosingTabs = false,
+        skipPinnedOrSelectedTabs = true,
+      } = aParams;
+
+      let filterFn;
+
+      // If enabled also filter by selected or pinned state.
+      if (skipPinnedOrSelectedTabs) {
+        if (aTab?.multiselected) {
+          filterFn = tab => !tab.multiselected && !tab.pinned;
+        } else {
+          filterFn = tab => tab != aTab && !tab.pinned;
+        }
       } else {
-        tabsToRemove = this.visibleTabs.filter(
-          tab => tab != aTab && !tab.pinned
-        );
+        // Exclude just aTab from being removed.
+        filterFn = tab => tab != aTab;
       }
 
+      let tabsToRemove = this.visibleTabs.filter(filterFn);
+
+      // If enabled show the tab close warning.
       if (
+        !skipWarnAboutClosingTabs &&
         !this.warnAboutClosingTabs(
           tabsToRemove.length,
           this.closingTabsEnum.OTHER
@@ -3672,11 +3669,19 @@
      *   using it in tandem with `runBeforeUnloadForTabs`.
      * @param {boolean} options.skipRemoves
      *   Skips actually removing the tabs. The beforeunload handlers still run.
+     * @param {boolean} options.skipSessionStore
+     *   If true, don't record the closed tabs in SessionStore.
      * @returns {_startRemoveTabsReturnValue}
      */
     _startRemoveTabs(
       tabs,
-      { animate, suppressWarnAboutClosingWindow, skipPermitUnload, skipRemoves }
+      {
+        animate,
+        suppressWarnAboutClosingWindow,
+        skipPermitUnload,
+        skipRemoves,
+        skipSessionStore,
+      }
     ) {
       // Note: if you change any of the unload algorithm, consider also
       // changing `runBeforeUnloadForTabs` above.
@@ -3722,6 +3727,7 @@
                       animate,
                       prewarmed: true,
                       skipPermitUnload: true,
+                      skipSessionStore,
                     });
                   }
                 } else {
@@ -3754,6 +3760,7 @@
             animate,
             prewarmed: true,
             skipPermitUnload,
+            skipSessionStore,
           });
         }
       }
@@ -3823,6 +3830,8 @@
      * @param {boolean} [options.skipPermitUnload]
      *   Skips the before unload checks for the tabs. Only set this to true when
      *   using it in tandem with `runBeforeUnloadForTabs`.
+     * @param {boolean}  [options.skipSessionStore]
+     *   If true, don't record the closed tabs in SessionStore.
      */
     removeTabs(
       tabs,
@@ -3830,6 +3839,7 @@
         animate = true,
         suppressWarnAboutClosingWindow = false,
         skipPermitUnload = false,
+        skipSessionStore = false,
       } = {}
     ) {
       // When 'closeWindowWithLastTab' pref is enabled, closing all tabs
@@ -3857,6 +3867,7 @@
             suppressWarnAboutClosingWindow,
             skipPermitUnload,
             skipRemoves: false,
+            skipSessionStore,
           });
 
         // Wait for all the beforeunload events to have been processed by content processes.
@@ -3879,6 +3890,7 @@
           animate,
           prewarmed: true,
           skipPermitUnload,
+          skipSessionStore,
         };
 
         // Now run again sequentially the beforeunload listeners that will result in a prompt.
@@ -3923,6 +3935,7 @@
         skipPermitUnload,
         closeWindowWithLastTab,
         prewarmed,
+        skipSessionStore,
       } = {}
     ) {
       if (UserInteraction.running("browser.tabs.opening", window)) {
@@ -3961,6 +3974,7 @@
           skipPermitUnload,
           closeWindowWithLastTab,
           prewarmed,
+          skipSessionStore,
         })
       ) {
         TelemetryStopwatch.cancel("FX_TAB_CLOSE_TIME_ANIM_MS", aTab);
@@ -3972,7 +3986,7 @@
         !aTab.pinned &&
         !aTab.hidden &&
         aTab._fullyOpen &&
-        triggeringEvent?.mozInputSource == MouseEvent.MOZ_SOURCE_MOUSE &&
+        triggeringEvent?.inputSource == MouseEvent.MOZ_SOURCE_MOUSE &&
         triggeringEvent?.target.closest(".tabbrowser-tab");
       if (lockTabSizing) {
         this.tabContainer._lockTabSizing(aTab, tabWidth);
@@ -3988,8 +4002,9 @@
         aTab.hidden ||
         this._removingTabs.size >
           3 /* don't want lots of concurrent animations */ ||
-        aTab.getAttribute("fadein") !=
-          "true" /* fade-in transition hasn't been triggered yet */ ||
+        !aTab.hasAttribute(
+          "fadein"
+        ) /* fade-in transition hasn't been triggered yet */ ||
         tabWidth == 0 /* fade-in transition hasn't moved yet */
       ) {
         // We're not animating, so we can cancel the animation stopwatch.
@@ -4040,6 +4055,7 @@
         closeWindowFastpath,
         skipPermitUnload,
         prewarmed,
+        skipSessionStore = false,
       } = {}
     ) {
       if (aTab.closing || this._windowIsClosing) {
@@ -4185,7 +4201,7 @@
       // inspect the tab that's about to close.
       let evt = new CustomEvent("TabClose", {
         bubbles: true,
-        detail: { adoptedBy: adoptedByTab },
+        detail: { adoptedBy: adoptedByTab, skipSessionStore },
       });
       aTab.dispatchEvent(evt);
 
@@ -4547,7 +4563,7 @@
 
       let modifiedAttrs = [];
       if (aOtherTab.hasAttribute("muted")) {
-        aOurTab.setAttribute("muted", "true");
+        aOurTab.toggleAttribute("muted", true);
         aOurTab.muteReason = aOtherTab.muteReason;
         // For non-lazy tabs, mute() must be called.
         if (aOurTab.linkedPanel) {
@@ -4556,11 +4572,11 @@
         modifiedAttrs.push("muted");
       }
       if (aOtherTab.hasAttribute("undiscardable")) {
-        aOurTab.setAttribute("undiscardable", "true");
+        aOurTab.toggleAttribute("undiscardable", true);
         modifiedAttrs.push("undiscardable");
       }
       if (aOtherTab.hasAttribute("soundplaying")) {
-        aOurTab.setAttribute("soundplaying", "true");
+        aOurTab.toggleAttribute("soundplaying", true);
         modifiedAttrs.push("soundplaying");
       }
       if (aOtherTab.hasAttribute("usercontextid")) {
@@ -4574,7 +4590,7 @@
         webrtcUI.swapBrowserForNotification(otherBrowser, ourBrowser);
       }
       if (aOtherTab.hasAttribute("pictureinpicture")) {
-        aOurTab.setAttribute("pictureinpicture", true);
+        aOurTab.toggleAttribute("pictureinpicture", true);
         modifiedAttrs.push("pictureinpicture");
 
         let event = new CustomEvent("TabSwapPictureInPicture", {
@@ -5812,6 +5828,11 @@
             this.selectedBrowser.docShellIsActive = !inactive;
           }
           break;
+        case "activate":
+        // Intentional fallthrough
+        case "deactivate":
+          this.selectedTab.updateLastSeenActive();
+          break;
       }
     },
 
@@ -5925,6 +5946,8 @@
       }
       document.removeEventListener("visibilitychange", this);
       window.removeEventListener("framefocusrequested", this);
+      window.removeEventListener("activate", this);
+      window.removeEventListener("deactivate", this);
 
       if (gMultiProcessBrowser) {
         if (this._switcher) {
@@ -6175,7 +6198,7 @@
         }
 
         if (!tab.hasAttribute("soundplaying")) {
-          tab.setAttribute("soundplaying", true);
+          tab.toggleAttribute("soundplaying", true);
           modifiedAttrs.push("soundplaying");
         }
 
@@ -6203,7 +6226,7 @@
             "--soundplaying-removal-delay",
             `${removalDelay - 300}ms`
           );
-          tab.setAttribute("soundplaying-scheduledremoval", "true");
+          tab.toggleAttribute("soundplaying-scheduledremoval", true);
           this._tabAttrModified(tab, ["soundplaying-scheduledremoval"]);
 
           tab._soundPlayingAttrRemovalTimer = setTimeout(() => {
@@ -6903,6 +6926,13 @@
             this.mTab.linkedBrowser.mute();
           }
 
+          gBrowser
+            .getPanel(this.mBrowser)
+            .classList.toggle(
+              "newTabBrowserPanel",
+              BookmarkingUI.isOnNewTabPage(aLocation)
+            );
+
           if (gBrowser.isFindBarInitialized(this.mTab)) {
             let findBar = gBrowser.getCachedFindBar(this.mTab);
 
@@ -6983,30 +7013,6 @@
           if (tabCacheIndex != -1) {
             gBrowser._tabLayerCache.splice(tabCacheIndex, 1);
             gBrowser._getSwitcher().cleanUpTabAfterEviction(this.mTab);
-          }
-        } else {
-          if (
-            gBrowser.featureCallout &&
-            (gBrowser.featureCalloutPanelId !==
-              gBrowser.selectedTab.linkedPanel ||
-              gBrowser.contentPrincipal.originNoSuffix !== "resource://pdf.js")
-          ) {
-            gBrowser.featureCallout.endTour(true);
-            gBrowser.featureCallout = null;
-          }
-
-          // For now, only check for Feature Callout messages
-          // when viewing PDFs. Later, we can expand this to check
-          // for callout messages on every change of tab location.
-          if (
-            !gBrowser.featureCallout &&
-            gBrowser.contentPrincipal.originNoSuffix === "resource://pdf.js"
-          ) {
-            gBrowser.instantiateFeatureCalloutTour(
-              gBrowser.selectedBrowser,
-              gBrowser.selectedTab.linkedPanel
-            );
-            gBrowser.featureCallout.showFeatureCallout();
           }
         }
       }
@@ -7506,7 +7512,7 @@ var TabContextMenu = {
 
     // Session store
     document.getElementById("context_undoCloseTab").disabled =
-      SessionStore.getClosedTabCountForWindow(window) == 0;
+      SessionStore.getClosedTabCount() == 0;
 
     // Show/hide fullscreen context menu items and set the
     // autohide item's checked state to mirror the autohide pref.

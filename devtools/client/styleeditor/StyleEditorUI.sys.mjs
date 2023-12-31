@@ -97,6 +97,7 @@ export class StyleEditorUI extends EventEmitter {
   #optionsMenu;
   #panelDoc;
   #prefObserver;
+  #prettyPrintButton;
   #root;
   #seenSheets = new Map();
   #shortcuts;
@@ -215,6 +216,7 @@ export class StyleEditorUI extends EventEmitter {
       {
         onAvailable: this.#onResourceAvailable,
         onUpdated: this.#onResourceUpdated,
+        onDestroyed: this.#onResourceDestroyed,
       }
     );
     await this.#waitForLoadingStyleSheets();
@@ -260,6 +262,21 @@ export class StyleEditorUI extends EventEmitter {
       () => {
         this.#importFromFile(this._mockImportFile || null, this.#window);
         this.#clearFilterInput();
+      },
+      eventListenersConfig
+    );
+
+    this.#prettyPrintButton = this.#root.querySelector(
+      ".style-editor-prettyPrintButton"
+    );
+    this.#prettyPrintButton.addEventListener(
+      "click",
+      () => {
+        if (!this.selectedEditor) {
+          return;
+        }
+
+        this.selectedEditor.prettifySourceText();
       },
       eventListenersConfig
     );
@@ -1267,6 +1284,27 @@ export class StyleEditorUI extends EventEmitter {
   }
 
   /**
+   * Update the pretty print button.
+   * The button will be disabled if the selected file is an original file.
+   */
+  #updatePrettyPrintButton() {
+    const disable =
+      !this.selectedEditor || !!this.selectedEditor.styleSheet.isOriginalSource;
+
+    // Only update the button if its state needs it
+    if (disable !== this.#prettyPrintButton.hasAttribute("disabled")) {
+      this.#prettyPrintButton.toggleAttribute("disabled");
+      const l10nString = disable
+        ? "styleeditor-pretty-print-button-disabled"
+        : "styleeditor-pretty-print-button";
+      this.#window.document.l10n.setAttributes(
+        this.#prettyPrintButton,
+        l10nString
+      );
+    }
+  }
+
+  /**
    * Update the at-rules sidebar for an editor. Hide if there are no rules
    * Display a list of the at-rules (@media, @layer, @container, …) in the editor's associated style sheet.
    * Emits a 'at-rules-list-changed' event after updating the UI.
@@ -1581,6 +1619,25 @@ export class StyleEditorUI extends EventEmitter {
     }
   };
 
+  #onResourceDestroyed = resources => {
+    for (const resource of resources) {
+      if (
+        resource.resourceType !== this.#toolbox.resourceCommand.TYPES.STYLESHEET
+      ) {
+        continue;
+      }
+
+      const editorToRemove = this.editors.find(
+        editor => editor.styleSheet.resourceId == resource.resourceId
+      );
+
+      if (editorToRemove) {
+        const { styleSheet } = editorToRemove;
+        this.#removeStyleSheet(styleSheet, editorToRemove);
+      }
+    }
+  };
+
   /**
    * Set the active item's summary element.
    *
@@ -1636,6 +1693,8 @@ export class StyleEditorUI extends EventEmitter {
       }
 
       editor.onShow(options);
+
+      this.#updatePrettyPrintButton();
 
       this.emit("editor-selected", editor);
     } catch (e) {
@@ -1701,6 +1760,7 @@ export class StyleEditorUI extends EventEmitter {
       {
         onAvailable: this.#onResourceAvailable,
         onUpdated: this.#onResourceUpdated,
+        onDestroyed: this.#onResourceDestroyed,
       }
     );
     this.#commands.targetCommand.unwatchTargets({
@@ -1719,6 +1779,7 @@ export class StyleEditorUI extends EventEmitter {
     this.#filterInput = null;
     this.#filterInputClearButton = null;
     this.#nav = null;
+    this.#prettyPrintButton = null;
     this.#side = null;
     this.#tplDetails = null;
     this.#tplSummary = null;

@@ -82,7 +82,10 @@ pub type EntryPointResourceMap = std::collections::BTreeMap<String, EntryPointRe
 enum ResolvedBinding {
     BuiltIn(crate::BuiltIn),
     Attribute(u32),
-    Color(u32),
+    Color {
+        location: u32,
+        second_blend_source: bool,
+    },
     User {
         prefix: &'static str,
         index: u32,
@@ -124,10 +127,22 @@ pub enum Error {
     UnsupportedBuiltIn(crate::BuiltIn),
     #[error("capability {0:?} is not supported")]
     CapabilityNotSupported(crate::valid::Capabilities),
-    #[error("address space {0:?} is not supported for target MSL version")]
-    UnsupportedAddressSpace(crate::AddressSpace),
     #[error("attribute '{0}' is not supported for target MSL version")]
     UnsupportedAttribute(String),
+    #[error("function '{0}' is not supported for target MSL version")]
+    UnsupportedFunction(String),
+    #[error("can not use writeable storage buffers in fragment stage prior to MSL 1.2")]
+    UnsupportedWriteableStorageBuffer,
+    #[error("can not use writeable storage textures in {0:?} stage prior to MSL 1.2")]
+    UnsupportedWriteableStorageTexture(crate::ShaderStage),
+    #[error("can not use read-write storage textures prior to MSL 1.2")]
+    UnsupportedRWStorageTexture,
+    #[error("array of '{0}' is not supported for target MSL version")]
+    UnsupportedArrayOf(String),
+    #[error("array of type '{0:?}' is not supported")]
+    UnsupportedArrayOfType(Handle<crate::Type>),
+    #[error("ray tracing is not supported prior to MSL 2.3")]
+    UnsupportedRayTracing,
 }
 
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -194,7 +209,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            lang_version: (2, 0),
+            lang_version: (1, 0),
             per_entry_point_map: EntryPointResourceMap::default(),
             inline_samplers: Vec::new(),
             spirv_cross_compatibility: false,
@@ -210,10 +225,13 @@ impl Default for Options {
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 #[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
 pub struct PipelineOptions {
-    /// Allow `BuiltIn::PointSize` in the vertex shader.
+    /// Allow `BuiltIn::PointSize` and inject it if doesn't exist.
     ///
-    /// Metal doesn't like this for non-point primitive topologies.
-    pub allow_point_size: bool,
+    /// Metal doesn't like this for non-point primitive topologies and requires it for
+    /// point primitive topologies.
+    ///
+    /// Enable this for vertex shaders with point primitive topologies.
+    pub allow_and_force_point_size: bool,
 }
 
 impl Options {
@@ -224,16 +242,30 @@ impl Options {
     ) -> Result<ResolvedBinding, Error> {
         match *binding {
             crate::Binding::BuiltIn(mut built_in) => {
-                if let crate::BuiltIn::Position { ref mut invariant } = built_in {
-                    if *invariant && self.lang_version < (2, 1) {
-                        return Err(Error::UnsupportedAttribute("invariant".to_string()));
-                    }
+                match built_in {
+                    crate::BuiltIn::Position { ref mut invariant } => {
+                        if *invariant && self.lang_version < (2, 1) {
+                            return Err(Error::UnsupportedAttribute("invariant".to_string()));
+                        }
 
-                    // The 'invariant' attribute may only appear on vertex
-                    // shader outputs, not fragment shader inputs.
-                    if !matches!(mode, LocationMode::VertexOutput) {
-                        *invariant = false;
+                        // The 'invariant' attribute may only appear on vertex
+                        // shader outputs, not fragment shader inputs.
+                        if !matches!(mode, LocationMode::VertexOutput) {
+                            *invariant = false;
+                        }
                     }
+                    crate::BuiltIn::BaseInstance if self.lang_version < (1, 2) => {
+                        return Err(Error::UnsupportedAttribute("base_instance".to_string()));
+                    }
+                    crate::BuiltIn::InstanceIndex if self.lang_version < (1, 2) => {
+                        return Err(Error::UnsupportedAttribute("instance_id".to_string()));
+                    }
+                    // macOS: Since Metal 2.2
+                    // iOS: Since Metal 2.3 (check depends on https://github.com/gfx-rs/naga/issues/2164)
+                    crate::BuiltIn::PrimitiveIndex if self.lang_version < (2, 2) => {
+                        return Err(Error::UnsupportedAttribute("primitive_id".to_string()));
+                    }
+                    _ => {}
                 }
 
                 Ok(ResolvedBinding::BuiltIn(built_in))
@@ -242,9 +274,20 @@ impl Options {
                 location,
                 interpolation,
                 sampling,
+                second_blend_source,
             } => match mode {
                 LocationMode::VertexInput => Ok(ResolvedBinding::Attribute(location)),
-                LocationMode::FragmentOutput => Ok(ResolvedBinding::Color(location)),
+                LocationMode::FragmentOutput => {
+                    if second_blend_source && self.lang_version < (1, 2) {
+                        return Err(Error::UnsupportedAttribute(
+                            "second_blend_source".to_string(),
+                        ));
+                    }
+                    Ok(ResolvedBinding::Color {
+                        location,
+                        second_blend_source,
+                    })
+                }
                 LocationMode::VertexOutput | LocationMode::FragmentInput => {
                     Ok(ResolvedBinding::User {
                         prefix: if self.spirv_cross_compatibility {
@@ -401,7 +444,16 @@ impl ResolvedBinding {
                 write!(out, "{name}")?;
             }
             Self::Attribute(index) => write!(out, "attribute({index})")?,
-            Self::Color(index) => write!(out, "color({index})")?,
+            Self::Color {
+                location,
+                second_blend_source,
+            } => {
+                if second_blend_source {
+                    write!(out, "color({location}) index(1)")?
+                } else {
+                    write!(out, "color({location})")?
+                }
+            }
             Self::User {
                 prefix,
                 index,

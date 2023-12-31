@@ -56,7 +56,6 @@
 
 #  include "nsWindowsDllInterceptor.h"
 #  include "mozilla/WindowsDllBlocklist.h"
-#  include "mozilla/WindowsVersion.h"
 #  include "psapi.h"  // For PERFORMANCE_INFORMATION and K32GetPerformanceInfo()
 #elif defined(XP_MACOSX)
 #  include "breakpad-client/mac/crash_generation/client_info.h"
@@ -1796,20 +1795,14 @@ static MINIDUMP_TYPE GetMinidumpType() {
       MiniDumpWithFullMemoryInfo | MiniDumpWithUnloadedModules);
 
 #  ifdef NIGHTLY_BUILD
-  // This is Nightly only because this doubles the size of minidumps based
-  // on the experimental data.
-  minidump_type =
-      static_cast<MINIDUMP_TYPE>(minidump_type | MiniDumpWithProcessThreadData);
-
-  // dbghelp.dll on Win7 can't handle overlapping memory regions so we only
-  // enable this feature on Win8 or later.
-  if (IsWin8OrLater()) {
-    minidump_type = static_cast<MINIDUMP_TYPE>(
-        minidump_type |
-        // This allows us to examine heap objects referenced from stack objects
-        // at the cost of further doubling the size of minidumps.
-        MiniDumpWithIndirectlyReferencedMemory);
-  }
+  minidump_type = static_cast<MINIDUMP_TYPE>(
+      minidump_type |
+      // This is Nightly only because this doubles the size of minidumps based
+      // on the experimental data.
+      MiniDumpWithProcessThreadData |
+      // This allows us to examine heap objects referenced from stack objects
+      // at the cost of further doubling the size of minidumps.
+      MiniDumpWithIndirectlyReferencedMemory);
 #  endif
 
   const char* e = PR_GetEnv("MOZ_CRASHREPORTER_FULLDUMP");
@@ -3252,12 +3245,14 @@ static void OnChildProcessDumpRequested(
 
 #if XP_WIN
   nsTArray<CAnnotation>* child_annotations = mozannotation_retrieve(
-      reinterpret_cast<uintptr_t>(aClientInfo.process_handle()));
+      reinterpret_cast<uintptr_t>(aClientInfo.process_handle()),
+      static_cast<size_t>(Annotation::Count));
 #elif defined(XP_MACOSX)
-  nsTArray<CAnnotation>* child_annotations =
-      mozannotation_retrieve(aClientInfo.task());
+  nsTArray<CAnnotation>* child_annotations = mozannotation_retrieve(
+      aClientInfo.task(), static_cast<size_t>(Annotation::Count));
 #else
-  nsTArray<CAnnotation>* child_annotations = mozannotation_retrieve(pid);
+  nsTArray<CAnnotation>* child_annotations =
+      mozannotation_retrieve(pid, static_cast<size_t>(Annotation::Count));
 #endif
 
   // TODO: Write a minimal set of annotations if we fail to read them, and
@@ -3856,10 +3851,11 @@ bool CreateMinidumpsAndPair(ProcessHandle aTargetHandle,
   AddSharedAnnotations(aTargetAnnotations);
 #if XP_WIN
   nsTArray<CAnnotation>* child_annotations =
-      mozannotation_retrieve(reinterpret_cast<uintptr_t>(aTargetHandle));
+      mozannotation_retrieve(reinterpret_cast<uintptr_t>(aTargetHandle),
+                             static_cast<size_t>(Annotation::Count));
 #else
-  nsTArray<CAnnotation>* child_annotations =
-      mozannotation_retrieve(aTargetHandle);
+  nsTArray<CAnnotation>* child_annotations = mozannotation_retrieve(
+      aTargetHandle, static_cast<size_t>(Annotation::Count));
 #endif
   AddChildProcessAnnotations(aTargetAnnotations, child_annotations);
   if (child_annotations) {
@@ -3894,3 +3890,39 @@ void SetNotificationPipeForChild(int childCrashFd) {
 #endif
 
 }  // namespace CrashReporter
+
+#if defined(__ANDROID_API__) && (__ANDROID_API__ < 24)
+
+// Bionic introduced support for getgrgid_r() and getgrnam_r() only in version
+// 24 (that is Android Nougat / 7.1.2). Since GeckoView is built by version 16
+// (32-bit) or 21 (64-bit), those functions aren't defined, but nix needs them
+// and minidump-writer relies on nix. These functions should never be called in
+// practice hence we implement them only to satisfy nix linking requirements but
+// we crash if we accidentally enter them.
+
+extern "C" {
+
+int getgrgid_r(gid_t gid, struct group* grp, char* buf, size_t buflen,
+               struct group** result) {
+  MOZ_CRASH("getgrgid_r() is not available");
+  return EPERM;
+}
+
+int getgrnam_r(const char* name, struct group* grp, char* buf, size_t buflen,
+               struct group** result) {
+  MOZ_CRASH("getgrnam_r() is not available");
+  return EPERM;
+}
+
+int mlockall(int flags) {
+  MOZ_CRASH("mlockall() is not available");
+  return EPERM;
+}
+
+int munlockall(void) {
+  MOZ_CRASH("munlockall() is not available");
+  return EPERM;
+}
+}
+
+#endif  // __ANDROID_API__ && (__ANDROID_API__ < 24)

@@ -71,15 +71,10 @@ groupbox[data-category] {
 
 html|h1 {
   margin: 0 0 8px;
-  font-size: 1.46em;
-  font-weight: 300;
-  line-height: 1.3em;
 }
 
 html|h2 {
   margin: 16px 0 4px;
-  font-size: 1.14em;
-  line-height: normal;
 }
 
 description.indent,
@@ -93,6 +88,10 @@ menulist,
 html|select {
   /* override the root rule */
   user-select: none;
+}
+
+.section-description {
+  color: var(--text-color-deemphasized);
 }
 
 /* Buttons get a default min-width in XUL. When they also have flex, they will
@@ -243,10 +242,11 @@ checkbox {
 
 #isDefaultLabel,
 #isNotDefaultLabel {
-  font-weight: 600;
+  font-weight: var(--font-weight-bold);
 }
 
-@supports not -moz-bool-pref("browser.migrate.preferences-entrypoint.enabled") {
+/* stylelint-disable-next-line media-query-no-invalid */
+@media not (-moz-bool-pref: "browser.migrate.preferences-entrypoint.enabled") {
   #dataMigrationGroup {
     display: none;
   }
@@ -443,6 +443,10 @@ richlistitem[selected] .actionsMenu:focus-visible {
   direction: rtl;
 }
 
+.homepage-buttons > .homepage-button {
+  flex: 1 auto;
+}
+
 .homepage-button:first-of-type {
   margin-inline-start: 0;
 }
@@ -463,7 +467,7 @@ richlistitem[selected] .actionsMenu:focus-visible {
 }
 
 #homeContentsGroup [data-subcategory] .section-checkbox {
-  font-weight: 600;
+  font-weight: var(--font-weight-bold);
 }
 
 #homeContentsGroup [data-subcategory] > vbox menulist {
@@ -525,10 +529,6 @@ a[is="moz-support-link"]:not(.sidebar-footer-link) {
   margin-block: 0 4px;
 }
 
-#doNotTrackLearnMoreBox {
-  margin-top: 32px;
-}
-
 #historyPane {
   margin-top: 4px;
 }
@@ -569,14 +569,6 @@ a[is="moz-support-link"]:not(.sidebar-footer-link) {
 
 #showUpdateHistory {
   margin-inline-start: 0;
-}
-
-@media (-moz-platform: windows-win7),
-       (-moz-platform: windows-win8) {
-  #windows-sso,
-  #windows-sso-caption {
-    display: none;
-  }
 }
 
 /**
@@ -637,7 +629,7 @@ html|dialog,
 }
 
 .dialogTitle {
-  font-weight: 600;
+  font-weight: var(--font-weight-bold);
   text-align: center;
   user-select: none;
 }
@@ -785,10 +777,6 @@ html|dialog,
   cursor: pointer;
 }
 
-.openLink:visited {
-  color: var(--in-content-link-color);
-}
-
 #fxaDisplayName {
   margin-inline-end: 10px !important;
 }
@@ -832,6 +820,7 @@ dialog > .sync-engines-list + hbox {
 
 .sync-engines-list checkbox .checkbox-icon,
 .sync-engine-image {
+  display: flex;
   margin-inline: 2px 8px;
   width: 16px;
   height: 16px;
@@ -1134,6 +1123,12 @@ menulist[indicator=true] > menupopup menuitem[indicator=true]:not([image]) > .me
   margin-inline-end: 4px;
 }
 
+#activeLanguages,
+#selectedLocales {
+  min-height: 15em;
+  contain: size;
+}
+
 #selectedLocales > richlistitem {
   padding-inline-start: 13px;
 }
@@ -1148,6 +1143,13 @@ menulist[indicator=true] > menupopup menuitem[indicator=true]:not([image]) > .me
 
 .action-button {
   margin-inline-end: 0;
+}
+
+.languages-grid {
+  flex: 1;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  grid-template-columns: 1fr auto;
 }
 
 /* Menulist styles */

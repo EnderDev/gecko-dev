@@ -51,6 +51,7 @@
 #ifdef XP_MACOSX
     <command id="cmd_findSelection" oncommand="gLazyFindCommand('onFindSelectionCommand')"/>
 #endif
+    <command id="cmd_reportBrokenSite" oncommand="ReportBrokenSite.open(event);"/>
     <command id="cmd_translate" oncommand="TranslationsPanel.open(event);"/>
     <!-- work-around bug 392512 -->
     <command id="Browser:AddBookmarkAs"
@@ -99,6 +100,7 @@
     <command id="History:UndoCloseTab" oncommand="undoCloseTab();" data-l10n-args='{"tabCount": 1}'/>
     <command id="History:UndoCloseWindow" oncommand="undoCloseWindow();"/>
     <command id="History:RestoreLastClosedTabOrWindowOrSession" oncommand="restoreLastClosedTabOrWindowOrSession();" />
+    <command id="History:SearchHistory" oncommand="PlacesCommandHook.searchHistory();"/>
 
     <command id="wrCaptureCmd" oncommand="gGfxUtils.webrenderCapture();" disabled="true"/>
     <command id="wrToggleCaptureSequenceCmd" oncommand="gGfxUtils.toggleWebrenderCaptureSequence();" disabled="true"/>

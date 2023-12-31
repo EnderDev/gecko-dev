@@ -47,7 +47,7 @@ use api::{ClipMode, PrimitiveKeyKind, TransformStyle, YuvColorSpace, ColorRange,
 use api::{ReferenceTransformBinding, Rotation, FillRule, SpatialTreeItem, ReferenceFrameDescriptor};
 use api::units::*;
 use crate::image_tiling::simplify_repeated_primitive;
-use crate::clip::{ClipItemKey, ClipStore, ClipItemKeyKind};
+use crate::clip::{ClipItemKey, ClipStore, ClipItemKeyKind, ClipIntern};
 use crate::clip::{ClipInternData, ClipNodeId, ClipLeafId};
 use crate::clip::{PolygonDataHandle, ClipTreeBuilder};
 use crate::segment::EdgeAaSegmentMask;
@@ -62,7 +62,7 @@ use crate::picture::{BlitReason, OrderedPictureChild, PrimitiveList, SurfaceInfo
 use crate::picture_graph::PictureGraph;
 use crate::prim_store::{PrimitiveInstance};
 use crate::prim_store::{PrimitiveInstanceKind, NinePatchDescriptor, PrimitiveStore};
-use crate::prim_store::{InternablePrimitive, SegmentInstanceIndex, PictureIndex};
+use crate::prim_store::{InternablePrimitive, PictureIndex};
 use crate::prim_store::{PolygonKey};
 use crate::prim_store::backdrop::{BackdropCapture, BackdropRender};
 use crate::prim_store::borders::{ImageBorder, NormalBorderPrim};
@@ -417,6 +417,7 @@ impl PictureChainBuilder {
 
 bitflags! {
     /// Slice flags
+    #[derive(Debug, Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash)]
     pub struct SliceFlags : u8 {
         /// Slice created by a prim that has PrimitiveFlags::IS_SCROLLBAR_CONTAINER
         const IS_SCROLLBAR = 1;
@@ -603,8 +604,12 @@ impl<'a> SceneBuilder<'a> {
             builder.picture_graph.add_root(*pic_index);
             SceneBuilder::finalize_picture(
                 *pic_index,
+                None,
                 &mut builder.prim_store.pictures,
                 None,
+                &builder.clip_tree_builder,
+                &builder.prim_instances,
+                &builder.interners.clip,
             );
         }
 
@@ -628,15 +633,21 @@ impl<'a> SceneBuilder<'a> {
         }
     }
 
-    /// Traverse the picture prim list and update any late-set spatial nodes
+    /// Traverse the picture prim list and update any late-set spatial nodes.
+    /// Also, for each picture primitive, store the lowest-common-ancestor
+    /// of all of the contained primitives' clips.
     // TODO(gw): This is somewhat hacky - it's unfortunate we need to do this, but it's
     //           because we can't determine the scroll root until we have checked all the
     //           primitives in the slice. Perhaps we could simplify this by doing some
     //           work earlier in the DL builder, so we know what scroll root will be picked?
     fn finalize_picture(
         pic_index: PictureIndex,
+        prim_index: Option<usize>,
         pictures: &mut [PicturePrimitive],
         parent_spatial_node_index: Option<SpatialNodeIndex>,
+        clip_tree_builder: &ClipTreeBuilder,
+        prim_instances: &[PrimitiveInstance],
+        clip_interner: &Interner<ClipIntern>,
     ) {
         // Extract the prim_list (borrow check) and select the spatial node to
         // assign to unknown clusters
@@ -667,23 +678,104 @@ impl<'a> SceneBuilder<'a> {
             }
         }
 
-        // Update the spatial node of any child pictures
-        for child_pic_index in &prim_list.child_pictures {
-            let child_pic = &mut pictures[child_pic_index.0];
+        // Work out the lowest common clip which is shared by all the
+        // primitives in this picture.  If it is the same as the picture clip
+        // then store it as the clip tree root for the picture so that it is
+        // applied later as part of picture compositing.  Gecko gives every
+        // primitive a viewport clip which, if applied within the picture,
+        // will mess up tile caching and mean we have to redraw on every
+        // scroll event (for tile caching to work usefully we specifically
+        // want to draw things even if they are outside the viewport).
+        let mut shared_clip_node_id = None;
+        for cluster in &prim_list.clusters {
+            for prim_instance in &prim_instances[cluster.prim_range()] {
+                let leaf = clip_tree_builder.get_leaf(prim_instance.clip_leaf_id);
 
-            if child_pic.spatial_node_index == SpatialNodeIndex::UNKNOWN {
-                child_pic.spatial_node_index = spatial_node_index;
+                shared_clip_node_id = match shared_clip_node_id {
+                    Some(current) => {
+                        Some(clip_tree_builder.find_lowest_common_ancestor(
+                            current,
+                            leaf.node_id,
+                        ))
+                    }
+                    None => Some(leaf.node_id)
+                };
             }
+        }
 
-            // Recurse into child pictures which may also have unknown spatial nodes
-            SceneBuilder::finalize_picture(
-                *child_pic_index,
-                pictures,
-                Some(spatial_node_index),
-            );
+        let lca_tree_node = shared_clip_node_id
+            .and_then(|node_id| (node_id != ClipNodeId::NONE).then_some(node_id))
+            .map(|node_id| clip_tree_builder.get_node(node_id));
+        let lca_node = lca_tree_node
+            .map(|tree_node| &clip_interner[tree_node.handle]);
+        let pic_node_id = prim_index
+            .map(|prim_index| clip_tree_builder.get_leaf(prim_instances[prim_index].clip_leaf_id).node_id)
+            .and_then(|node_id| (node_id != ClipNodeId::NONE).then_some(node_id));
+        let pic_node = pic_node_id
+            .map(|node_id| clip_tree_builder.get_node(node_id))
+            .map(|tree_node| &clip_interner[tree_node.handle]);
 
-            if pictures[child_pic_index.0].flags.contains(PictureFlags::DISABLE_SNAPPING) {
-                pictures[pic_index.0].flags |= PictureFlags::DISABLE_SNAPPING;
+        // The logic behind this optimisation is that there's no need to clip
+        // the contents of a picture when the crop will be applied anyway as
+        // part of compositing the picture.  However, this is not true if the
+        // picture includes a blur filter as the blur result depends on the
+        // offscreen pixels which may or may not be cropped away.
+        let has_blur = match &pictures[pic_index.0].composite_mode {
+            Some(PictureCompositeMode::Filter(Filter::Blur { .. })) => true,
+            Some(PictureCompositeMode::Filter(Filter::DropShadows { .. })) => true,
+            Some(PictureCompositeMode::SvgFilter( .. )) => true,
+            _ => false,
+        };
+
+        // It is only safe to apply this optimisation if the old pic clip node
+        // is the direct parent of the new LCA node.  If this is not the case
+        // then there could be other more restrictive clips in between the two
+        // which we would ignore by changing the clip root.  See Bug 1854062
+        // for an example of this.
+        let direct_parent = lca_tree_node
+            .zip(pic_node_id)
+            .map(|(lca_tree_node, pic_node_id)| lca_tree_node.parent == pic_node_id)
+            .unwrap_or(false);
+
+        if let Some((lca_node, pic_node)) = lca_node.zip(pic_node) {
+            // It is only safe to ignore the LCA clip (by making it the clip
+            // root) if it is equal to or larger than the picture clip. But
+            // this comparison also needs to take into account spatial nodes
+            // as the two clips may in general be on different spatial nodes.
+            // For this specific Gecko optimisation we expect the the two
+            // clips to be identical and have the same spatial node so it's
+            // simplest to just test for ClipItemKey equality (which includes
+            // both spatial node and the actual clip).
+            if lca_node.key == pic_node.key && !has_blur && direct_parent {
+                pictures[pic_index.0].clip_root = shared_clip_node_id;
+            }
+        }
+
+        // Update the spatial node of any child pictures
+        for cluster in &prim_list.clusters {
+            for prim_instance_index in cluster.prim_range() {
+                if let PrimitiveInstanceKind::Picture { pic_index: child_pic_index, .. } = prim_instances[prim_instance_index].kind {
+                    let child_pic = &mut pictures[child_pic_index.0];
+
+                    if child_pic.spatial_node_index == SpatialNodeIndex::UNKNOWN {
+                        child_pic.spatial_node_index = spatial_node_index;
+                    }
+
+                    // Recurse into child pictures which may also have unknown spatial nodes
+                    SceneBuilder::finalize_picture(
+                        child_pic_index,
+                        Some(prim_instance_index),
+                        pictures,
+                        Some(spatial_node_index),
+                        clip_tree_builder,
+                        prim_instances,
+                        clip_interner,
+                    );
+
+                    if pictures[child_pic_index.0].flags.contains(PictureFlags::DISABLE_SNAPPING) {
+                        pictures[pic_index.0].flags |= PictureFlags::DISABLE_SNAPPING;
+                    }
+                }
             }
         }
 
@@ -2894,7 +2986,6 @@ impl<'a> SceneBuilder<'a> {
                             PrimitiveInstanceKind::Picture {
                                 data_handle: shadow_prim_data_handle,
                                 pic_index: shadow_pic_index,
-                                segment_instance_index: SegmentInstanceIndex::INVALID,
                             },
                             self.clip_tree_builder.build_for_picture(clip_node_id),
                         );
@@ -4035,7 +4126,6 @@ fn create_prim_instance(
         PrimitiveInstanceKind::Picture {
             data_handle,
             pic_index,
-            segment_instance_index: SegmentInstanceIndex::INVALID,
         },
         clip_tree_builder.build_for_picture(
             clip_node_id,

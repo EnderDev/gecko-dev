@@ -46,7 +46,7 @@ function generateDefaultState(propsOverride) {
 function renderXHRBreakpointsComponent(propsOverride) {
   const props = generateDefaultState(propsOverride);
   const xhrBreakpointsComponent = mount(
-    <XHRBreakpoints.WrappedComponent {...props} />
+    React.createElement(XHRBreakpoints.WrappedComponent, props)
   );
   return xhrBreakpointsComponent;
 }
@@ -170,9 +170,7 @@ describe("XHR Breakpoints", function () {
     );
     expect(xhrInputContainer.hasClass("focused")).toBeTruthy();
 
-    xhrBreakpointsComponent
-      .find(".breakpoints-exceptions-options")
-      .simulate("mousedown");
+    xhrBreakpointsComponent.find(".breakpoints-options").simulate("mousedown");
     expect(xhrBreakpointsComponent.state("focused")).toBe(true);
     expect(xhrBreakpointsComponent.state("editing")).toBe(true);
     expect(xhrBreakpointsComponent.state("clickedOnFormElement")).toBe(false);
@@ -182,9 +180,7 @@ describe("XHR Breakpoints", function () {
     expect(xhrBreakpointsComponent.state("editing")).toBe(false);
     expect(xhrBreakpointsComponent.state("clickedOnFormElement")).toBe(false);
 
-    xhrBreakpointsComponent
-      .find(".breakpoints-exceptions-options")
-      .simulate("click");
+    xhrBreakpointsComponent.find(".breakpoints-options").simulate("click");
 
     xhrInputContainer = xhrBreakpointsComponent.find(".xhr-input-container");
     expect(xhrInputContainer.hasClass("focused")).not.toBeTruthy();

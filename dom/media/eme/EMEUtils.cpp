@@ -23,34 +23,11 @@ LogModule* GetEMEVerboseLog() {
   return log;
 }
 
-ArrayData GetArrayBufferViewOrArrayBufferData(
-    const dom::ArrayBufferViewOrArrayBuffer& aBufferOrView) {
-  MOZ_ASSERT(aBufferOrView.IsArrayBuffer() ||
-             aBufferOrView.IsArrayBufferView());
-  JS::AutoCheckCannotGC nogc;
-  if (aBufferOrView.IsArrayBuffer()) {
-    const dom::ArrayBuffer& buffer = aBufferOrView.GetAsArrayBuffer();
-    buffer.ComputeState();
-    return ArrayData(buffer.Data(), buffer.Length());
-  } else if (aBufferOrView.IsArrayBufferView()) {
-    const dom::ArrayBufferView& bufferview =
-        aBufferOrView.GetAsArrayBufferView();
-    bufferview.ComputeState();
-    return ArrayData(bufferview.Data(), bufferview.Length());
-  }
-  return ArrayData(nullptr, 0);
-}
-
 void CopyArrayBufferViewOrArrayBufferData(
     const dom::ArrayBufferViewOrArrayBuffer& aBufferOrView,
     nsTArray<uint8_t>& aOutData) {
-  JS::AutoCheckCannotGC nogc;
-  ArrayData data = GetArrayBufferViewOrArrayBufferData(aBufferOrView);
   aOutData.Clear();
-  if (!data.IsValid()) {
-    return;
-  }
-  aOutData.AppendElements(data.mData, data.mLength);
+  Unused << dom::AppendTypedArrayDataTo(aBufferOrView, aOutData);
 }
 
 bool IsClearkeyKeySystem(const nsAString& aKeySystem) {
@@ -78,6 +55,19 @@ bool IsPlayReadyKeySystemAndSupported(const nsAString& aKeySystem) {
   return aKeySystem.EqualsLiteral(kPlayReadyKeySystemName) ||
          aKeySystem.EqualsLiteral(kPlayReadyKeySystemHardware);
 }
+
+bool IsWidevineExperimentKeySystemAndSupported(const nsAString& aKeySystem) {
+  if (!StaticPrefs::media_eme_widevine_experiment_enabled()) {
+    return false;
+  }
+  // 1=enabled encrypted and clear, 2=enabled encrytped.
+  if (StaticPrefs::media_wmf_media_engine_enabled() != 1 &&
+      StaticPrefs::media_wmf_media_engine_enabled() != 2) {
+    return false;
+  }
+  return aKeySystem.EqualsLiteral(kWidevineExperimentKeySystemName) ||
+         aKeySystem.EqualsLiteral(kWidevineExperiment2KeySystemName);
+}
 #endif
 
 nsString KeySystemToProxyName(const nsAString& aKeySystem) {
@@ -90,6 +80,9 @@ nsString KeySystemToProxyName(const nsAString& aKeySystem) {
 #ifdef MOZ_WMF_CDM
   if (IsPlayReadyKeySystemAndSupported(aKeySystem)) {
     return u"mfcdm-playready"_ns;
+  }
+  if (IsWidevineExperimentKeySystemAndSupported(aKeySystem)) {
+    return u"mfcdm-widevine"_ns;
   }
 #endif
   MOZ_ASSERT_UNREACHABLE("Not supported key system!");
@@ -115,5 +108,24 @@ const char* ToMediaKeyStatusStr(dom::MediaKeyStatus aStatus) {
 }
 
 #undef ENUM_TO_STR
+
+bool IsHardwareDecryptionSupported(
+    const dom::MediaKeySystemConfiguration& aConfig) {
+  bool supportHardwareDecryption = false;
+  for (const auto& capabilities : aConfig.mAudioCapabilities) {
+    if (capabilities.mRobustness.EqualsLiteral("HW_SECURE_ALL")) {
+      supportHardwareDecryption = true;
+      break;
+    }
+  }
+  for (const auto& capabilities : aConfig.mVideoCapabilities) {
+    if (capabilities.mRobustness.EqualsLiteral("3000") ||
+        capabilities.mRobustness.EqualsLiteral("HW_SECURE_ALL")) {
+      supportHardwareDecryption = true;
+      break;
+    }
+  }
+  return supportHardwareDecryption;
+}
 
 }  // namespace mozilla

@@ -13,9 +13,7 @@
 
 #include "mozilla/Variant.h"
 
-#include "js/OffThreadScriptCompilation.h"
 #include "js/shadow/Zone.h"
-#include "js/Transcoding.h"
 #include "js/UniquePtr.h"
 #include "threading/LockGuard.h"
 #include "threading/Mutex.h"
@@ -26,8 +24,8 @@ union Utf8Unit;
 }
 
 namespace JS {
-class OffThreadToken {};
 class JS_PUBLIC_API ReadOnlyCompileOptions;
+class JS_PUBLIC_API ReadOnlyDecodeOptions;
 class Zone;
 
 template <typename UnitT>
@@ -156,8 +154,8 @@ struct ZonesInState {
   JS::shadow::Zone::GCState state;
 };
 
-using CompilationSelector = mozilla::Variant<JSScript*, JS::Realm*, JS::Zone*,
-                                             ZonesInState, JSRuntime*>;
+using CompilationSelector =
+    mozilla::Variant<JSScript*, JS::Zone*, ZonesInState, JSRuntime*>;
 
 /*
  * Cancel scheduled or in progress Ion compilations.
@@ -166,10 +164,6 @@ void CancelOffThreadIonCompile(const CompilationSelector& selector);
 
 inline void CancelOffThreadIonCompile(JSScript* script) {
   CancelOffThreadIonCompile(CompilationSelector(script));
-}
-
-inline void CancelOffThreadIonCompile(JS::Realm* realm) {
-  CancelOffThreadIonCompile(CompilationSelector(realm));
 }
 
 inline void CancelOffThreadIonCompile(JS::Zone* zone) {
@@ -186,21 +180,8 @@ inline void CancelOffThreadIonCompile(JSRuntime* runtime) {
 }
 
 #ifdef DEBUG
-bool HasOffThreadIonCompile(JS::Realm* realm);
+bool HasOffThreadIonCompile(JS::Zone* zone);
 #endif
-
-// True iff the current thread is a ParseTask or a DelazifyTask.
-bool CurrentThreadIsParseThread();
-
-/*
- * Cancel all scheduled, in progress or finished parses for runtime.
- *
- * Parse tasks which have completed but for which JS::FinishOffThreadScript (or
- * equivalent) has not been called are removed from the system. This is only
- * safe to do during shutdown, or if you know that the main thread isn't waiting
- * for tasks to complete.
- */
-void CancelOffThreadParses(JSRuntime* runtime);
 
 /*
  * Cancel all scheduled or in progress eager delazification phases for a
@@ -213,42 +194,9 @@ void CancelOffThreadDelazify(JSRuntime* runtime);
  */
 void WaitForAllDelazifyTasks(JSRuntime* rt);
 
-/*
- * Start a parse/emit cycle for a stream of source. The characters must stay
- * alive until the compilation finishes.
- */
-
-JS::OffThreadToken* StartOffThreadCompileToStencil(
-    JSContext* cx, const JS::ReadOnlyCompileOptions& options,
-    JS::SourceText<char16_t>& srcBuf, JS::OffThreadCompileCallback callback,
-    void* callbackData);
-JS::OffThreadToken* StartOffThreadCompileToStencil(
-    JSContext* cx, const JS::ReadOnlyCompileOptions& options,
-    JS::SourceText<mozilla::Utf8Unit>& srcBuf,
-    JS::OffThreadCompileCallback callback, void* callbackData);
-
-JS::OffThreadToken* StartOffThreadCompileModuleToStencil(
-    JSContext* cx, const JS::ReadOnlyCompileOptions& options,
-    JS::SourceText<char16_t>& srcBuf, JS::OffThreadCompileCallback callback,
-    void* callbackData);
-JS::OffThreadToken* StartOffThreadCompileModuleToStencil(
-    JSContext* cx, const JS::ReadOnlyCompileOptions& options,
-    JS::SourceText<mozilla::Utf8Unit>& srcBuf,
-    JS::OffThreadCompileCallback callback, void* callbackData);
-
-JS::OffThreadToken* StartOffThreadDecodeStencil(
-    JSContext* cx, const JS::DecodeOptions& options,
-    const JS::TranscodeRange& range, JS::OffThreadCompileCallback callback,
-    void* callbackData);
-
-JS::OffThreadToken* StartOffThreadDecodeMultiStencils(
-    JSContext* cx, const JS::DecodeOptions& options,
-    JS::TranscodeSources& sources, JS::OffThreadCompileCallback callback,
-    void* callbackData);
-
 // Start off-thread delazification task, to race the delazification of inner
 // functions.
-void StartOffThreadDelazification(JSContext* cx,
+void StartOffThreadDelazification(JSContext* maybeCx,
                                   const JS::ReadOnlyCompileOptions& options,
                                   const frontend::CompilationStencil& stencil);
 

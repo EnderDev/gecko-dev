@@ -17,21 +17,16 @@
 import expect from 'expect';
 import {isErrorLike} from 'puppeteer-core/internal/util/ErrorLike.js';
 
-import {
-  getTestState,
-  setupTestBrowserHooks,
-  setupTestPageAndContextHooks,
-} from './mocha-utils.js';
+import {getTestState, setupTestBrowserHooks} from './mocha-utils.js';
 import {waitEvent} from './utils.js';
 
 describe('Target.createCDPSession', function () {
   setupTestBrowserHooks();
-  setupTestPageAndContextHooks();
 
   it('should work', async () => {
-    const {page} = getTestState();
+    const {page} = await getTestState();
 
-    const client = await page.target().createCDPSession();
+    const client = await page.createCDPSession();
 
     await Promise.all([
       client.send('Runtime.enable'),
@@ -44,22 +39,24 @@ describe('Target.createCDPSession', function () {
   });
 
   it('should not report created targets for custom CDP sessions', async () => {
-    const {browser} = getTestState();
+    const {browser} = await getTestState();
     let called = 0;
-    browser.browserContexts()[0]!.on('targetcreated', async target => {
+    const handler = async (target: any) => {
       called++;
       if (called > 1) {
         throw new Error('Too many targets created');
       }
       await target.createCDPSession();
-    });
+    };
+    browser.browserContexts()[0]!.on('targetcreated', handler);
     await browser.newPage();
+    browser.browserContexts()[0]!.off('targetcreated', handler);
   });
 
   it('should send events', async () => {
-    const {page, server} = getTestState();
+    const {page, server} = await getTestState();
 
-    const client = await page.target().createCDPSession();
+    const client = await page.createCDPSession();
     await client.send('Network.enable');
     const events: unknown[] = [];
     client.on('Network.requestWillBeSent', event => {
@@ -72,9 +69,9 @@ describe('Target.createCDPSession', function () {
     expect(events).toHaveLength(1);
   });
   it('should enable and disable domains independently', async () => {
-    const {page} = getTestState();
+    const {page} = await getTestState();
 
-    const client = await page.target().createCDPSession();
+    const client = await page.createCDPSession();
     await client.send('Runtime.enable');
     await client.send('Debugger.enable');
     // JS coverage enables and then disables Debugger domain.
@@ -89,9 +86,9 @@ describe('Target.createCDPSession', function () {
     expect(event.url).toBe('foo.js');
   });
   it('should be able to detach session', async () => {
-    const {page} = getTestState();
+    const {page} = await getTestState();
 
-    const client = await page.target().createCDPSession();
+    const client = await page.createCDPSession();
     await client.send('Runtime.enable');
     const evalResponse = await client.send('Runtime.evaluate', {
       expression: '1 + 2',
@@ -113,9 +110,9 @@ describe('Target.createCDPSession', function () {
     expect(error.message).toContain('Session closed.');
   });
   it('should throw nice errors', async () => {
-    const {page} = getTestState();
+    const {page} = await getTestState();
 
-    const client = await page.target().createCDPSession();
+    const client = await page.createCDPSession();
     const error = await theSourceOfTheProblems().catch(error => {
       return error;
     });
@@ -131,9 +128,9 @@ describe('Target.createCDPSession', function () {
   });
 
   it('should expose the underlying connection', async () => {
-    const {page} = getTestState();
+    const {page} = await getTestState();
 
-    const client = await page.target().createCDPSession();
+    const client = await page.createCDPSession();
     expect(client.connection()).toBeTruthy();
   });
 });

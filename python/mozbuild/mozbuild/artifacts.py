@@ -100,7 +100,6 @@ class ArtifactJob(object):
     ]
     # The list below list should be updated when we have new ESRs.
     esr_candidate_trees = [
-        "releases/mozilla-esr102",
         "releases/mozilla-esr115",
     ]
     try_tree = "try"
@@ -124,6 +123,7 @@ class ArtifactJob(object):
         ("bin/screentopng", ("bin", "bin")),
         ("bin/ssltunnel", ("bin", "bin")),
         ("bin/xpcshell", ("bin", "bin")),
+        ("bin/plugin-container", ("bin", "bin")),
         ("bin/http3server", ("bin", "bin")),
         ("bin/plugins/gmp-*/*/*", ("bin/plugins", "bin")),
         ("bin/plugins/*", ("bin/plugins", "plugins")),
@@ -795,6 +795,7 @@ class WinArtifactJob(ArtifactJob):
         ("bin/ssltunnel.exe", ("bin", "bin")),
         ("bin/xpcshell.exe", ("bin", "bin")),
         ("bin/http3server.exe", ("bin", "bin")),
+        ("bin/content_analysis_sdk_agent.exe", ("bin", "bin")),
         ("bin/plugins/gmp-*/*/*", ("bin/plugins", "bin")),
         ("bin/plugins/*", ("bin/plugins", "plugins")),
         ("bin/components/*", ("bin/components", "bin/components")),
@@ -832,7 +833,9 @@ class ThunderbirdMixin(object):
     trust_domain = "comm"
     product = "thunderbird"
     try_tree = "try-comm-central"
-
+    default_candidate_trees = [
+        "releases/comm-release",
+    ]
     nightly_candidate_trees = [
         "comm-central",
     ]
@@ -841,7 +844,6 @@ class ThunderbirdMixin(object):
     ]
     # The list below list should be updated when we have new ESRs.
     esr_candidate_trees = [
-        "releases/comm-esr102",
         "releases/comm-esr115",
     ]
 

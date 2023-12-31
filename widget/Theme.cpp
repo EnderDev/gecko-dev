@@ -755,9 +755,14 @@ void Theme::PaintMenulist(PaintBackendData& aDrawTarget,
   }
 }
 
-void Theme::PaintMenulistArrowButton(nsIFrame* aFrame, DrawTarget& aDrawTarget,
-                                     const LayoutDeviceRect& aRect,
-                                     const ElementState& aState) {
+enum class PhysicalArrowDirection {
+  Right,
+  Left,
+  Bottom,
+};
+
+void Theme::PaintMenulistArrow(nsIFrame* aFrame, DrawTarget& aDrawTarget,
+                               const LayoutDeviceRect& aRect) {
   // not const: these may be negated in-place below
   float polygonX[] = {-4.0f, -0.5f, 0.5f, 4.0f,  4.0f,
                       3.0f,  0.0f,  0.0f, -3.0f, -4.0f};
@@ -765,29 +770,42 @@ void Theme::PaintMenulistArrowButton(nsIFrame* aFrame, DrawTarget& aDrawTarget,
                       -2.0f, 1.5f, 1.5f, -2.0f, -2.0f};
 
   const float kPolygonSize = kMinimumDropdownArrowButtonWidth;
+  const auto direction = [&] {
+    const auto wm = aFrame->GetWritingMode();
+    switch (wm.GetBlockDir()) {
+      case WritingMode::BlockDir::eBlockLR:
+        return PhysicalArrowDirection::Right;
+      case WritingMode::BlockDir::eBlockRL:
+        return PhysicalArrowDirection::Left;
+      case WritingMode::BlockDir::eBlockTB:
+        return PhysicalArrowDirection::Bottom;
+    }
+    MOZ_ASSERT_UNREACHABLE("Unknown direction?");
+    return PhysicalArrowDirection::Bottom;
+  }();
 
   auto const [xs, ys] = [&] {
     using Pair = std::pair<const float*, const float*>;
-    switch (aFrame->GetWritingMode().GetBlockDir()) {
-      case WritingMode::BlockDir::eBlockRL:
+    switch (direction) {
+      case PhysicalArrowDirection::Left:
         // rotate 90°: [[0,1],[-1,0]]
         for (float& f : polygonY) {
           f = -f;
         }
         return Pair(polygonY, polygonX);
 
-      case WritingMode::BlockDir::eBlockLR:
+      case PhysicalArrowDirection::Right:
         // rotate 270°: [[0,-1],[1,0]]
         for (float& f : polygonX) {
           f = -f;
         }
         return Pair(polygonY, polygonX);
 
-      case WritingMode::BlockDir::eBlockTB:
+      case PhysicalArrowDirection::Bottom:
         // rotate 0°: [[1,0],[0,1]]
         return Pair(polygonX, polygonY);
     }
-    MOZ_ASSERT_UNREACHABLE("unhandled BlockDir");
+    MOZ_ASSERT_UNREACHABLE("Unknown direction?");
     return Pair(polygonX, polygonY);
   }();
 
@@ -880,11 +898,18 @@ void Theme::PaintRange(nsIFrame* aFrame, PaintBackendData& aPaintData,
     tickMarkSize = LayoutDeviceSize(tickMarkHeight, tickMarkWidth);
     thumbRect.x = aRect.x + (aRect.width - thumbRect.width) / 2;
 
-    thumbRect.y =
-        aRect.y + (aRect.height - thumbRect.height) * (1.0 - progress);
-    float midPoint = thumbRect.Center().Y();
-    trackClipRect.SetBoxY(aRect.Y(), midPoint);
-    progressClipRect.SetBoxY(midPoint, aRect.YMost());
+    if (rangeFrame->IsUpwards()) {
+      thumbRect.y =
+          aRect.y + (aRect.height - thumbRect.height) * (1.0 - progress);
+      float midPoint = thumbRect.Center().Y();
+      trackClipRect.SetBoxY(aRect.Y(), midPoint);
+      progressClipRect.SetBoxY(midPoint, aRect.YMost());
+    } else {
+      thumbRect.y = aRect.y + (aRect.height - thumbRect.height) * progress;
+      float midPoint = thumbRect.Center().Y();
+      trackClipRect.SetBoxY(midPoint, aRect.YMost());
+      progressClipRect.SetBoxY(aRect.Y(), midPoint);
+    }
   }
 
   const CSSCoord borderWidth = 1.0f;
@@ -1139,16 +1164,8 @@ bool Theme::DoDrawWidgetBackground(PaintBackendData& aPaintData,
   const nscoord twipsPerPixel = pc->AppUnitsPerDevPixel();
   const auto devPxRect = ToSnappedRect(aRect, twipsPerPixel, aPaintData);
 
-  const DocumentState docState = pc->Document()->GetDocumentState();
+  const DocumentState docState = pc->Document()->State();
   ElementState elementState = GetContentState(aFrame, aAppearance);
-  if (aAppearance == StyleAppearance::MozMenulistArrowButton) {
-    // HTML select and XUL menulist dropdown buttons get state from the
-    // parent.
-    nsIFrame* parentFrame = aFrame->GetParent();
-    aFrame = parentFrame;
-    elementState = GetContentState(parentFrame, aAppearance);
-  }
-
   // Paint the outline iff we're asked to draw overflow and we have
   // outline-style: auto.
   if (aDrawOverflow == DrawOverflow::Yes &&
@@ -1205,7 +1222,7 @@ bool Theme::DoDrawWidgetBackground(PaintBackendData& aPaintData,
         // TODO: Need to figure out how to best draw this using WR.
         return false;
       } else {
-        PaintMenulistArrowButton(aFrame, aPaintData, devPxRect, elementState);
+        PaintMenulistArrow(aFrame, aPaintData, devPxRect);
       }
       break;
     case StyleAppearance::Tooltip: {
@@ -1216,18 +1233,6 @@ bool Theme::DoDrawWidgetBackground(PaintBackendData& aPaintData,
           colors.System(StyleSystemColor::Infobackground),
           colors.System(StyleSystemColor::Infotext), strokeWidth, strokeRadius,
           dpiRatio);
-      break;
-    }
-    case StyleAppearance::Menuitem: {
-      ThemeDrawing::FillRect(aPaintData, devPxRect, [&] {
-        if (CheckBooleanAttr(aFrame, nsGkAtoms::menuactive)) {
-          if (elementState.HasState(ElementState::DISABLED)) {
-            return colors.System(StyleSystemColor::MozMenuhoverdisabled);
-          }
-          return colors.System(StyleSystemColor::MozMenuhover);
-        }
-        return sTransparent;
-      }());
       break;
     }
     case StyleAppearance::SpinnerUpbutton:
@@ -1401,7 +1406,10 @@ void Theme::PaintAutoStyleOutline(nsIFrame* aFrame,
     }
   };
 
-  DrawRect(accentColor.Get());
+  auto primaryColor = aColors.HighContrast()
+                          ? aColors.System(StyleSystemColor::Selecteditem)
+                          : accentColor.Get();
+  DrawRect(primaryColor);
 
   if (solid) {
     return;
@@ -1413,7 +1421,10 @@ void Theme::PaintAutoStyleOutline(nsIFrame* aFrame,
       LayoutDeviceCoord(ThemeDrawing::SnapBorderWidth(1.0f, aDpiRatio));
   rect.Inflate(strokeWidth);
 
-  DrawRect(accentColor.GetForeground());
+  auto secondaryColor = aColors.HighContrast()
+                            ? aColors.System(StyleSystemColor::Canvastext)
+                            : accentColor.GetForeground();
+  DrawRect(secondaryColor);
 }
 
 LayoutDeviceIntMargin Theme::GetWidgetBorder(nsDeviceContext* aContext,
@@ -1666,7 +1677,6 @@ bool Theme::ThemeSupportsWidget(nsPresContext* aPresContext, nsIFrame* aFrame,
     case StyleAppearance::MozMenulistArrowButton:
     case StyleAppearance::SpinnerUpbutton:
     case StyleAppearance::SpinnerDownbutton:
-    case StyleAppearance::Menuitem:
     case StyleAppearance::Tooltip:
       return !IsWidgetStyled(aPresContext, aFrame, aAppearance);
     default:

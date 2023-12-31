@@ -32,17 +32,19 @@ import {LazyArg} from './LazyArg.js';
 import {scriptInjector} from './ScriptInjector.js';
 import {EvaluateFunc, HandleFor} from './types.js';
 import {
-  createJSHandle,
-  getExceptionMessage,
+  PuppeteerURL,
+  createEvaluationError,
+  createCdpHandle,
+  getSourcePuppeteerURLIfAvailable,
   isString,
   valueFromRemoteObject,
 } from './util.js';
 
-/**
- * @public
- */
-export const EVALUATION_SCRIPT_URL = 'pptr://__puppeteer_evaluation_script__';
 const SOURCE_URL_REGEX = /^[\040\t]*\/\/[@#] sourceURL=\s*(\S*?)\s*$/m;
+
+const getSourceUrlComment = (url: string) => {
+  return `//# sourceURL=${url}`;
+};
 
 /**
  * Represents a context for JavaScript execution.
@@ -52,7 +54,7 @@ const SOURCE_URL_REGEX = /^[\040\t]*\/\/[@#] sourceURL=\s*(\S*?)\s*$/m;
  *
  * - Each {@link Frame} of a {@link Page | page} has a "default" execution
  *   context that is always created after frame is attached to DOM. This context
- *   is returned by the {@link Frame.executionContext} method.
+ *   is returned by the {@link Frame.realm} method.
  * - Each {@link https://developer.chrome.com/extensions | Chrome extensions}
  *   creates additional execution contexts to isolate their code.
  *
@@ -68,14 +70,14 @@ const SOURCE_URL_REGEX = /^[\040\t]*\/\/[@#] sourceURL=\s*(\S*?)\s*$/m;
  */
 export class ExecutionContext {
   _client: CDPSession;
-  _world?: IsolatedWorld;
+  _world: IsolatedWorld;
   _contextId: number;
   _contextName?: string;
 
   constructor(
     client: CDPSession,
     contextPayload: Protocol.Runtime.ExecutionContextDescription,
-    world?: IsolatedWorld
+    world: IsolatedWorld
   ) {
     this._client = client;
     this._world = world;
@@ -103,9 +105,12 @@ export class ExecutionContext {
             selector: string
           ): Promise<JSHandle<Node[]>> => {
             const results = ARIAQueryHandler.queryAll(element, selector);
-            return element.executionContext().evaluateHandle((...elements) => {
-              return elements;
-            }, ...(await AsyncIterableUtil.collect(results)));
+            return await element.realm.evaluateHandle(
+              (...elements) => {
+                return elements;
+              },
+              ...(await AsyncIterableUtil.collect(results))
+            );
           }) as (...args: unknown[]) => unknown)
         ),
       ]);
@@ -179,7 +184,7 @@ export class ExecutionContext {
    */
   async evaluate<
     Params extends unknown[],
-    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>
+    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>,
   >(
     pageFunction: Func | string,
     ...args: Params
@@ -238,17 +243,17 @@ export class ExecutionContext {
    */
   async evaluateHandle<
     Params extends unknown[],
-    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>
+    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>,
   >(
     pageFunction: Func | string,
     ...args: Params
   ): Promise<HandleFor<Awaited<ReturnType<Func>>>> {
-    return this.#evaluate(false, pageFunction, ...args);
+    return await this.#evaluate(false, pageFunction, ...args);
   }
 
   async #evaluate<
     Params extends unknown[],
-    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>
+    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>,
   >(
     returnByValue: true,
     pageFunction: Func | string,
@@ -256,7 +261,7 @@ export class ExecutionContext {
   ): Promise<Awaited<ReturnType<Func>>>;
   async #evaluate<
     Params extends unknown[],
-    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>
+    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>,
   >(
     returnByValue: false,
     pageFunction: Func | string,
@@ -264,20 +269,23 @@ export class ExecutionContext {
   ): Promise<HandleFor<Awaited<ReturnType<Func>>>>;
   async #evaluate<
     Params extends unknown[],
-    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>
+    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>,
   >(
     returnByValue: boolean,
     pageFunction: Func | string,
     ...args: Params
   ): Promise<HandleFor<Awaited<ReturnType<Func>>> | Awaited<ReturnType<Func>>> {
-    const suffix = `//# sourceURL=${EVALUATION_SCRIPT_URL}`;
+    const sourceUrlComment = getSourceUrlComment(
+      getSourcePuppeteerURLIfAvailable(pageFunction)?.toString() ??
+        PuppeteerURL.INTERNAL_URL
+    );
 
     if (isString(pageFunction)) {
       const contextId = this._contextId;
       const expression = pageFunction;
       const expressionWithSourceUrl = SOURCE_URL_REGEX.test(expression)
         ? expression
-        : expression + '\n' + suffix;
+        : `${expression}\n${sourceUrlComment}\n`;
 
       const {exceptionDetails, result: remoteObject} = await this._client
         .send('Runtime.evaluate', {
@@ -290,20 +298,24 @@ export class ExecutionContext {
         .catch(rewriteError);
 
       if (exceptionDetails) {
-        throw new Error(
-          'Evaluation failed: ' + getExceptionMessage(exceptionDetails)
-        );
+        throw createEvaluationError(exceptionDetails);
       }
 
       return returnByValue
         ? valueFromRemoteObject(remoteObject)
-        : createJSHandle(this, remoteObject);
+        : createCdpHandle(this._world, remoteObject);
     }
 
+    const functionDeclaration = stringifyFunction(pageFunction);
+    const functionDeclarationWithSourceUrl = SOURCE_URL_REGEX.test(
+      functionDeclaration
+    )
+      ? functionDeclaration
+      : `${functionDeclaration}\n${sourceUrlComment}\n`;
     let callFunctionOnPromise;
     try {
       callFunctionOnPromise = this._client.send('Runtime.callFunctionOn', {
-        functionDeclaration: `${stringifyFunction(pageFunction)}\n${suffix}\n`,
+        functionDeclaration: functionDeclarationWithSourceUrl,
         executionContextId: this._contextId,
         arguments: await Promise.all(args.map(convertArgument.bind(this))),
         returnByValue,
@@ -322,13 +334,11 @@ export class ExecutionContext {
     const {exceptionDetails, result: remoteObject} =
       await callFunctionOnPromise.catch(rewriteError);
     if (exceptionDetails) {
-      throw new Error(
-        'Evaluation failed: ' + getExceptionMessage(exceptionDetails)
-      );
+      throw createEvaluationError(exceptionDetails);
     }
     return returnByValue
       ? valueFromRemoteObject(remoteObject)
-      : createJSHandle(this, remoteObject);
+      : createCdpHandle(this._world, remoteObject);
 
     async function convertArgument(
       this: ExecutionContext,
@@ -358,7 +368,7 @@ export class ExecutionContext {
           ? arg
           : null;
       if (objectHandle) {
-        if (objectHandle.executionContext() !== this) {
+        if (objectHandle.realm !== this._world) {
           throw new Error(
             'JSHandles can be evaluated only in the context they were created!'
           );

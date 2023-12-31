@@ -290,6 +290,8 @@ class IProtocol : public HasResultCodes {
   virtual void AllManagedActors(
       nsTArray<RefPtr<ActorLifecycleProxy>>& aActors) const = 0;
 
+  virtual uint32_t AllManagedActorsCount() const = 0;
+
   // Internal method called when the actor becomes connected.
   void ActorConnected();
 
@@ -566,12 +568,15 @@ inline bool LoggingEnabled() {
 }
 
 #if defined(DEBUG) || defined(FUZZING)
-bool LoggingEnabledFor(const char* aTopLevelProtocol, const char* aFilter);
+bool LoggingEnabledFor(const char* aTopLevelProtocol, mozilla::ipc::Side aSide,
+                       const char* aFilter);
 #endif
 
-inline bool LoggingEnabledFor(const char* aTopLevelProtocol) {
+inline bool LoggingEnabledFor(const char* aTopLevelProtocol,
+                              mozilla::ipc::Side aSide) {
 #if defined(DEBUG) || defined(FUZZING)
-  return LoggingEnabledFor(aTopLevelProtocol, PR_GetEnv("MOZ_IPC_MESSAGE_LOG"));
+  return LoggingEnabledFor(aTopLevelProtocol, aSide,
+                           PR_GetEnv("MOZ_IPC_MESSAGE_LOG"));
 #else
   return false;
 #endif

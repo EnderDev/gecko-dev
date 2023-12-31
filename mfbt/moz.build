@@ -73,6 +73,7 @@ EXPORTS.mozilla = [
     "MemoryReporting.h",
     "MoveOnlyFunction.h",
     "MruCache.h",
+    "NeverDestroyed.h",
     "NonDereferenceable.h",
     "NotNull.h",
     "Opaque.h",
@@ -113,6 +114,7 @@ EXPORTS.mozilla = [
     "ThreadSafety.h",
     "ThreadSafeWeakPtr.h",
     "ToString.h",
+    "Try.h",
     "TypedEnumBits.h",
     "Types.h",
     "UniquePtr.h",
@@ -205,3 +207,8 @@ if CONFIG["MOZ_NEEDS_LIBATOMIC"]:
     OS_LIBS += ["atomic"]
 
 DEFINES["LZ4LIB_VISIBILITY"] = ""
+
+# This is kind of gross because this is not a subdirectory,
+# but pure_virtual requires mfbt to build and some projects
+# don't use mfbt.
+DIRS += ["../build/pure_virtual"]

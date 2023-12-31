@@ -17,10 +17,9 @@
 
 #include "lib/jxl/alpha.h"
 #include "lib/jxl/base/byte_order.h"
+#include "lib/jxl/base/common.h"
 #include "lib/jxl/base/float.h"
 #include "lib/jxl/base/printf_macros.h"
-#include "lib/jxl/color_management.h"
-#include "lib/jxl/common.h"
 
 namespace jxl {
 namespace {
@@ -50,11 +49,8 @@ Status ConvertFromExternal(Span<const uint8_t> bytes, size_t xsize,
     JXL_RETURN_IF_ERROR(bits_per_sample > 0 && bits_per_sample <= 8);
   } else if (format.data_type == JXL_TYPE_UINT16) {
     JXL_RETURN_IF_ERROR(bits_per_sample > 8 && bits_per_sample <= 16);
-  } else if (format.data_type == JXL_TYPE_FLOAT16) {
-    JXL_RETURN_IF_ERROR(bits_per_sample == 16);
-  } else if (format.data_type == JXL_TYPE_FLOAT) {
-    JXL_RETURN_IF_ERROR(bits_per_sample == 32);
-  } else {
+  } else if (format.data_type != JXL_TYPE_FLOAT16 &&
+             format.data_type != JXL_TYPE_FLOAT) {
     JXL_FAILURE("unsupported pixel format data type %d", format.data_type);
   }
   size_t bytes_per_channel = JxlDataTypeBytes(format.data_type);

@@ -9,11 +9,11 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/CheckedInt.h"
 #include "mozilla/FloatingPoint.h"
+#include "mozilla/Maybe.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <stddef.h>
 #include <type_traits>
 #include <utility>
 
@@ -32,6 +32,7 @@
 #include "builtin/temporal/TemporalTypes.h"
 #include "builtin/temporal/TemporalUnit.h"
 #include "builtin/temporal/TimeZone.h"
+#include "builtin/temporal/ToString.h"
 #include "builtin/temporal/Wrapped.h"
 #include "builtin/temporal/ZonedDateTime.h"
 #include "ds/IdValuePair.h"
@@ -41,18 +42,14 @@
 #include "js/CallArgs.h"
 #include "js/CallNonGenericMethod.h"
 #include "js/Class.h"
-#include "js/Conversions.h"
 #include "js/ErrorReport.h"
 #include "js/friend/ErrorMessages.h"
-#include "js/Printer.h"
 #include "js/PropertyDescriptor.h"
 #include "js/PropertySpec.h"
 #include "js/RootingAPI.h"
-#include "js/TypeDecls.h"
-#include "js/Utility.h"
 #include "js/Value.h"
-#include "util/StringBuffer.h"
-#include "vm/Compartment.h"
+#include "vm/BigIntType.h"
+#include "vm/BytecodeUtil.h"
 #include "vm/GlobalObject.h"
 #include "vm/JSAtomState.h"
 #include "vm/JSContext.h"
@@ -360,9 +357,6 @@ static PlainTimeObject* CreateTemporalTime(JSContext* cx, const CallArgs& args,
                        Int32Value(nanosecond));
 
   // Step 10.
-  object->setFixedSlot(PlainTimeObject::CALENDAR_SLOT, NullValue());
-
-  // Step 11.
   return object;
 }
 
@@ -407,9 +401,6 @@ PlainTimeObject* js::temporal::CreateTemporalTime(JSContext* cx,
                        Int32Value(nanosecond));
 
   // Step 10.
-  object->setFixedSlot(PlainTimeObject::CALENDAR_SLOT, NullValue());
-
-  // Step 11.
   return object;
 }
 
@@ -477,8 +468,6 @@ template <typename IntT>
 static BalancedTime BalanceTime(IntT hour, IntT minute, IntT second,
                                 IntT millisecond, IntT microsecond,
                                 IntT nanosecond) {
-  // Step 1. (Not applicable in our implementation.)
-
   // Combined floor'ed division and modulo operation.
   auto divmod = [](IntT dividend, int32_t divisor, int32_t* remainder) {
     MOZ_ASSERT(divisor > 0);
@@ -498,25 +487,25 @@ static BalancedTime BalanceTime(IntT hour, IntT minute, IntT second,
 
   PlainTime time = {};
 
-  // Steps 2-3.
+  // Steps 1-2.
   microsecond += divmod(nanosecond, 1000, &time.nanosecond);
 
-  // Steps 4-5.
+  // Steps 3-4.
   millisecond += divmod(microsecond, 1000, &time.microsecond);
 
-  // Steps 6-7.
+  // Steps 5-6.
   second += divmod(millisecond, 1000, &time.millisecond);
 
-  // Steps 8-9.
+  // Steps 7-8.
   minute += divmod(second, 60, &time.second);
 
-  // Steps 10-11.
+  // Steps 9-10.
   hour += divmod(minute, 60, &time.minute);
 
-  // Steps 12-13.
+  // Steps 11-12.
   int32_t days = divmod(hour, 24, &time.hour);
 
-  // Step 14.
+  // Step 13.
   MOZ_ASSERT(IsValidTime(time));
   return {days, time};
 }
@@ -599,125 +588,93 @@ TimeDuration js::temporal::DifferenceTime(const PlainTime& time1,
 /**
  * ToTemporalTime ( item [ , overflow ] )
  */
-static Wrapped<PlainTimeObject*> ToTemporalTime(JSContext* cx,
-                                                Handle<Value> item,
-                                                TemporalOverflow overflow) {
+static bool ToTemporalTime(JSContext* cx, Handle<Value> item,
+                           TemporalOverflow overflow, PlainTime* result) {
   // Steps 1-2. (Not applicable in our implementation.)
 
   // Steps 3-4.
-  PlainTime result;
   if (item.isObject()) {
     // Step 3.
     Rooted<JSObject*> itemObj(cx, &item.toObject());
 
     // Step 3.a.
-    if (itemObj->canUnwrapAs<PlainTimeObject>()) {
-      return itemObj;
+    if (auto* time = itemObj->maybeUnwrapIf<PlainTimeObject>()) {
+      *result = ToPlainTime(time);
+      return true;
     }
 
     // Step 3.b.
     if (auto* zonedDateTime = itemObj->maybeUnwrapIf<ZonedDateTimeObject>()) {
       auto epochInstant = ToInstant(zonedDateTime);
-      Rooted<JSObject*> timeZone(cx, zonedDateTime->timeZone());
-      Rooted<JSObject*> calendar(cx, zonedDateTime->calendar());
+      Rooted<TimeZoneValue> timeZone(cx, zonedDateTime->timeZone());
 
-      if (!cx->compartment()->wrap(cx, &timeZone)) {
-        return nullptr;
-      }
-      if (!cx->compartment()->wrap(cx, &calendar)) {
-        return nullptr;
+      if (!timeZone.wrap(cx)) {
+        return false;
       }
 
       // Steps 3.b.i-ii.
       PlainDateTime dateTime;
       if (!GetPlainDateTimeFor(cx, timeZone, epochInstant, &dateTime)) {
-        return nullptr;
+        return false;
       }
 
       // Step 3.b.iii.
-      return CreateTemporalTime(cx, dateTime.time);
+      *result = dateTime.time;
+      return true;
     }
 
     // Step 3.c.
     if (auto* dateTime = itemObj->maybeUnwrapIf<PlainDateTimeObject>()) {
-      return CreateTemporalTime(cx, ToPlainTime(dateTime));
+      *result = ToPlainTime(dateTime);
+      return true;
     }
 
     // Step 3.d.
-    Rooted<JSObject*> calendar(cx,
-                               GetTemporalCalendarWithISODefault(cx, itemObj));
-    if (!calendar) {
-      return nullptr;
+    TimeRecord timeResult;
+    if (!ToTemporalTimeRecord(cx, itemObj, &timeResult)) {
+      return false;
     }
 
     // Step 3.e.
-    JSString* calendarId = CalendarToString(cx, calendar);
-    if (!calendarId) {
-      return nullptr;
-    }
-
-    JSLinearString* linear = calendarId->ensureLinear(cx);
-    if (!linear) {
-      return nullptr;
-    }
-
-    if (!StringEqualsLiteral(linear, "iso8601")) {
-      if (auto chars = QuoteString(cx, linear, '"')) {
-        JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr,
-                                 JSMSG_TEMPORAL_PLAIN_TIME_CALENDAR_NOT_ISO8601,
-                                 chars.get());
-      }
-      return nullptr;
-    }
-
-    // Step 3.f.
-    TimeRecord timeResult;
-    if (!ToTemporalTimeRecord(cx, itemObj, &timeResult)) {
-      return nullptr;
-    }
-
-    // Step 3.g.
-    if (!RegulateTime(cx, timeResult, overflow, &result)) {
-      return nullptr;
+    if (!RegulateTime(cx, timeResult, overflow, result)) {
+      return false;
     }
   } else {
     // Step 4.
 
     // Step 4.a.
-    Rooted<JSString*> string(cx, JS::ToString(cx, item));
-    if (!string) {
-      return nullptr;
+    if (!item.isString()) {
+      ReportValueError(cx, JSMSG_UNEXPECTED_TYPE, JSDVG_IGNORE_STACK, item,
+                       nullptr, "not a string");
+      return false;
     }
+    Rooted<JSString*> string(cx, item.toString());
 
     // Step 4.b.
-    Rooted<JSString*> calendar(cx);
-    if (!ParseTemporalTimeString(cx, string, &result, &calendar)) {
-      return nullptr;
+    if (!ParseTemporalTimeString(cx, string, result)) {
+      return false;
     }
 
     // Step 4.c.
-    MOZ_ASSERT(IsValidTime(result));
-
-    // Step 4.d.
-    if (calendar) {
-      JSLinearString* linear = calendar->ensureLinear(cx);
-      if (!linear) {
-        return nullptr;
-      }
-
-      if (!StringEqualsAscii(linear, "iso8601")) {
-        if (auto chars = QuoteString(cx, linear)) {
-          JS_ReportErrorNumberUTF8(
-              cx, GetErrorMessage, nullptr,
-              JSMSG_TEMPORAL_PLAIN_TIME_CALENDAR_NOT_ISO8601, chars.get());
-        }
-        return nullptr;
-      }
-    }
+    MOZ_ASSERT(IsValidTime(*result));
   }
 
   // Step 5.
-  return CreateTemporalTime(cx, result);
+  return true;
+}
+
+/**
+ * ToTemporalTime ( item [ , overflow ] )
+ */
+static PlainTimeObject* ToTemporalTime(JSContext* cx, Handle<Value> item,
+                                       TemporalOverflow overflow) {
+  PlainTime time;
+  if (!ToTemporalTime(cx, item, overflow, &time)) {
+    return nullptr;
+  }
+  MOZ_ASSERT(IsValidTime(time));
+
+  return CreateTemporalTime(cx, time);
 }
 
 /**
@@ -725,52 +682,12 @@ static Wrapped<PlainTimeObject*> ToTemporalTime(JSContext* cx,
  */
 bool js::temporal::ToTemporalTime(JSContext* cx, Handle<Value> item,
                                   PlainTime* result) {
-  auto obj = ::ToTemporalTime(cx, item, TemporalOverflow::Constrain);
-  if (!obj) {
-    return false;
-  }
-
-  *result = ToPlainTime(&obj.unwrap());
-  return true;
+  return ToTemporalTime(cx, item, TemporalOverflow::Constrain, result);
 }
 
 /**
- * TemporalTimeToString ( hour, minute, second, millisecond, microsecond,
- * nanosecond, precision )
- */
-static JSString* TemporalTimeToString(JSContext* cx, const PlainTime& time,
-                                      Precision precision) {
-  JSStringBuilder result(cx);
-
-  // Note: This doesn't reserve too much space, because the string builder
-  // already internally reserves space for 64 characters.
-  constexpr size_t timePart = 2 + 1 + 2 + 1 + 2 + 1 + 9;  // 18
-
-  if (!result.reserve(timePart)) {
-    return nullptr;
-  }
-
-  // Step 1.
-  int32_t hour = time.hour;
-  result.infallibleAppend(char('0' + (hour / 10)));
-  result.infallibleAppend(char('0' + (hour % 10)));
-
-  // Step 2.
-  int32_t minute = time.minute;
-  result.infallibleAppend(':');
-  result.infallibleAppend(char('0' + (minute / 10)));
-  result.infallibleAppend(char('0' + (minute % 10)));
-
-  // Step 3.
-  FormatSecondsStringPart(result, time, precision);
-
-  // Step 4.
-  return result.finishString();
-}
-
-/**
- * TotalDurationNanoseconds ( days, hours, minutes, seconds, milliseconds,
- * microseconds, nanoseconds, offsetShift )
+ * TotalDurationNanoseconds ( hours, minutes, seconds, milliseconds,
+ * microseconds, nanoseconds )
  */
 static int64_t TotalDurationNanoseconds(const Duration& duration) {
   // This function is only called from BalanceTime. The difference between two
@@ -783,31 +700,25 @@ static int64_t TotalDurationNanoseconds(const Duration& duration) {
   MOZ_ASSERT(std::abs(duration.microseconds) <= 1000);
   MOZ_ASSERT(std::abs(duration.nanoseconds) <= 1000);
 
+  // Step 1.
+  auto minutes = int64_t(duration.minutes) + int64_t(duration.hours) * 60;
+
   // Step 2.
-  MOZ_ASSERT(duration.days == 0);
-
-  // Step 3.
-  auto hours = int64_t(duration.hours);
-
-  // Step 4.
-  auto minutes = int64_t(duration.minutes) + hours * 60;
-
-  // Step 5.
   auto seconds = int64_t(duration.seconds) + minutes * 60;
 
-  // Step 6.
+  // Step 3.
   auto milliseconds = int64_t(duration.milliseconds) + seconds * 1000;
 
-  // Step 7.
+  // Step 4.
   auto microseconds = int64_t(duration.microseconds) + milliseconds * 1000;
 
-  // Steps 1 and 8.
+  // Steps 5.
   return int64_t(duration.nanoseconds) + microseconds * 1000;
 }
 
 /**
- * BalanceDuration ( days, hours, minutes, seconds, milliseconds, microseconds,
- * nanoseconds, largestUnit [ , relativeTo ] )
+ * BalanceTimeDuration ( days, hours, minutes, seconds, milliseconds,
+ * microseconds, nanoseconds, largestUnit [ , relativeTo ] )
  */
 static Duration BalanceTimeDuration(const Duration& duration,
                                     TemporalUnit largestUnit) {
@@ -1099,7 +1010,7 @@ static bool ToTemporalTimeRecord(JSContext* cx,
 }
 
 /**
- * ToTemporalTimeRecord ( temporalTimeLike )
+ * ToTemporalTimeRecord ( temporalTimeLike [ , completeness ] )
  */
 bool js::temporal::ToTemporalTimeRecord(JSContext* cx,
                                         Handle<JSObject*> temporalTimeLike,
@@ -1195,15 +1106,10 @@ RoundedTime js::temporal::RoundTime(const PlainTime& time, Increment increment,
   int32_t days = 0;
   auto [hour, minute, second, millisecond, microsecond, nanosecond] = time;
 
-  // Step 1. (Not applicable in our implementation.)
-
-  // Step 2.
-  MOZ_ASSERT(IsValidTime(time));
-
   // Take the same approach as used in RoundDuration() to perform exact
   // mathematical operations without possible loss of precision.
 
-  // Steps 3-10.
+  // Steps 1-8.
   PlainTime quantity;
   int32_t* result;
   switch (unit) {
@@ -1258,19 +1164,19 @@ RoundedTime js::temporal::RoundTime(const PlainTime& time, Increment increment,
       MOZ_CRASH("unexpected temporal unit");
   }
 
-  // Step 11.
+  // Step 9.
   int64_t r = ::RoundNumberToIncrement(TimeToNanos(quantity), unit, increment,
                                        roundingMode);
   MOZ_ASSERT(r == int64_t(int32_t(r)),
              "no overflow possible due to limited range of arguments");
   *result = r;
 
-  // Step 12.
+  // Step 10.
   if (unit == TemporalUnit::Day) {
     return {int64_t(days), {0, 0, 0, 0, 0, 0}};
   }
 
-  // Steps 13-19.
+  // Steps 11-17.
   auto balanced =
       ::BalanceTime(hour, minute, second, millisecond, microsecond, nanosecond);
   return {int64_t(balanced.days), balanced.time};
@@ -1292,20 +1198,15 @@ RoundedTime js::temporal::RoundTime(const PlainTime& time, Increment increment,
     return RoundTime(time, increment, unit, roundingMode);
   }
 
-  // Step 1. (Not applicable in our implementation.)
+  // Step 1. (Not applicable)
 
   // Step 2.
-  MOZ_ASSERT(IsValidTime(time));
-
-  // Step 3. (Not applicable)
-
-  // Step 4.
   int64_t quantity = TimeToNanos(time);
   MOZ_ASSERT(quantity < ToNanoseconds(TemporalUnit::Day));
 
-  // Steps 5-10. (Not applicable)
+  // Steps 3-8. (Not applicable)
 
-  // Step 11.
+  // Step 9.
   int64_t divisor;
   if (auto checkedDiv = dayLengthNs.toNanoseconds(); checkedDiv.isValid()) {
     divisor = checkedDiv.value();
@@ -1321,7 +1222,7 @@ RoundedTime js::temporal::RoundTime(const PlainTime& time, Increment increment,
   int64_t result =
       ::RoundNumberToIncrement(quantity, divisor, increment, roundingMode);
 
-  // Step 12.
+  // Step 10.
   return {result, {0, 0, 0, 0, 0, 0}};
 }
 
@@ -1330,11 +1231,8 @@ RoundedTime js::temporal::RoundTime(const PlainTime& time, Increment increment,
  * minutes, seconds, milliseconds, microseconds, nanoseconds )
  */
 static PlainTime AddTime(const PlainTime& time, const Duration& duration) {
-  // Step 1.
-  MOZ_ASSERT(IsValidDuration(duration));
-
-  // Step 2.
   MOZ_ASSERT(IsValidTime(time));
+  MOZ_ASSERT(IsValidDuration(duration));
 
   // Balance the duration so we don't have to worry about imprecise Number
   // computations below.
@@ -1406,25 +1304,25 @@ static PlainTime AddTime(const PlainTime& time, const Duration& duration) {
   MOZ_ASSERT(std::abs(microseconds) <= 999);
   MOZ_ASSERT(std::abs(nanoseconds) <= 999);
 
-  // Step 3.
+  // Step 1.
   int32_t hour = time.hour + hours;
 
-  // Step 4.
+  // Step 2.
   int32_t minute = time.minute + minutes;
 
-  // Step 5.
+  // Step 3.
   int32_t second = time.second + seconds;
 
-  // Step 6.
+  // Step 4.
   int32_t millisecond = time.millisecond + milliseconds;
 
-  // Step 7.
+  // Step 5.
   int32_t microsecond = time.microsecond + int32_t(microseconds);
 
-  // Step 8.
+  // Step 6.
   int32_t nanosecond = time.nanosecond + int32_t(nanoseconds);
 
-  // Step 9.
+  // Step 7.
   auto balanced =
       ::BalanceTime(hour, minute, second, millisecond, microsecond, nanosecond);
   return balanced.time;
@@ -1452,11 +1350,8 @@ static BigInt* FloorDiv(JSContext* cx, Handle<BigInt*> dividend,
 
 static bool AddTimeDaysSlow(JSContext* cx, const PlainTime& time,
                             const Duration& duration, double* result) {
-  // Step 1.
-  MOZ_ASSERT(IsValidDuration(duration));
-
-  // Step 2.
   MOZ_ASSERT(IsValidTime(time));
+  MOZ_ASSERT(IsValidDuration(duration));
 
   Rooted<BigInt*> days(cx, BigInt::createFromDouble(cx, duration.days));
   if (!days) {
@@ -1504,43 +1399,43 @@ static bool AddTimeDaysSlow(JSContext* cx, const PlainTime& time,
     return BigInt::add(cx, left, rightBigInt);
   };
 
-  // Step 3.
+  // Step 1.
   Rooted<BigInt*> hour(cx, addWithInt32(hours, time.hour));
   if (!hour) {
     return false;
   }
 
-  // Step 4.
+  // Step 2.
   Rooted<BigInt*> minute(cx, addWithInt32(minutes, time.minute));
   if (!minute) {
     return false;
   }
 
-  // Step 5.
+  // Step 3.
   Rooted<BigInt*> second(cx, addWithInt32(seconds, time.second));
   if (!second) {
     return false;
   }
 
-  // Step 6.
+  // Step 4.
   Rooted<BigInt*> millisecond(cx, addWithInt32(milliseconds, time.millisecond));
   if (!millisecond) {
     return false;
   }
 
-  // Step 7.
+  // Step 5.
   Rooted<BigInt*> microsecond(cx, addWithInt32(microseconds, time.microsecond));
   if (!microsecond) {
     return false;
   }
 
-  // Step 8.
+  // Step 6.
   Rooted<BigInt*> nanosecond(cx, addWithInt32(nanoseconds, time.nanosecond));
   if (!nanosecond) {
     return false;
   }
 
-  // Step 9. (Inlined BalanceTime)
+  // Step 7. (Inlined BalanceTime)
 
   auto addFloorDiv = [cx](Handle<BigInt*> left, Handle<BigInt*> right,
                           int32_t divisor) -> BigInt* {
@@ -1551,55 +1446,58 @@ static bool AddTimeDaysSlow(JSContext* cx, const PlainTime& time,
     return BigInt::add(cx, left, quotient);
   };
 
-  // BalanceTime, step 1. (Not applicable)
-
-  // BalanceTime, steps 2-3.
+  // BalanceTime, steps 1-2.
   microsecond = addFloorDiv(microsecond, nanosecond, 1000);
   if (!microsecond) {
     return false;
   }
 
-  // BalanceTime, steps 4-5.
+  // BalanceTime, steps 3-4.
   millisecond = addFloorDiv(millisecond, microsecond, 1000);
   if (!millisecond) {
     return false;
   }
 
-  // BalanceTime, steps 6-7.
+  // BalanceTime, steps 5-6.
   second = addFloorDiv(second, millisecond, 1000);
   if (!second) {
     return false;
   }
 
-  // BalanceTime, steps 8-9.
+  // BalanceTime, steps 7-8.
   minute = addFloorDiv(minute, second, 60);
   if (!minute) {
     return false;
   }
 
-  // BalanceTime, steps 10-11.
+  // BalanceTime, steps 9-10.
   hour = addFloorDiv(hour, minute, 60);
   if (!hour) {
     return false;
   }
 
-  // BalanceTime, steps 12-14.
+  // BalanceTime, steps 11-13.
   days = addFloorDiv(days, hour, 24);
   if (!days) {
     return false;
   }
 
-  *result = BigInt::numberValue(days);
+  // The days number is used as the input for a duration. Throw if the BigInt
+  // when converted to a Number can't be represented in a duration.
+  double daysNumber = BigInt::numberValue(days);
+  if (!ThrowIfInvalidDuration(cx, {0, 0, 0, daysNumber})) {
+    return false;
+  }
+  MOZ_ASSERT(IsInteger(daysNumber));
+
+  *result = daysNumber;
   return true;
 }
 
 static mozilla::Maybe<int64_t> AddTimeDays(const PlainTime& time,
                                            const Duration& duration) {
-  // Step 1.
-  MOZ_ASSERT(IsValidDuration(duration));
-
-  // Step 2.
   MOZ_ASSERT(IsValidTime(time));
+  MOZ_ASSERT(IsValidDuration(duration));
 
   int64_t days;
   if (!mozilla::NumberEqualsInt64(duration.days, &days)) {
@@ -1636,77 +1534,75 @@ static mozilla::Maybe<int64_t> AddTimeDays(const PlainTime& time,
     return mozilla::Nothing();
   }
 
-  // Step 3.
+  // Step 1.
   auto hour = mozilla::CheckedInt64(time.hour) + hours;
   if (!hour.isValid()) {
     return mozilla::Nothing();
   }
 
-  // Step 4.
+  // Step 2.
   auto minute = mozilla::CheckedInt64(time.minute) + minutes;
   if (!minute.isValid()) {
     return mozilla::Nothing();
   }
 
-  // Step 5.
+  // Step 3.
   auto second = mozilla::CheckedInt64(time.second) + seconds;
   if (!second.isValid()) {
     return mozilla::Nothing();
   }
 
-  // Step 6.
+  // Step 4.
   auto millisecond = mozilla::CheckedInt64(time.millisecond) + milliseconds;
   if (!millisecond.isValid()) {
     return mozilla::Nothing();
   }
 
-  // Step 7.
+  // Step 5.
   auto microsecond = mozilla::CheckedInt64(time.microsecond) + microseconds;
   if (!microsecond.isValid()) {
     return mozilla::Nothing();
   }
 
-  // Step 8.
+  // Step 6.
   auto nanosecond = mozilla::CheckedInt64(time.nanosecond) + nanoseconds;
   if (!nanosecond.isValid()) {
     return mozilla::Nothing();
   }
 
-  // Step 9. (Inlined BalanceTime)
+  // Step 7. (Inlined BalanceTime)
 
-  // BalanceTime, step 1. (Not applicable)
-
-  // BalanceTime, steps 2-3.
+  // BalanceTime, steps 1-2.
   microsecond += FloorDiv(nanosecond.value(), 1000);
   if (!microsecond.isValid()) {
     return mozilla::Nothing();
   }
 
-  // BalanceTime, steps 4-5.
+  // BalanceTime, steps 3-4.
   millisecond += FloorDiv(microsecond.value(), 1000);
   if (!millisecond.isValid()) {
     return mozilla::Nothing();
   }
 
-  // BalanceTime, steps 6-7.
+  // BalanceTime, steps 5-6.
   second += FloorDiv(millisecond.value(), 1000);
   if (!second.isValid()) {
     return mozilla::Nothing();
   }
 
-  // BalanceTime, steps 8-9.
+  // BalanceTime, steps 7-8.
   minute += FloorDiv(second.value(), 60);
   if (!minute.isValid()) {
     return mozilla::Nothing();
   }
 
-  // BalanceTime, steps 10-11.
+  // BalanceTime, steps 9-10.
   hour += FloorDiv(minute.value(), 60);
   if (!hour.isValid()) {
     return mozilla::Nothing();
   }
 
-  // BalanceTime, steps 12-14.
+  // BalanceTime, steps 11-13.
   auto result = mozilla::CheckedInt64(days) + FloorDiv(hour.value(), 24);
   if (!result.isValid()) {
     return mozilla::Nothing();
@@ -1731,13 +1627,10 @@ static bool AddTimeDays(JSContext* cx, const PlainTime& time,
 bool js::temporal::AddTime(JSContext* cx, const PlainTime& time,
                            const Duration& duration, PlainTime* result,
                            double* daysResult) {
-  // Step 1.
+  MOZ_ASSERT(IsValidTime(time));
   MOZ_ASSERT(IsValidDuration(duration));
 
-  // Step 2.
-  MOZ_ASSERT(IsValidTime(time));
-
-  // Steps 3-9.
+  // Steps 1-7.
   auto balanced = ::AddTime(time, duration);
 
   // Compute |days| separately to ensure no loss of precision occurs.
@@ -1750,6 +1643,7 @@ bool js::temporal::AddTime(JSContext* cx, const PlainTime& time,
   if (!AddTimeDays(cx, time, duration, &days)) {
     return false;
   }
+  MOZ_ASSERT(IsInteger(days));
 
   *result = balanced;
   *daysResult = days;
@@ -1773,7 +1667,7 @@ static bool DifferenceTemporalPlainTime(JSContext* cx,
     return false;
   }
 
-  // Steps 3-5.
+  // Steps 3-4.
   DifferenceSettings settings;
   if (args.hasDefined(1)) {
     Rooted<JSObject*> options(
@@ -1784,24 +1678,19 @@ static bool DifferenceTemporalPlainTime(JSContext* cx,
 
     // Step 3.
     Rooted<PlainObject*> resolvedOptions(cx,
-                                         NewPlainObjectWithProto(cx, nullptr));
+                                         SnapshotOwnProperties(cx, options));
     if (!resolvedOptions) {
       return false;
     }
 
     // Step 4.
-    if (!CopyDataProperties(cx, resolvedOptions, options)) {
-      return false;
-    }
-
-    // Step 5.
     if (!GetDifferenceSettings(
             cx, operation, resolvedOptions, TemporalUnitGroup::Time,
             TemporalUnit::Nanosecond, TemporalUnit::Hour, &settings)) {
       return false;
     }
   } else {
-    // Steps 3-5.
+    // Steps 3-4.
     settings = {
         TemporalUnit::Nanosecond,
         TemporalUnit::Hour,
@@ -1810,22 +1699,27 @@ static bool DifferenceTemporalPlainTime(JSContext* cx,
     };
   }
 
-  // Step 6.
+  // Step 5.
   auto diff = DifferenceTime(temporalTime, other);
+  MOZ_ASSERT(diff.days == 0);
 
-  // Step 7.
-  Duration roundedDuration;
-  if (!RoundDuration(cx, diff.toDuration().time(), settings.roundingIncrement,
-                     settings.smallestUnit, settings.roundingMode,
-                     &roundedDuration)) {
-    return false;
+  // Step 6.
+  auto roundedDuration = diff.toDuration();
+  if (settings.smallestUnit != TemporalUnit::Nanosecond ||
+      settings.roundingIncrement != Increment{1}) {
+    // Steps 6.a-b.
+    if (!RoundDuration(cx, roundedDuration.time(), settings.roundingIncrement,
+                       settings.smallestUnit, settings.roundingMode,
+                       &roundedDuration)) {
+      return false;
+    }
   }
 
-  // Step 8.
+  // Step 7.
   auto balancedDuration =
       BalanceTimeDuration(roundedDuration, settings.largestUnit);
 
-  // Step 9.
+  // Step 8.
   if (operation == TemporalDifference::Since) {
     balancedDuration = balancedDuration.negate();
   }
@@ -1875,17 +1769,6 @@ static bool AddDurationToOrSubtractDurationFromPlainTime(
 
   args.rval().setObject(*obj);
   return true;
-}
-
-JSObject* js::temporal::PlainTimeObject::createCalendar(
-    JSContext* cx, Handle<PlainTimeObject*> obj) {
-  auto* calendar = GetISO8601Calendar(cx);
-  if (!calendar) {
-    return nullptr;
-  }
-
-  obj->setCalendar(calendar);
-  return calendar;
 }
 
 /**
@@ -1982,21 +1865,7 @@ static bool PlainTime_from(JSContext* cx, unsigned argc, Value* vp) {
     }
   }
 
-  // Step 4.
-  if (args.get(0).isObject()) {
-    JSObject* item = &args[0].toObject();
-    if (auto* time = item->maybeUnwrapIf<PlainTimeObject>()) {
-      auto* result = CreateTemporalTime(cx, ToPlainTime(time));
-      if (!result) {
-        return false;
-      }
-
-      args.rval().setObject(*result);
-      return true;
-    }
-  }
-
-  // Step 5.
+  // Steps 4-5.
   auto result = ToTemporalTime(cx, args.get(0), overflow);
   if (!result) {
     return false;
@@ -2027,32 +1896,6 @@ static bool PlainTime_compare(JSContext* cx, unsigned argc, Value* vp) {
   // Step 3.
   args.rval().setInt32(CompareTemporalTime(one, two));
   return true;
-}
-
-/**
- * get Temporal.PlainTime.prototype.calendar
- */
-static bool PlainTime_calendar(JSContext* cx, const CallArgs& args) {
-  Rooted<PlainTimeObject*> temporalTime(
-      cx, &args.thisv().toObject().as<PlainTimeObject>());
-
-  // Step 3.
-  auto* calendar = PlainTimeObject::getOrCreateCalendar(cx, temporalTime);
-  if (!calendar) {
-    return false;
-  }
-
-  args.rval().setObject(*calendar);
-  return true;
-}
-
-/**
- * get Temporal.PlainTime.prototype.calendar
- */
-static bool PlainTime_calendar(JSContext* cx, unsigned argc, Value* vp) {
-  // Steps 1-2.
-  CallArgs args = CallArgsFromVp(argc, vp);
-  return CallNonGenericMethod<IsPlainTime, PlainTime_calendar>(cx, args);
 }
 
 /**
@@ -2220,7 +2063,7 @@ static bool PlainTime_with(JSContext* cx, const CallArgs& args) {
   }
 
   // Step 4.
-  if (!RejectObjectWithCalendarOrTimeZone(cx, temporalTimeLike)) {
+  if (!RejectTemporalLikeObject(cx, temporalTimeLike)) {
     return false;
   }
 
@@ -2434,7 +2277,7 @@ static bool PlainTime_toPlainDateTime(JSContext* cx, const CallArgs& args) {
 
   // Step 3.
   PlainDate date;
-  Rooted<JSObject*> calendar(cx);
+  Rooted<CalendarValue> calendar(cx);
   if (!ToTemporalDate(cx, args.get(0), &date, &calendar)) {
     return false;
   }
@@ -2490,7 +2333,7 @@ static bool PlainTime_toZonedDateTime(JSContext* cx, const CallArgs& args) {
 
   // Step 6.
   PlainDate date;
-  Rooted<JSObject*> calendar(cx);
+  Rooted<CalendarValue> calendar(cx);
   if (!ToTemporalDate(cx, temporalDateLike, &date, &calendar)) {
     return false;
   }
@@ -2510,8 +2353,8 @@ static bool PlainTime_toZonedDateTime(JSContext* cx, const CallArgs& args) {
   }
 
   // Step 9.
-  Rooted<JSObject*> timeZone(cx, ToTemporalTimeZone(cx, temporalTimeZoneLike));
-  if (!timeZone) {
+  Rooted<TimeZoneValue> timeZone(cx);
+  if (!ToTemporalTimeZone(cx, temporalTimeZoneLike, &timeZone)) {
     return false;
   }
 
@@ -2556,57 +2399,46 @@ static bool PlainTime_getISOFields(JSContext* cx, const CallArgs& args) {
       cx, &args.thisv().toObject().as<PlainTimeObject>());
   auto time = ToPlainTime(temporalTime);
 
-  auto* calendar = PlainTimeObject::getOrCreateCalendar(cx, temporalTime);
-  if (!calendar) {
-    return false;
-  }
-
   // Step 3.
   Rooted<IdValueVector> fields(cx, IdValueVector(cx));
 
   // Step 4.
-  if (!fields.emplaceBack(NameToId(cx->names().calendar),
-                          ObjectValue(*calendar))) {
-    return false;
-  }
-
-  // Step 5.
   if (!fields.emplaceBack(NameToId(cx->names().isoHour),
                           Int32Value(time.hour))) {
     return false;
   }
 
-  // Step 6.
+  // Step 5.
   if (!fields.emplaceBack(NameToId(cx->names().isoMicrosecond),
                           Int32Value(time.microsecond))) {
     return false;
   }
 
-  // Step 7.
+  // Step 6.
   if (!fields.emplaceBack(NameToId(cx->names().isoMillisecond),
                           Int32Value(time.millisecond))) {
     return false;
   }
 
-  // Step 8.
+  // Step 7.
   if (!fields.emplaceBack(NameToId(cx->names().isoMinute),
                           Int32Value(time.minute))) {
     return false;
   }
 
-  // Step 9.
+  // Step 8.
   if (!fields.emplaceBack(NameToId(cx->names().isoNanosecond),
                           Int32Value(time.nanosecond))) {
     return false;
   }
 
-  // Step 10.
+  // Step 9.
   if (!fields.emplaceBack(NameToId(cx->names().isoSecond),
                           Int32Value(time.second))) {
     return false;
   }
 
-  // Step 11.
+  // Step 10.
   auto* obj =
       NewPlainObjectWithUniqueNames(cx, fields.begin(), fields.length());
   if (!obj) {
@@ -2794,7 +2626,6 @@ static const JSFunctionSpec PlainTime_prototype_methods[] = {
 };
 
 static const JSPropertySpec PlainTime_prototype_properties[] = {
-    JS_PSG("calendar", PlainTime_calendar, 0),
     JS_PSG("hour", PlainTime_hour, 0),
     JS_PSG("minute", PlainTime_minute, 0),
     JS_PSG("second", PlainTime_second, 0),

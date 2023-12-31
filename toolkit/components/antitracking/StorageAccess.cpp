@@ -32,7 +32,6 @@
 #include "AntiTrackingLog.h"
 #include "ContentBlockingAllowList.h"
 #include "mozIThirdPartyUtil.h"
-#include "RejectForeignAllowList.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -534,8 +533,7 @@ bool ShouldAllowAccessFor(nsPIDOMWindowInner* aWindow, nsIURI* aURI,
     }
   }
 
-  if ((behavior == nsICookieService::BEHAVIOR_REJECT_FOREIGN &&
-       !CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior)) ||
+  if (behavior == nsICookieService::BEHAVIOR_REJECT_FOREIGN ||
       behavior == nsICookieService::BEHAVIOR_LIMIT_FOREIGN) {
     // XXX For non-cookie forms of storage, we handle BEHAVIOR_LIMIT_FOREIGN by
     // simply rejecting the request to use the storage. In the future, if we
@@ -552,7 +550,6 @@ bool ShouldAllowAccessFor(nsPIDOMWindowInner* aWindow, nsIURI* aURI,
   }
 
   MOZ_ASSERT(
-      CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior) ||
       behavior == nsICookieService::BEHAVIOR_REJECT_TRACKER ||
       behavior ==
           nsICookieService::BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN);
@@ -590,13 +587,8 @@ bool ShouldAllowAccessFor(nsPIDOMWindowInner* aWindow, nsIURI* aURI,
       return true;
     }
   } else {
-    MOZ_ASSERT(CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior));
-    if (RejectForeignAllowList::Check(document)) {
-      LOG(("This window is exceptionlisted for reject foreign"));
-      return true;
-    }
-
-    blockedReason = nsIWebProgressListener::STATE_COOKIES_PARTITIONED_FOREIGN;
+    MOZ_ASSERT_UNREACHABLE(
+        "This should be an exhaustive list of cookie behaviors possible here.");
   }
 
   Document* doc = aWindow->GetExtantDoc();
@@ -607,16 +599,16 @@ bool ShouldAllowAccessFor(nsPIDOMWindowInner* aWindow, nsIURI* aURI,
     return false;
   }
 
-  // Document::HasStoragePermission first checks if storage access granted is
+  // Document::UsingStorageAccess first checks if storage access granted is
   // cached in the inner window, if no, it then checks the storage permission
   // flag in the channel's loadinfo
-  bool allowed = document->HasStorageAccessPermissionGranted();
+  bool allowed = document->UsingStorageAccess();
 
   if (!allowed) {
     *aRejectedReason = blockedReason;
   } else {
     if (MOZ_LOG_TEST(gAntiTrackingLog, mozilla::LogLevel::Debug) &&
-        aWindow->HasStorageAccessPermissionGranted()) {
+        aWindow->UsingStorageAccess()) {
       LOG(("Permission stored in the window. All good."));
     }
   }
@@ -725,8 +717,7 @@ bool ShouldAllowAccessFor(nsIChannel* aChannel, nsIURI* aURI,
     return true;
   }
 
-  if ((behavior == nsICookieService::BEHAVIOR_REJECT_FOREIGN &&
-       !CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior)) ||
+  if (behavior == nsICookieService::BEHAVIOR_REJECT_FOREIGN ||
       behavior == nsICookieService::BEHAVIOR_LIMIT_FOREIGN) {
     // XXX For non-cookie forms of storage, we handle BEHAVIOR_LIMIT_FOREIGN by
     // simply rejecting the request to use the storage. In the future, if we
@@ -744,7 +735,6 @@ bool ShouldAllowAccessFor(nsIChannel* aChannel, nsIURI* aURI,
   }
 
   MOZ_ASSERT(
-      CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior) ||
       behavior == nsICookieService::BEHAVIOR_REJECT_TRACKER ||
       behavior ==
           nsICookieService::BEHAVIOR_REJECT_TRACKER_AND_PARTITION_FOREIGN);
@@ -784,12 +774,8 @@ bool ShouldAllowAccessFor(nsIChannel* aChannel, nsIURI* aURI,
       return true;
     }
   } else {
-    MOZ_ASSERT(CookieJarSettings::IsRejectThirdPartyWithExceptions(behavior));
-    if (httpChannel && RejectForeignAllowList::Check(httpChannel)) {
-      LOG(("This channel is exceptionlisted"));
-      return true;
-    }
-    blockedReason = nsIWebProgressListener::STATE_COOKIES_BLOCKED_FOREIGN;
+    MOZ_ASSERT_UNREACHABLE(
+        "This should be an exhaustive list of cookie behaviors possible here.");
   }
 
   RefPtr<BrowsingContext> targetBC;
@@ -807,7 +793,7 @@ bool ShouldAllowAccessFor(nsIChannel* aChannel, nsIURI* aURI,
 
   // Let's see if we have to grant the access for this particular channel.
 
-  // HasStorageAccessPermissionGranted only applies to channels that load
+  // UsingStorageAccess only applies to channels that load
   // documents, for sub-resources loads, just returns the result from loadInfo.
   bool isDocument = false;
   aChannel->GetIsDocument(&isDocument);
@@ -815,7 +801,7 @@ bool ShouldAllowAccessFor(nsIChannel* aChannel, nsIURI* aURI,
   if (isDocument) {
     nsCOMPtr<nsPIDOMWindowInner> inner =
         AntiTrackingUtils::GetInnerWindow(targetBC);
-    if (inner && inner->HasStorageAccessPermissionGranted()) {
+    if (inner && inner->UsingStorageAccess()) {
       LOG(("Permission stored in the window. All good."));
       return true;
     }
@@ -897,17 +883,13 @@ bool ApproximateAllowAccessForWithoutChannel(
     return cookiePermission != nsICookiePermission::ACCESS_DENY;
   }
 
-  nsAutoCString origin;
-  nsresult rv = nsContentUtils::GetWebExposedOriginSerialization(aURI, origin);
-  if (NS_WARN_IF(NS_FAILED(rv))) {
-    LOG_SPEC(("Failed to compute the origin from %s", _spec), aURI);
-    return false;
-  }
-
   nsIPrincipal* parentPrincipal = parentDocument->NodePrincipal();
 
+  nsCOMPtr<nsIPrincipal> principal = BasePrincipal::CreateContentPrincipal(
+      aURI, parentPrincipal->OriginAttributesRef());
+
   nsAutoCString type;
-  AntiTrackingUtils::CreateStoragePermissionKey(origin, type);
+  AntiTrackingUtils::CreateStoragePermissionKey(principal, type);
 
   return AntiTrackingUtils::CheckStoragePermission(
       parentPrincipal, type,

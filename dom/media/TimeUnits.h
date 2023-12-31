@@ -173,6 +173,13 @@ class TimeUnit final {
     }
   };
 
+  struct CeilingPolicy {
+    template <typename T>
+    static T policy(T& aValue) {
+      return std::ceil(aValue);
+    }
+  };
+
   template <class RoundingPolicy = TruncatePolicy>
   TimeUnit ToBase(int64_t aTargetBase) const {
     double dummy = 0.0;
@@ -267,6 +274,18 @@ class TimeIntervals : public IntervalSet<TimeUnit> {
   }
   bool IsInvalid() const {
     return Length() == 1 && Start(0).IsNegInf() && End(0).IsNegInf();
+  }
+
+  // Returns the same interval, with a given base resolution.
+  TimeIntervals ToBase(const TimeUnit& aBase) const {
+    TimeIntervals output;
+    for (const auto& interval : mIntervals) {
+      TimeInterval convertedInterval{interval.mStart.ToBase(aBase),
+                                     interval.mEnd.ToBase(aBase),
+                                     interval.mFuzz.ToBase(aBase)};
+      output += convertedInterval;
+    }
+    return output;
   }
 
   // Returns the same interval, with a microsecond resolution. This is used to

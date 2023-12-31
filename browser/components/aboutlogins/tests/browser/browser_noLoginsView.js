@@ -108,9 +108,9 @@ add_task(async function test_no_logins_class() {
     // End the test now for Linux since the link is hidden.
     return;
   }
-  let wizard = await wizardPromise;
-  Assert.ok(wizard, "Migrator window opened");
-  await BrowserTestUtils.closeMigrationWizard(wizard);
+  let wizardTab = await wizardPromise;
+  Assert.ok(wizardTab, "Migrator wizard tab opened");
+  await BrowserTestUtils.removeTab(wizardTab);
 });
 
 add_task(
@@ -171,7 +171,7 @@ add_task(
         );
         Assert.equal(
           loginList.shadowRoot.querySelector(
-            ".login-list-item.selected[data-guid]"
+            "login-list-item.selected[data-guid]"
           ).dataset.guid,
           testLogin1Guid,
           "the login that was just added should be selected"

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 import {assert} from '../util/assert.js';
+import {Deferred} from '../util/Deferred.js';
 import {isErrorLike} from '../util/ErrorLike.js';
 
 import {CDPSession} from './Connection.js';
@@ -53,6 +54,13 @@ export class Tracing {
    * @internal
    */
   constructor(client: CDPSession) {
+    this.#client = client;
+  }
+
+  /**
+   * @internal
+   */
+  updateClient(client: CDPSession): void {
     this.#client = client;
   }
 
@@ -115,12 +123,7 @@ export class Tracing {
    * @returns Promise which resolves to buffer with trace data.
    */
   async stop(): Promise<Buffer | undefined> {
-    let resolve: (value: Buffer | undefined) => void;
-    let reject: (err: Error) => void;
-    const contentPromise = new Promise<Buffer | undefined>((x, y) => {
-      resolve = x;
-      reject = y;
-    });
+    const contentDeferred = Deferred.create<Buffer | undefined>();
     this.#client.once('Tracing.tracingComplete', async event => {
       try {
         const readable = await getReadableFromProtocolStream(
@@ -128,17 +131,17 @@ export class Tracing {
           event.stream
         );
         const buffer = await getReadableAsBuffer(readable, this.#path);
-        resolve(buffer ?? undefined);
+        contentDeferred.resolve(buffer ?? undefined);
       } catch (error) {
         if (isErrorLike(error)) {
-          reject(error);
+          contentDeferred.reject(error);
         } else {
-          reject(new Error(`Unknown error: ${error}`));
+          contentDeferred.reject(new Error(`Unknown error: ${error}`));
         }
       }
     });
     await this.#client.send('Tracing.end');
     this.#recording = false;
-    return contentPromise;
+    return await contentDeferred.valueOrThrow();
   }
 }

@@ -13,6 +13,7 @@
 #include "nsContentUtils.h"
 
 #include "mozilla/intl/BidiEmbeddingLevel.h"
+#include "mozilla/GeckoBindings.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/PresShellInlines.h"
 #include "mozilla/SVGImageContext.h"
@@ -22,6 +23,7 @@
 #include "mozilla/dom/FontFaceSet.h"
 #include "mozilla/dom/HTMLCanvasElement.h"
 #include "mozilla/dom/GeneratePlaceholderCanvasData.h"
+#include "mozilla/dom/VideoFrame.h"
 #include "nsPresContext.h"
 
 #include "nsIInterfaceRequestorUtils.h"
@@ -115,7 +117,7 @@
 #include "mozilla/dom/SVGImageElement.h"
 #include "mozilla/dom/TextMetrics.h"
 #include "mozilla/FloatingPoint.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
 #include "nsDeviceContext.h"
 #include "nsFontMetrics.h"
 #include "nsLayoutUtils.h"
@@ -128,6 +130,7 @@
 #include "mozilla/layers/WebRenderUserData.h"
 #include "mozilla/layers/WebRenderCanvasRenderer.h"
 #include "WindowRenderer.h"
+#include "GeckoBindings.h"
 
 #undef free  // apparently defined by some windows header, clashing with a
              // free() method in SkTypes.h
@@ -995,6 +998,8 @@ CanvasRenderingContext2D::ContextState::ContextState(const ContextState& aOther)
       textBaseline(aOther.textBaseline),
       textDirection(aOther.textDirection),
       fontKerning(aOther.fontKerning),
+      fontStretch(aOther.fontStretch),
+      fontVariantCaps(aOther.fontVariantCaps),
       textRendering(aOther.textRendering),
       letterSpacing(aOther.letterSpacing),
       wordSpacing(aOther.wordSpacing),
@@ -1131,6 +1136,17 @@ void CanvasRenderingContext2D::Initialize() { AddShutdownObserver(); }
 JSObject* CanvasRenderingContext2D::WrapObject(
     JSContext* aCx, JS::Handle<JSObject*> aGivenProto) {
   return CanvasRenderingContext2D_Binding::Wrap(aCx, this, aGivenProto);
+}
+
+void CanvasRenderingContext2D::GetContextAttributes(
+    CanvasRenderingContext2DSettings& aSettings) const {
+  aSettings = CanvasRenderingContext2DSettings();
+
+  aSettings.mAlpha = mContextAttributesHasAlpha;
+  aSettings.mWillReadFrequently = mWillReadFrequently;
+
+  // We don't support the 'desynchronized' and 'colorSpace' attributes, so
+  // those just keep their default values.
 }
 
 CanvasRenderingContext2D::ColorStyleCacheEntry
@@ -1410,7 +1426,7 @@ bool CanvasRenderingContext2D::BorrowTarget(const IntRect& aPersistedRect,
   // acceleration, then we skip trying to use this provider so that it will be
   // recreated by EnsureTarget later.
   if (!mBufferProvider || mBufferProvider->RequiresRefresh() ||
-      (mBufferProvider->IsAccelerated() && mWillReadFrequently)) {
+      (mBufferProvider->IsAccelerated() && GetEffectiveWillReadFrequently())) {
     return false;
   }
   mTarget = mBufferProvider->BorrowDrawTarget(aPersistedRect);
@@ -1632,7 +1648,7 @@ bool CanvasRenderingContext2D::TryAcceleratedTarget(
   }
   // Don't try creating an accelerate DrawTarget if either acceleration failed
   // previously or if the application expects acceleration to be slow.
-  if (!mAllowAcceleration || mWillReadFrequently) {
+  if (!mAllowAcceleration || GetEffectiveWillReadFrequently()) {
     return false;
   }
   aOutDT = DrawTargetWebgl::Create(GetSize(), GetSurfaceFormat());
@@ -1668,8 +1684,9 @@ bool CanvasRenderingContext2D::TrySharedTarget(
     return false;
   }
 
-  aOutProvider =
-      renderer->CreatePersistentBufferProvider(GetSize(), GetSurfaceFormat());
+  aOutProvider = renderer->CreatePersistentBufferProvider(
+      GetSize(), GetSurfaceFormat(),
+      !mAllowAcceleration || GetEffectiveWillReadFrequently());
 
   if (!aOutProvider) {
     return false;
@@ -1878,7 +1895,7 @@ CanvasRenderingContext2D::SetContextOptions(JSContext* aCx,
   // drawtarget yet
   MOZ_ASSERT(!mTarget);
 
-  ContextAttributes2D attributes;
+  CanvasRenderingContext2DSettings attributes;
   if (!attributes.Init(aCx, aOptions)) {
     aRvForDictionaryInit.Throw(NS_ERROR_UNEXPECTED);
     return NS_ERROR_UNEXPECTED;
@@ -1917,8 +1934,8 @@ UniquePtr<uint8_t[]> CanvasRenderingContext2D::GetImageBuffer(
 
   if (ret && ShouldResistFingerprinting(RFPTarget::CanvasRandomization)) {
     nsRFPService::RandomizePixels(
-        GetCookieJarSettings(), ret.get(),
-        out_imageSize->width * out_imageSize->height * 4,
+        GetCookieJarSettings(), ret.get(), out_imageSize->width,
+        out_imageSize->height, out_imageSize->width * out_imageSize->height * 4,
         SurfaceFormat::A8R8G8B8_UINT32);
   }
 
@@ -2284,6 +2301,7 @@ already_AddRefed<CanvasPattern> CanvasRenderingContext2D::CreatePattern(
 
   Element* element = nullptr;
   OffscreenCanvas* offscreenCanvas = nullptr;
+  VideoFrame* videoFrame = nullptr;
 
   if (aSource.IsHTMLCanvasElement()) {
     HTMLCanvasElement* canvas = &aSource.GetAsHTMLCanvasElement();
@@ -2359,6 +2377,18 @@ already_AddRefed<CanvasPattern> CanvasRenderingContext2D::CreatePattern(
 
       return pat.forget();
     }
+  } else if (aSource.IsVideoFrame()) {
+    videoFrame = &aSource.GetAsVideoFrame();
+
+    if (videoFrame->CodedWidth() == 0) {
+      aError.ThrowInvalidStateError("Passed-in canvas has width 0");
+      return nullptr;
+    }
+
+    if (videoFrame->CodedHeight() == 0) {
+      aError.ThrowInvalidStateError("Passed-in canvas has height 0");
+      return nullptr;
+    }
   } else {
     // Special case for ImageBitmap
     ImageBitmap& imgBitmap = aSource.GetAsImageBitmap();
@@ -2393,11 +2423,15 @@ already_AddRefed<CanvasPattern> CanvasRenderingContext2D::CreatePattern(
   // of animated images
   auto flags = nsLayoutUtils::SFE_WANT_FIRST_FRAME_IF_IMAGE |
                nsLayoutUtils::SFE_EXACT_SIZE_SURFACE;
-  SurfaceFromElementResult res =
-      offscreenCanvas
-          ? nsLayoutUtils::SurfaceFromOffscreenCanvas(offscreenCanvas, flags,
-                                                      mTarget)
-          : nsLayoutUtils::SurfaceFromElement(element, flags, mTarget);
+  SurfaceFromElementResult res;
+  if (offscreenCanvas) {
+    res = nsLayoutUtils::SurfaceFromOffscreenCanvas(offscreenCanvas, flags,
+                                                    mTarget);
+  } else if (videoFrame) {
+    res = nsLayoutUtils::SurfaceFromVideoFrame(videoFrame, flags, mTarget);
+  } else {
+    res = nsLayoutUtils::SurfaceFromElement(element, flags, mTarget);
+  }
 
   // Per spec, we should throw here for the HTMLImageElement and SVGImageElement
   // cases if the image request state is "broken".  In terms of the infromation
@@ -2452,7 +2486,8 @@ static already_AddRefed<StyleLockedDeclarationBlock> CreateDeclarationForServo(
                                          aDocument->GetCompatibilityMode(),
                                          aDocument->CSSLoader()};
   RefPtr<StyleLockedDeclarationBlock> servoDeclarations =
-      ServoCSSParser::ParseProperty(aProperty, aPropertyValue, env);
+      ServoCSSParser::ParseProperty(aProperty, aPropertyValue, env,
+                                    StyleParsingMode::DEFAULT);
 
   if (!servoDeclarations) {
     // We got a syntax error.  The spec says this value must be ignored.
@@ -2465,8 +2500,8 @@ static already_AddRefed<StyleLockedDeclarationBlock> CreateDeclarationForServo(
     const nsCString normalString = "normal"_ns;
     Servo_DeclarationBlock_SetPropertyById(
         servoDeclarations, eCSSProperty_line_height, &normalString, false,
-        env.mUrlExtraData, ParsingMode::Default, env.mCompatMode, env.mLoader,
-        env.mRuleType, {});
+        env.mUrlExtraData, StyleParsingMode::DEFAULT, env.mCompatMode,
+        env.mLoader, env.mRuleType, {});
   }
 
   return servoDeclarations.forget();
@@ -2535,7 +2570,7 @@ static already_AddRefed<const ComputedStyle> GetFontStyleForServo(
     sc->GetComputedPropertyValue(eCSSProperty_font_size, computedFontSize);
     Servo_DeclarationBlock_SetPropertyById(
         declarations, eCSSProperty_font_size, &computedFontSize, false, nullptr,
-        ParsingMode::Default, eCompatibility_FullStandards, nullptr,
+        StyleParsingMode::DEFAULT, eCompatibility_FullStandards, nullptr,
         StyleCssRuleType::Style, {});
   }
 
@@ -2637,7 +2672,7 @@ void CanvasRenderingContext2D::SetFilter(const nsACString& aFilter,
           SVGObserverUtils::ObserveFiltersForCanvasContext(
               this, mCanvasElement, CurrentState().filterChain.AsSpan());
     }
-    UpdateFilter();
+    UpdateFilter(/* aFlushIfNeeded = */ true);
   }
 }
 
@@ -2706,6 +2741,32 @@ void CanvasRenderingContext2D::SetWordSpacing(const nsACString& aWordSpacing) {
                CurrentState().wordSpacingStr);
 }
 
+static GeckoFontMetrics GetFontMetricsFromCanvas(void* aContext) {
+  auto* ctx = static_cast<CanvasRenderingContext2D*>(aContext);
+  auto* fontGroup = ctx->GetCurrentFontStyle();
+  if (!fontGroup) {
+    // Shouldn't happen, but just in case... return plausible values for a
+    // 10px font (canvas default size).
+    return {Length::FromPixels(5.0),
+            Length::FromPixels(5.0),
+            Length::FromPixels(8.0),
+            Length::FromPixels(10.0),
+            Length::FromPixels(8.0),
+            Length::FromPixels(10.0),
+            0.0f,
+            0.0f};
+  }
+  auto metrics = fontGroup->GetMetricsForCSSUnits(nsFontMetrics::eHorizontal);
+  return {Length::FromPixels(metrics.xHeight),
+          Length::FromPixels(metrics.zeroWidth),
+          Length::FromPixels(metrics.capHeight),
+          Length::FromPixels(metrics.ideographicWidth),
+          Length::FromPixels(metrics.maxAscent),
+          Length::FromPixels(fontGroup->GetStyle()->size),
+          0.0f,
+          0.0f};
+}
+
 void CanvasRenderingContext2D::ParseSpacing(const nsACString& aSpacing,
                                             float* aValue,
                                             nsACString& aNormalized) {
@@ -2719,7 +2780,8 @@ void CanvasRenderingContext2D::ParseSpacing(const nsACString& aSpacing,
     return;
   }
   float value;
-  if (!Servo_ParseAbsoluteLength(&normalized, &value)) {
+  if (!Servo_ParseLengthWithoutStyleContext(&normalized, &value,
+                                            GetFontMetricsFromCanvas, this)) {
     if (!GetPresShell()) {
       return;
     }
@@ -2737,37 +2799,67 @@ void CanvasRenderingContext2D::ParseSpacing(const nsACString& aSpacing,
 class CanvasUserSpaceMetrics : public UserSpaceMetricsWithSize {
  public:
   CanvasUserSpaceMetrics(const gfx::IntSize& aSize, const nsFont& aFont,
-                         nsAtom* aFontLanguage, bool aExplicitLanguage,
+                         const ComputedStyle* aCanvasStyle,
                          nsPresContext* aPresContext)
       : mSize(aSize),
         mFont(aFont),
-        mFontLanguage(aFontLanguage),
-        mExplicitLanguage(aExplicitLanguage),
+        mCanvasStyle(aCanvasStyle),
         mPresContext(aPresContext) {}
 
-  virtual float GetEmLength() const override {
-    return mFont.size.ToCSSPixels();
+  float GetEmLength(Type aType) const override {
+    switch (aType) {
+      case Type::This:
+        return mFont.size.ToCSSPixels();
+      case Type::Root:
+        return SVGContentUtils::GetFontSize(
+            mPresContext->Document()->GetRootElement());
+      default:
+        MOZ_ASSERT_UNREACHABLE("Was a new value added to the enumeration?");
+        return 1.0f;
+    }
   }
+  gfx::Size GetSize() const override { return Size(mSize); }
 
-  virtual float GetExLength() const override {
-    nsFontMetrics::Params params;
-    params.language = mFontLanguage;
-    params.explicitLanguage = mExplicitLanguage;
-    params.textPerf = mPresContext->GetTextPerfMetrics();
-    params.featureValueLookup = mPresContext->GetFontFeatureValuesLookup();
-    RefPtr<nsFontMetrics> fontMetrics =
-        mPresContext->GetMetricsFor(mFont, params);
-    return NSAppUnitsToFloatPixels(fontMetrics->XHeight(),
-                                   AppUnitsPerCSSPixel());
+  CSSSize GetCSSViewportSize() const override {
+    return GetCSSViewportSizeFromContext(mPresContext);
   }
-
-  virtual gfx::Size GetSize() const override { return Size(mSize); }
 
  private:
+  GeckoFontMetrics GetFontMetricsForType(Type aType) const override {
+    switch (aType) {
+      case Type::This: {
+        if (!mCanvasStyle) {
+          return DefaultFontMetrics();
+        }
+        return Gecko_GetFontMetrics(
+            mPresContext, WritingMode(mCanvasStyle).IsVertical(),
+            mCanvasStyle->StyleFont(), mCanvasStyle->StyleFont()->mFont.size,
+            /* aUseUserFontSet = */ true,
+            /* aRetrieveMathScales */ false);
+      }
+      case Type::Root:
+        return GetFontMetrics(mPresContext->Document()->GetRootElement());
+      default:
+        MOZ_ASSERT_UNREACHABLE("Was a new value added to the enumeration?");
+        return DefaultFontMetrics();
+    }
+  }
+
+  WritingMode GetWritingModeForType(Type aType) const override {
+    switch (aType) {
+      case Type::This:
+        return mCanvasStyle ? WritingMode(mCanvasStyle) : WritingMode();
+      case Type::Root:
+        return GetWritingMode(mPresContext->Document()->GetRootElement());
+      default:
+        MOZ_ASSERT_UNREACHABLE("Was a new value added to the enumeration?");
+        return WritingMode();
+    }
+  }
+
   gfx::IntSize mSize;
   const nsFont& mFont;
-  nsAtom* mFontLanguage;
-  bool mExplicitLanguage;
+  RefPtr<const ComputedStyle> mCanvasStyle;
   nsPresContext* mPresContext;
 };
 
@@ -2783,7 +2875,7 @@ static bool FiltersNeedFrameFlush(Span<const StyleFilter> aFilters) {
   return false;
 }
 
-void CanvasRenderingContext2D::UpdateFilter() {
+void CanvasRenderingContext2D::UpdateFilter(bool aFlushIfNeeded) {
   const bool writeOnly = IsWriteOnly() ||
                          (mCanvasElement && mCanvasElement->IsWriteOnly()) ||
                          (mOffscreenCanvas && mOffscreenCanvas->IsWriteOnly());
@@ -2801,7 +2893,8 @@ void CanvasRenderingContext2D::UpdateFilter() {
   // be used on worker threads.
   nsPresContext* presContext = nullptr;
   if (presShell) {
-    if (FiltersNeedFrameFlush(CurrentState().filterChain.AsSpan())) {
+    if (aFlushIfNeeded &&
+        FiltersNeedFrameFlush(CurrentState().filterChain.AsSpan())) {
       presShell->FlushPendingNotifications(FlushType::Frames);
     }
 
@@ -2811,14 +2904,18 @@ void CanvasRenderingContext2D::UpdateFilter() {
 
     presContext = presShell->GetPresContext();
   }
+  RefPtr<const ComputedStyle> canvasStyle;
+  if (mCanvasElement) {
+    canvasStyle = nsComputedDOMStyle::GetComputedStyleNoFlush(mCanvasElement);
+  }
 
   MOZ_RELEASE_ASSERT(!mStyleStack.IsEmpty());
 
   CurrentState().filter = FilterInstance::GetFilterDescription(
-      mCanvasElement, CurrentState().filterChain.AsSpan(), writeOnly,
-      CanvasUserSpaceMetrics(GetSize(), CurrentState().fontFont,
-                             CurrentState().fontLanguage,
-                             CurrentState().fontExplicitLanguage, presContext),
+      mCanvasElement, CurrentState().filterChain.AsSpan(),
+      CurrentState().autoSVGFiltersObserver, writeOnly,
+      CanvasUserSpaceMetrics(GetSize(), CurrentState().fontFont, canvasStyle,
+                             presContext),
       gfxRect(0, 0, mWidth, mHeight), CurrentState().filterAdditionalImages);
   CurrentState().filterSourceGraphicTainted = writeOnly;
 }
@@ -2879,6 +2976,8 @@ void CanvasRenderingContext2D::ClearRect(double aX, double aY, double aW,
 
 void CanvasRenderingContext2D::FillRect(double aX, double aY, double aW,
                                         double aH) {
+  mFeatureUsage |= CanvasFeatureUsage::FillRect;
+
   if (!ValidateRect(aX, aY, aW, aH, true)) {
     return;
   }
@@ -3066,20 +3165,16 @@ void CanvasRenderingContext2D::BeginPath() {
   mPathPruned = false;
 }
 
-void CanvasRenderingContext2D::Fill(const CanvasWindingRule& aWinding) {
-  EnsureUserSpacePath(aWinding);
-
-  if (!mPath || mPath->IsEmpty()) {
+void CanvasRenderingContext2D::FillImpl(const gfx::Path& aPath) {
+  MOZ_ASSERT(IsTargetValid());
+  if (aPath.IsEmpty()) {
     return;
   }
 
   const bool needBounds = NeedToCalculateBounds();
-  if (!IsTargetValid()) {
-    return;
-  }
   gfx::Rect bounds;
   if (needBounds) {
-    bounds = mPath->GetBounds(mTarget->GetTransform());
+    bounds = aPath.GetBounds(mTarget->GetTransform());
   }
 
   AdjustedTarget target(this, bounds.IsEmpty() ? nullptr : &bounds, true);
@@ -3091,10 +3186,21 @@ void CanvasRenderingContext2D::Fill(const CanvasWindingRule& aWinding) {
   if (!IsTargetValid() || !target) {
     return;
   }
-  target.Fill(mPath,
+  target.Fill(&aPath,
               CanvasGeneralPattern().ForStyle(this, Style::FILL, mTarget),
               DrawOptions(CurrentState().globalAlpha, op));
   Redraw();
+}
+
+void CanvasRenderingContext2D::Fill(const CanvasWindingRule& aWinding) {
+  EnsureUserSpacePath(aWinding);
+  if (!IsTargetValid()) {
+    return;
+  }
+
+  if (mPath) {
+    FillImpl(*mPath);
+  }
 }
 
 void CanvasRenderingContext2D::Fill(const CanvasPath& aPath,
@@ -3105,38 +3211,14 @@ void CanvasRenderingContext2D::Fill(const CanvasPath& aPath,
   }
 
   RefPtr<gfx::Path> gfxpath = aPath.GetPath(aWinding, mTarget);
-  if (!gfxpath || gfxpath->IsEmpty()) {
-    return;
+  if (gfxpath) {
+    FillImpl(*gfxpath);
   }
-
-  const bool needBounds = NeedToCalculateBounds();
-  if (!IsTargetValid()) {
-    return;
-  }
-  gfx::Rect bounds;
-  if (needBounds) {
-    bounds = gfxpath->GetBounds(mTarget->GetTransform());
-  }
-
-  AdjustedTarget target(this, bounds.IsEmpty() ? nullptr : &bounds, true);
-  if (!target) {
-    return;
-  }
-
-  auto op = target.UsedOperation();
-  if (!IsTargetValid() || !target) {
-    return;
-  }
-  target.Fill(gfxpath,
-              CanvasGeneralPattern().ForStyle(this, Style::FILL, mTarget),
-              DrawOptions(CurrentState().globalAlpha, op));
-  Redraw();
 }
 
-void CanvasRenderingContext2D::Stroke() {
-  EnsureUserSpacePath();
-
-  if (!mPath || mPath->IsEmpty()) {
+void CanvasRenderingContext2D::StrokeImpl(const gfx::Path& aPath) {
+  MOZ_ASSERT(IsTargetValid());
+  if (aPath.IsEmpty()) {
     return;
   }
 
@@ -3153,7 +3235,7 @@ void CanvasRenderingContext2D::Stroke() {
   }
   gfx::Rect bounds;
   if (needBounds) {
-    bounds = mPath->GetStrokedBounds(strokeOptions, mTarget->GetTransform());
+    bounds = aPath.GetStrokedBounds(strokeOptions, mTarget->GetTransform());
   }
 
   AdjustedTarget target(this, bounds.IsEmpty() ? nullptr : &bounds, true);
@@ -3165,10 +3247,23 @@ void CanvasRenderingContext2D::Stroke() {
   if (!IsTargetValid() || !target) {
     return;
   }
-  target.Stroke(mPath,
+  target.Stroke(&aPath,
                 CanvasGeneralPattern().ForStyle(this, Style::STROKE, mTarget),
                 strokeOptions, DrawOptions(CurrentState().globalAlpha, op));
   Redraw();
+}
+
+void CanvasRenderingContext2D::Stroke() {
+  mFeatureUsage |= CanvasFeatureUsage::Stroke;
+
+  EnsureUserSpacePath();
+  if (!IsTargetValid()) {
+    return;
+  }
+
+  if (mPath) {
+    StrokeImpl(*mPath);
+  }
 }
 
 void CanvasRenderingContext2D::Stroke(const CanvasPath& aPath) {
@@ -3176,43 +3271,11 @@ void CanvasRenderingContext2D::Stroke(const CanvasPath& aPath) {
   if (!IsTargetValid()) {
     return;
   }
-
   RefPtr<gfx::Path> gfxpath =
       aPath.GetPath(CanvasWindingRule::Nonzero, mTarget);
-
-  if (!gfxpath || gfxpath->IsEmpty()) {
-    return;
+  if (gfxpath) {
+    StrokeImpl(*gfxpath);
   }
-
-  const ContextState* state = &CurrentState();
-  StrokeOptions strokeOptions(state->lineWidth, CanvasToGfx(state->lineJoin),
-                              CanvasToGfx(state->lineCap), state->miterLimit,
-                              state->dash.Length(), state->dash.Elements(),
-                              state->dashOffset);
-  state = nullptr;
-
-  const bool needBounds = NeedToCalculateBounds();
-  if (!IsTargetValid()) {
-    return;
-  }
-  gfx::Rect bounds;
-  if (needBounds) {
-    bounds = gfxpath->GetStrokedBounds(strokeOptions, mTarget->GetTransform());
-  }
-
-  AdjustedTarget target(this, bounds.IsEmpty() ? nullptr : &bounds, true);
-  if (!target) {
-    return;
-  }
-
-  auto op = target.UsedOperation();
-  if (!IsTargetValid() || !target) {
-    return;
-  }
-  target.Stroke(gfxpath,
-                CanvasGeneralPattern().ForStyle(this, Style::STROKE, mTarget),
-                strokeOptions, DrawOptions(CurrentState().globalAlpha, op));
-  Redraw();
 }
 
 void CanvasRenderingContext2D::DrawFocusIfNeeded(
@@ -3385,11 +3448,13 @@ void CanvasRenderingContext2D::Arc(double aX, double aY, double aR,
     return aError.ThrowIndexSizeError("Negative radius");
   }
   if (aStartAngle == aEndAngle) {
-    mPathPruned = true;
+    LineTo(aX + aR * cos(aStartAngle), aY + aR * sin(aStartAngle));
     return;
   }
 
   EnsureWritablePath();
+
+  EnsureActivePath();
 
   mPathBuilder->Arc(Point(aX, aY), aR, aStartAngle, aEndAngle, aAnticlockwise);
   mPathPruned = false;
@@ -3610,10 +3675,6 @@ void CanvasRenderingContext2D::Ellipse(double aX, double aY, double aRadiusX,
   if (aRadiusX < 0.0 || aRadiusY < 0.0) {
     return aError.ThrowIndexSizeError("Negative radius");
   }
-  if (aStartAngle == aEndAngle) {
-    mPathPruned = true;
-    return;
-  }
 
   EnsureWritablePath();
 
@@ -3643,8 +3704,9 @@ void CanvasRenderingContext2D::EnsureWritablePath() {
 void CanvasRenderingContext2D::EnsureUserSpacePath(
     const CanvasWindingRule& aWinding) {
   FillRule fillRule = CurrentState().fillRule;
-  if (aWinding == CanvasWindingRule::Evenodd)
+  if (aWinding == CanvasWindingRule::Evenodd) {
     fillRule = FillRule::FILL_EVEN_ODD;
+  }
 
   EnsureTarget();
   if (!IsTargetValid()) {
@@ -3691,10 +3753,18 @@ void CanvasRenderingContext2D::TransformCurrentPath(const Matrix& aTransform) {
 
 void CanvasRenderingContext2D::SetFont(const nsACString& aFont,
                                        ErrorResult& aError) {
+  mFeatureUsage |= CanvasFeatureUsage::SetFont;
+
   SetFontInternal(aFont, aError);
   if (aError.Failed()) {
     return;
   }
+
+  // Setting the font attribute magically resets fontVariantCaps and
+  // fontStretch to normal.
+  // (spec unclear, cf. https://github.com/whatwg/html/issues/8103)
+  SetFontVariantCaps(CanvasFontVariantCaps::Normal);
+  SetFontStretch(CanvasFontStretch::Normal);
 
   // If letterSpacing or wordSpacing is present, recompute to account for
   // changes to font-relative dimensions.
@@ -3702,8 +3772,15 @@ void CanvasRenderingContext2D::SetFont(const nsACString& aFont,
 }
 
 static float QuantizeFontSize(float aSize) {
-  // Round to nearest 0.25px
-  return NS_round(4.0 * aSize) * 0.25;
+  // Based on the Veltkamp-Dekker float-splitting algorithm, see e.g.
+  // https://indico.cern.ch/event/313684/contributions/1687773/attachments/600513/826490/FPArith-Part2.pdf
+  // A 32-bit float has 24 bits of precision (23 stored, plus an implicit 1 bit
+  // at the start of the mantissa).
+  constexpr int bitsToDrop = 17;  // leaving 7 bits of precision
+  constexpr int scale = 1 << bitsToDrop;
+  float d = aSize * (scale + 1);
+  float t = d - aSize;
+  return d - t;
 }
 
 bool CanvasRenderingContext2D::SetFontInternal(const nsACString& aFont,
@@ -3754,6 +3831,76 @@ bool CanvasRenderingContext2D::SetFontInternal(const nsACString& aFont,
       QuantizeFontSize(resizedFont.size.ToCSSPixels()));
 
   resizedFont.kerning = CanvasToGfx(CurrentState().fontKerning);
+
+  // fontStretch handling: if fontStretch is not 'normal', apply it;
+  // if it is normal, then use whatever the shorthand set.
+  // XXX(jfkthame) The interaction between the shorthand and the separate attr
+  // here is not clearly spec'd, and we may want to reconsider it (or revise
+  // the available values); see https://github.com/whatwg/html/issues/8103.
+  switch (CurrentState().fontStretch) {
+    case CanvasFontStretch::Normal:
+      // Leave whatever the shorthand set.
+      break;
+    case CanvasFontStretch::Ultra_condensed:
+      resizedFont.stretch = StyleFontStretch::ULTRA_CONDENSED;
+      break;
+    case CanvasFontStretch::Extra_condensed:
+      resizedFont.stretch = StyleFontStretch::EXTRA_CONDENSED;
+      break;
+    case CanvasFontStretch::Condensed:
+      resizedFont.stretch = StyleFontStretch::CONDENSED;
+      break;
+    case CanvasFontStretch::Semi_condensed:
+      resizedFont.stretch = StyleFontStretch::SEMI_CONDENSED;
+      break;
+    case CanvasFontStretch::Semi_expanded:
+      resizedFont.stretch = StyleFontStretch::SEMI_EXPANDED;
+      break;
+    case CanvasFontStretch::Expanded:
+      resizedFont.stretch = StyleFontStretch::EXPANDED;
+      break;
+    case CanvasFontStretch::Extra_expanded:
+      resizedFont.stretch = StyleFontStretch::EXTRA_EXPANDED;
+      break;
+    case CanvasFontStretch::Ultra_expanded:
+      resizedFont.stretch = StyleFontStretch::ULTRA_EXPANDED;
+      break;
+    default:
+      MOZ_ASSERT_UNREACHABLE("unknown stretch value");
+      break;
+  }
+
+  // fontVariantCaps handling: if fontVariantCaps is not 'normal', apply it;
+  // if it is, then use the smallCaps boolean from the shorthand.
+  // XXX(jfkthame) The interaction between the shorthand and the separate attr
+  // here is not clearly spec'd, and we may want to reconsider it (or revise
+  // the available values); see https://github.com/whatwg/html/issues/8103.
+  switch (CurrentState().fontVariantCaps) {
+    case CanvasFontVariantCaps::Normal:
+      // Leave whatever the shorthand set.
+      break;
+    case CanvasFontVariantCaps::Small_caps:
+      resizedFont.variantCaps = NS_FONT_VARIANT_CAPS_SMALLCAPS;
+      break;
+    case CanvasFontVariantCaps::All_small_caps:
+      resizedFont.variantCaps = NS_FONT_VARIANT_CAPS_ALLSMALL;
+      break;
+    case CanvasFontVariantCaps::Petite_caps:
+      resizedFont.variantCaps = NS_FONT_VARIANT_CAPS_PETITECAPS;
+      break;
+    case CanvasFontVariantCaps::All_petite_caps:
+      resizedFont.variantCaps = NS_FONT_VARIANT_CAPS_ALLPETITE;
+      break;
+    case CanvasFontVariantCaps::Unicase:
+      resizedFont.variantCaps = NS_FONT_VARIANT_CAPS_UNICASE;
+      break;
+    case CanvasFontVariantCaps::Titling_caps:
+      resizedFont.variantCaps = NS_FONT_VARIANT_CAPS_TITLING;
+      break;
+    default:
+      MOZ_ASSERT_UNREACHABLE("unknown caps value");
+      break;
+  }
 
   c->Document()->FlushUserFontSet();
 
@@ -3860,8 +4007,75 @@ bool CanvasRenderingContext2D::SetFontInternalDisconnected(
   }
 
   fontStyle.size = QuantizeFontSize(size);
-  fontStyle.variantCaps =
-      smallCaps ? NS_FONT_VARIANT_CAPS_SMALLCAPS : NS_FONT_VARIANT_CAPS_NORMAL;
+
+  switch (CurrentState().fontStretch) {
+    case CanvasFontStretch::Normal:
+      // Leave whatever the shorthand set.
+      break;
+    case CanvasFontStretch::Ultra_condensed:
+      fontStyle.stretch = StyleFontStretch::ULTRA_CONDENSED;
+      break;
+    case CanvasFontStretch::Extra_condensed:
+      fontStyle.stretch = StyleFontStretch::EXTRA_CONDENSED;
+      break;
+    case CanvasFontStretch::Condensed:
+      fontStyle.stretch = StyleFontStretch::CONDENSED;
+      break;
+    case CanvasFontStretch::Semi_condensed:
+      fontStyle.stretch = StyleFontStretch::SEMI_CONDENSED;
+      break;
+    case CanvasFontStretch::Semi_expanded:
+      fontStyle.stretch = StyleFontStretch::SEMI_EXPANDED;
+      break;
+    case CanvasFontStretch::Expanded:
+      fontStyle.stretch = StyleFontStretch::EXPANDED;
+      break;
+    case CanvasFontStretch::Extra_expanded:
+      fontStyle.stretch = StyleFontStretch::EXTRA_EXPANDED;
+      break;
+    case CanvasFontStretch::Ultra_expanded:
+      fontStyle.stretch = StyleFontStretch::ULTRA_EXPANDED;
+      break;
+    default:
+      MOZ_ASSERT_UNREACHABLE("unknown stretch value");
+      break;
+  }
+
+  // fontVariantCaps handling: if fontVariantCaps is not 'normal', apply it;
+  // if it is, then use the smallCaps boolean from the shorthand.
+  // XXX(jfkthame) The interaction between the shorthand and the separate attr
+  // here is not clearly spec'd, and we may want to reconsider it (or revise
+  // the available values); see https://github.com/whatwg/html/issues/8103.
+  switch (CurrentState().fontVariantCaps) {
+    case CanvasFontVariantCaps::Normal:
+      fontStyle.variantCaps = smallCaps ? NS_FONT_VARIANT_CAPS_SMALLCAPS
+                                        : NS_FONT_VARIANT_CAPS_NORMAL;
+      break;
+    case CanvasFontVariantCaps::Small_caps:
+      fontStyle.variantCaps = NS_FONT_VARIANT_CAPS_SMALLCAPS;
+      break;
+    case CanvasFontVariantCaps::All_small_caps:
+      fontStyle.variantCaps = NS_FONT_VARIANT_CAPS_ALLSMALL;
+      break;
+    case CanvasFontVariantCaps::Petite_caps:
+      fontStyle.variantCaps = NS_FONT_VARIANT_CAPS_PETITECAPS;
+      break;
+    case CanvasFontVariantCaps::All_petite_caps:
+      fontStyle.variantCaps = NS_FONT_VARIANT_CAPS_ALLPETITE;
+      break;
+    case CanvasFontVariantCaps::Unicase:
+      fontStyle.variantCaps = NS_FONT_VARIANT_CAPS_UNICASE;
+      break;
+    case CanvasFontVariantCaps::Titling_caps:
+      fontStyle.variantCaps = NS_FONT_VARIANT_CAPS_TITLING;
+      break;
+    default:
+      MOZ_ASSERT_UNREACHABLE("unknown caps value");
+      break;
+  }
+  // If variantCaps is set, we need to disable a gfxFont fast-path.
+  fontStyle.noFallbackVariantFeatures =
+      (fontStyle.variantCaps == NS_FONT_VARIANT_CAPS_NORMAL);
 
   // Set the kerning feature, if required by the fontKerning attribute.
   gfxFontFeature setting{TRUETYPE_TAG('k', 'e', 'r', 'n'), 0};
@@ -3910,6 +4124,7 @@ bool CanvasRenderingContext2D::SetFontInternalDisconnected(
   SerializeFontForCanvas(list, fontStyle, CurrentState().font);
   CurrentState().fontFont = nsFont(StyleFontFamily{list, false, false},
                                    StyleCSSPixelLength::FromPixels(size));
+  CurrentState().fontFont.variantCaps = fontStyle.variantCaps;
   CurrentState().fontLanguage = nullptr;
   CurrentState().fontExplicitLanguage = false;
   return true;
@@ -3943,6 +4158,27 @@ void CanvasRenderingContext2D::FillText(const nsAString& aText, double aX,
                                         double aY,
                                         const Optional<double>& aMaxWidth,
                                         ErrorResult& aError) {
+  // We try to match the most commonly observed strings used by canvas
+  // fingerprinting scripts. We do a prefix match, because that means having to
+  // match fewer bytes and sometimes the strings is followed by a few random
+  // characters.
+  // - Cwm fjordbank gly
+  //   Used by FingerprintJS
+  //   (https://github.com/fingerprintjs/fingerprintjs/blob/4c4b2c8455e701b8341b2b766d1939cf5de4b615/src/sources/canvas.ts#L119)
+  //   and others
+  // - Hel$&?6%){mZ+#@
+  // - <@nv45. F1n63r,Pr1n71n6!
+  // Usually there are at most a handful (usually ~1/2) fillText calls by
+  // fingerprinters
+  if (mFillTextCalls <= 5) {
+    if (StringBeginsWith(aText, u"Cwm fjord"_ns) ||
+        StringBeginsWith(aText, u"Hel$&?6%"_ns) ||
+        StringBeginsWith(aText, u"<@nv45. "_ns)) {
+      mFeatureUsage |= CanvasFeatureUsage::KnownFingerprintText;
+    }
+    mFillTextCalls++;
+  }
+
   DebugOnly<TextMetrics*> metrics = DrawOrMeasureText(
       aText, aX, aY, aMaxWidth, TextDrawOperation::FILL, aError);
   MOZ_ASSERT(!metrics);  // drawing operation never returns TextMetrics
@@ -4321,14 +4557,14 @@ TextMetrics* CanvasRenderingContext2D::DrawOrMeasureText(
     const nsAString& aRawText, float aX, float aY,
     const Optional<double>& aMaxWidth, TextDrawOperation aOp,
     ErrorResult& aError) {
-  gfxFontGroup* currentFontStyle = GetCurrentFontStyle();
+  RefPtr<gfxFontGroup> currentFontStyle = GetCurrentFontStyle();
   if (NS_WARN_IF(!currentFontStyle)) {
     aError = NS_ERROR_FAILURE;
     return nullptr;
   }
 
   RefPtr<PresShell> presShell = GetPresShell();
-  Document* document = presShell ? presShell->GetDocument() : nullptr;
+  RefPtr<Document> document = presShell ? presShell->GetDocument() : nullptr;
 
   // replace all the whitespace characters with U+0020 SPACE
   nsAutoString textToDraw(aRawText);
@@ -4574,8 +4810,8 @@ TextMetrics* CanvasRenderingContext2D::DrawOrMeasureText(
         fontMetrics.maxAscent - baselineAnchor,   // fontBBAscent
         fontMetrics.maxDescent + baselineAnchor,  // fontBBDescent
         actualBoundingBoxAscent, actualBoundingBoxDescent,
-        fontMetrics.emAscent - baselineAnchor,    // emHeightAscent
-        -fontMetrics.emDescent - baselineAnchor,  // emHeightDescent
+        fontMetrics.emAscent - baselineAnchor,   // emHeightAscent
+        fontMetrics.emDescent + baselineAnchor,  // emHeightDescent
         baselines.mHanging - baselineAnchor,
         baselines.mAlphabetic - baselineAnchor,
         baselines.mIdeographic - baselineAnchor);
@@ -4901,20 +5137,22 @@ static already_AddRefed<SourceSurface> ExtractSubrect(SourceSurface* aSurface,
 //
 
 static void ClipImageDimension(double& aSourceCoord, double& aSourceSize,
-                               int32_t aImageSize, double& aDestCoord,
-                               double& aDestSize) {
+                               double& aClipOriginCoord, double& aClipSize,
+                               double& aDestCoord, double& aDestSize) {
   double scale = aDestSize / aSourceSize;
-  if (aSourceCoord < 0.0) {
+  double relativeCoord = aSourceCoord - aClipOriginCoord;
+  if (relativeCoord < 0.0) {
     double destEnd = aDestCoord + aDestSize;
-    aDestCoord -= aSourceCoord * scale;
+    aDestCoord -= relativeCoord * scale;
     aDestSize = destEnd - aDestCoord;
-    aSourceSize += aSourceCoord;
-    aSourceCoord = 0.0;
+    aSourceSize += relativeCoord;
+    aSourceCoord = aClipOriginCoord;
+    relativeCoord = 0.0;
   }
-  double delta = aImageSize - (aSourceCoord + aSourceSize);
+  double delta = aClipSize - (relativeCoord + aSourceSize);
   if (delta < 0.0) {
     aDestSize += delta * scale;
-    aSourceSize = aImageSize - aSourceCoord;
+    aSourceSize = aClipSize - relativeCoord;
   }
 }
 
@@ -5031,8 +5269,10 @@ void CanvasRenderingContext2D::DrawImage(const CanvasImageSource& aImage,
   RefPtr<SourceSurface> srcSurf;
   gfx::IntSize imgSize;
   gfx::IntSize intrinsicImgSize;
+  Maybe<IntRect> cropRect;
   Element* element = nullptr;
   OffscreenCanvas* offscreenCanvas = nullptr;
+  VideoFrame* videoFrame = nullptr;
 
   EnsureTarget();
   if (!IsTargetValid()) {
@@ -5082,6 +5322,8 @@ void CanvasRenderingContext2D::DrawImage(const CanvasImageSource& aImage,
 
     imgSize = intrinsicImgSize =
         gfx::IntSize(imageBitmap.Width(), imageBitmap.Height());
+  } else if (aImage.IsVideoFrame()) {
+    videoFrame = &aImage.GetAsVideoFrame();
   } else {
     if (aImage.IsHTMLImageElement()) {
       HTMLImageElement* img = &aImage.GetAsHTMLImageElement();
@@ -5096,8 +5338,9 @@ void CanvasRenderingContext2D::DrawImage(const CanvasImageSource& aImage,
       element = video;
     }
 
-    srcSurf = CanvasImageCache::LookupCanvas(element, mCanvasElement, mTarget,
-                                             &imgSize, &intrinsicImgSize);
+    srcSurf =
+        CanvasImageCache::LookupCanvas(element, mCanvasElement, mTarget,
+                                       &imgSize, &intrinsicImgSize, &cropRect);
   }
 
   DirectDrawInfo drawInfo;
@@ -5107,12 +5350,14 @@ void CanvasRenderingContext2D::DrawImage(const CanvasImageSource& aImage,
     // of animated images. We also don't want to rasterize vector images.
     uint32_t sfeFlags = nsLayoutUtils::SFE_WANT_FIRST_FRAME_IF_IMAGE |
                         nsLayoutUtils::SFE_NO_RASTERIZING_VECTORS |
-                        nsLayoutUtils::SFE_EXACT_SIZE_SURFACE;
+                        nsLayoutUtils::SFE_ALLOW_UNCROPPED_UNSCALED;
 
     SurfaceFromElementResult res;
     if (offscreenCanvas) {
       res = nsLayoutUtils::SurfaceFromOffscreenCanvas(offscreenCanvas, sfeFlags,
                                                       mTarget);
+    } else if (videoFrame) {
+      res = nsLayoutUtils::SurfaceFromVideoFrame(videoFrame, sfeFlags, mTarget);
     } else {
       res = CanvasRenderingContext2D::CachedSurfaceFromElement(element);
       if (!res.mSourceSurface) {
@@ -5120,7 +5365,8 @@ void CanvasRenderingContext2D::DrawImage(const CanvasImageSource& aImage,
       }
     }
 
-    if (!res.mSourceSurface && !res.mDrawInfo.mImgContainer) {
+    srcSurf = res.GetSourceSurface();
+    if (!srcSurf && !res.mDrawInfo.mImgContainer) {
       // https://html.spec.whatwg.org/#check-the-usability-of-the-image-argument:
       //
       // Only throw if the request is broken and the element is an
@@ -5132,44 +5378,73 @@ void CanvasRenderingContext2D::DrawImage(const CanvasImageSource& aImage,
       if (!res.mIsStillLoading && !res.mHasSize &&
           (aImage.IsHTMLImageElement() || aImage.IsSVGImageElement())) {
         aError.ThrowInvalidStateError("Passed-in image is \"broken\"");
+      } else if (videoFrame) {
+        aError.ThrowInvalidStateError("Passed-in video frame is \"broken\"");
       }
       return;
     }
 
     imgSize = res.mSize;
     intrinsicImgSize = res.mIntrinsicSize;
+    cropRect = res.mCropRect;
     DoSecurityCheck(res.mPrincipal, res.mIsWriteOnly, res.mCORSUsed);
 
-    if (res.mSourceSurface) {
+    if (srcSurf) {
       if (res.mImageRequest) {
         CanvasImageCache::NotifyDrawImage(element, mCanvasElement, mTarget,
-                                          res.mSourceSurface, imgSize,
-                                          intrinsicImgSize);
+                                          srcSurf, imgSize, intrinsicImgSize,
+                                          cropRect);
       }
-      srcSurf = res.mSourceSurface;
     } else {
       drawInfo = res.mDrawInfo;
     }
   }
 
+  double clipOriginX, clipOriginY, clipWidth, clipHeight;
+  if (cropRect) {
+    clipOriginX = cropRect.ref().X();
+    clipOriginY = cropRect.ref().Y();
+    clipWidth = cropRect.ref().Width();
+    clipHeight = cropRect.ref().Height();
+  } else {
+    clipOriginX = clipOriginY = 0.0;
+    clipWidth = imgSize.width;
+    clipHeight = imgSize.height;
+  }
+
+  // Any provided coordinates are in the display space, or the same as the
+  // intrinsic size. In order to get to the surface coordinate space, we may
+  // need to adjust for scaling and/or cropping. If no source coordinates are
+  // provided, then we can just directly use the actual surface size.
   if (aOptional_argc == 0) {
-    aSx = aSy = 0.0;
-    aSw = (double)imgSize.width;
-    aSh = (double)imgSize.height;
+    aSx = clipOriginX;
+    aSy = clipOriginY;
+    aSw = clipWidth;
+    aSh = clipHeight;
     aDw = (double)intrinsicImgSize.width;
     aDh = (double)intrinsicImgSize.height;
   } else if (aOptional_argc == 2) {
-    aSx = aSy = 0.0;
-    aSw = (double)imgSize.width;
-    aSh = (double)imgSize.height;
+    aSx = clipOriginX;
+    aSy = clipOriginY;
+    aSw = clipWidth;
+    aSh = clipHeight;
+  } else if (cropRect || intrinsicImgSize != imgSize) {
+    // We need to first scale between the cropped size and the intrinsic size,
+    // and then adjust for the offset from the crop rect.
+    double scaleXToCrop = clipWidth / intrinsicImgSize.width;
+    double scaleYToCrop = clipHeight / intrinsicImgSize.height;
+    aSx = aSx * scaleXToCrop + clipOriginX;
+    aSy = aSy * scaleYToCrop + clipOriginY;
+    aSw = aSw * scaleXToCrop;
+    aSh = aSh * scaleYToCrop;
   }
 
   if (aSw == 0.0 || aSh == 0.0) {
     return;
   }
 
-  ClipImageDimension(aSx, aSw, imgSize.width, aDx, aDw);
-  ClipImageDimension(aSy, aSh, imgSize.height, aDy, aDh);
+  ClipImageDimension(aSx, aSw, clipOriginX, clipWidth, aDx, aDw);
+  ClipImageDimension(aSy, aSh, clipOriginY, clipHeight, aDy, aDh);
 
   if (aSw <= 0.0 || aSh <= 0.0 || aDw <= 0.0 || aDh <= 0.0) {
     // source and/or destination are fully clipped, so nothing is painted
@@ -5213,7 +5488,8 @@ void CanvasRenderingContext2D::DrawImage(const CanvasImageSource& aImage,
 
   if (srcSurf) {
     gfx::Rect sourceRect(aSx, aSy, aSw, aSh);
-    if (element == mCanvasElement) {
+    if ((element && element == mCanvasElement) ||
+        (offscreenCanvas && offscreenCanvas == mOffscreenCanvas)) {
       // srcSurf is a snapshot of mTarget. If we draw to mTarget now, we'll
       // trigger a COW copy of the whole canvas into srcSurf. That's a huge
       // waste if sourceRect doesn't cover the whole canvas.
@@ -5659,8 +5935,7 @@ nsresult CanvasRenderingContext2D::GetImageDataArray(
     nsIPrincipal& aSubjectPrincipal, JSObject** aRetval) {
   MOZ_ASSERT(aWidth && aHeight);
 
-  // Restrict the typed array length to INT32_MAX because that's all we support
-  // in dom::TypedArray::ComputeState.
+  // Restrict the typed array length to INT32_MAX because that's all we support.
   CheckedInt<uint32_t> len = CheckedInt<uint32_t>(aWidth) * aHeight * 4;
   if (!len.isValid() || len.value() > INT32_MAX) {
     return NS_ERROR_DOM_INDEX_SIZE_ERR;
@@ -5726,7 +6001,9 @@ nsresult CanvasRenderingContext2D::GetImageDataArray(
   if (!usePlaceholder &&
       ShouldResistFingerprinting(RFPTarget::CanvasRandomization)) {
     needRandomizePixels = true;
-    readback = CreateDataSourceSurfaceByCloning(readback);
+    if (readback) {
+      readback = CreateDataSourceSurfaceByCloning(readback);
+    }
   }
 
   DataSourceSurface::MappedSurface rawData;
@@ -5747,9 +6024,9 @@ nsresult CanvasRenderingContext2D::GetImageDataArray(
       // holder.
 
       const IntSize size = readback->GetSize();
-      nsRFPService::RandomizePixels(GetCookieJarSettings(), rawData.mData,
-                                    size.height * size.width * 4,
-                                    SurfaceFormat::A8R8G8B8_UINT32);
+      nsRFPService::RandomizePixels(
+          GetCookieJarSettings(), rawData.mData, size.width, size.height,
+          size.height * size.width * 4, SurfaceFormat::A8R8G8B8_UINT32);
     }
 
     JS::AutoCheckCannotGC nogc;
@@ -5889,18 +6166,13 @@ void CanvasRenderingContext2D::PutImageData_explicit(
     return;
   }
 
-  arr.ComputeState();
+  RefPtr<DataSourceSurface> sourceSurface;
+  uint8_t* lockedBits = nullptr;
 
-  uint32_t dataLen = arr.Length();
-
-  uint32_t len = width * height * 4;
-  if (dataLen != len) {
-    return aRv.ThrowInvalidStateError("Invalid width or height");
-  }
-
-  // The canvas spec says that the current path, transformation matrix, shadow
-  // attributes, global alpha, the clipping region, and global composition
-  // operator must not affect the getImageData() and putImageData() methods.
+  // The canvas spec says that the current path, transformation matrix,
+  // shadow attributes, global alpha, the clipping region, and global
+  // composition operator must not affect the getImageData() and
+  // putImageData() methods.
   const gfx::Rect putRect(dirtyRect);
   EnsureTarget(&putRect);
 
@@ -5909,8 +6181,6 @@ void CanvasRenderingContext2D::PutImageData_explicit(
   }
 
   DataSourceSurface::MappedSurface map;
-  RefPtr<DataSourceSurface> sourceSurface;
-  uint8_t* lockedBits = nullptr;
   uint8_t* dstData;
   IntSize dstSize;
   int32_t dstStride;
@@ -5921,10 +6191,11 @@ void CanvasRenderingContext2D::PutImageData_explicit(
     sourceSurface = Factory::CreateDataSourceSurface(
         dirtyRect.Size(), SurfaceFormat::B8G8R8A8, false);
 
-    // In certain scenarios, requesting larger than 8k image fails.  Bug 803568
-    // covers the details of how to run into it, but the full detailed
-    // investigation hasn't been done to determine the underlying cause.  We
-    // will just handle the failure to allocate the surface to avoid a crash.
+    // In certain scenarios, requesting larger than 8k image fails.  Bug
+    // 803568 covers the details of how to run into it, but the full
+    // detailed investigation hasn't been done to determine the
+    // underlying cause.  We will just handle the failure to allocate
+    // the surface to avoid a crash.
     if (!sourceSurface) {
       return aRv.Throw(NS_ERROR_FAILURE);
     }
@@ -5940,12 +6211,27 @@ void CanvasRenderingContext2D::PutImageData_explicit(
     dstFormat = sourceSurface->GetFormat();
   }
 
-  uint8_t* srcData = arr.Data() + srcRect.y * (width * 4) + srcRect.x * 4;
+  arr.ProcessData(
+      [&](const Span<uint8_t>& aData, JS::AutoCheckCannotGC&& nogc) {
+        // Verify that the length hasn't changed.
+        if (aData.Length() != width * height * 4) {
+          // FIXME Should this call ReleaseBits/Unmap?
+          return aRv.ThrowInvalidStateError("Invalid width or height");
+        }
 
-  PremultiplyData(
-      srcData, width * 4, SurfaceFormat::R8G8B8A8, dstData, dstStride,
-      mOpaque ? SurfaceFormat::X8R8G8B8_UINT32 : SurfaceFormat::A8R8G8B8_UINT32,
-      dirtyRect.Size());
+        uint8_t* srcData =
+            aData.Elements() + srcRect.y * (width * 4) + srcRect.x * 4;
+
+        PremultiplyData(srcData, width * 4, SurfaceFormat::R8G8B8A8, dstData,
+                        dstStride,
+                        mOpaque ? SurfaceFormat::X8R8G8B8_UINT32
+                                : SurfaceFormat::A8R8G8B8_UINT32,
+                        dirtyRect.Size());
+      });
+
+  if (aRv.Failed()) {
+    return;
+  }
 
   if (lockedBits) {
     mTarget->ReleaseBits(lockedBits);
@@ -5974,10 +6260,9 @@ static already_AddRefed<ImageData> CreateImageData(
   }
 
   // Create the fast typed array; it's initialized to 0 by default.
-  JSObject* darray = Uint8ClampedArray::Create(aCx, aContext, len.value());
-  if (!darray) {
-    // TODO: Should use OOMReporter.
-    aError.Throw(NS_ERROR_OUT_OF_MEMORY);
+  JSObject* darray =
+      Uint8ClampedArray::Create(aCx, aContext, len.value(), aError);
+  if (aError.Failed()) {
     return nullptr;
   }
 
@@ -6125,6 +6410,11 @@ void CanvasRenderingContext2D::SetWriteOnly() {
   }
 }
 
+bool CanvasRenderingContext2D::GetEffectiveWillReadFrequently() const {
+  return StaticPrefs::gfx_canvas_willreadfrequently_enabled_AtStartup() &&
+         mWillReadFrequently;
+}
+
 NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(CanvasPath, mParent)
 
 CanvasPath::CanvasPath(nsISupports* aParent) : mParent(aParent) {
@@ -6192,6 +6482,16 @@ inline void CanvasPath::EnsureCapped() const {
   }
 }
 
+inline void CanvasPath::EnsureActive() const {
+  // If the path is not active, then adding an op to the path may cause the path
+  // to add the first point of the op as the initial point instead of the actual
+  // current point.
+  if (mPruned && !mPathBuilder->IsActive()) {
+    mPathBuilder->MoveTo(mPathBuilder->CurrentPoint());
+    mPruned = false;
+  }
+}
+
 void CanvasPath::MoveTo(double aX, double aY) {
   EnsurePathBuilder();
 
@@ -6221,6 +6521,8 @@ void CanvasPath::QuadraticCurveTo(double aCpx, double aCpy, double aX,
     mPruned = true;
     return;
   }
+
+  EnsureActive();
 
   mPathBuilder->QuadraticBezierTo(cp1, cp2);
   mPruned = false;
@@ -6335,11 +6637,13 @@ void CanvasPath::Arc(double aX, double aY, double aRadius, double aStartAngle,
     return aError.ThrowIndexSizeError("Negative radius");
   }
   if (aStartAngle == aEndAngle) {
-    mPruned = true;
+    LineTo(aX + aRadius * cos(aStartAngle), aY + aRadius * sin(aStartAngle));
     return;
   }
 
   EnsurePathBuilder();
+
+  EnsureActive();
 
   mPathBuilder->Arc(Point(aX, aY), aRadius, aStartAngle, aEndAngle,
                     aAnticlockwise);
@@ -6351,10 +6655,6 @@ void CanvasPath::Ellipse(double x, double y, double radiusX, double radiusY,
                          bool anticlockwise, ErrorResult& aError) {
   if (radiusX < 0.0 || radiusY < 0.0) {
     return aError.ThrowIndexSizeError("Negative radius");
-  }
-  if (startAngle == endAngle) {
-    mPruned = true;
-    return;
   }
 
   EnsurePathBuilder();
@@ -6375,6 +6675,8 @@ void CanvasPath::LineTo(const gfx::Point& aPoint) {
     return;
   }
 
+  EnsureActive();
+
   mPathBuilder->LineTo(aPoint);
   mPruned = false;
 }
@@ -6390,6 +6692,8 @@ void CanvasPath::BezierTo(const gfx::Point& aCP1, const gfx::Point& aCP2,
     mPruned = true;
     return;
   }
+
+  EnsureActive();
 
   mPathBuilder->BezierTo(aCP1, aCP2, aCP3);
   mPruned = false;

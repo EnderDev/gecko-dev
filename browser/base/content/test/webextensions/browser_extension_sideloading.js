@@ -73,6 +73,8 @@ add_task(async function test_sideloading() {
     ],
   });
 
+  Services.fog.testResetFOG();
+
   const ID1 = "addon1@tests.mozilla.org";
   await createWebExtension({
     id: ID1,
@@ -105,12 +107,18 @@ add_task(async function test_sideloading() {
 
   // Navigate away from the starting page to force about:addons to load
   // in a new tab during the tests below.
-  BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, "about:robots");
+  BrowserTestUtils.startLoadingURIString(
+    gBrowser.selectedBrowser,
+    "about:robots"
+  );
   await BrowserTestUtils.browserLoaded(gBrowser.selectedBrowser);
 
   registerCleanupFunction(async function () {
     // Return to about:blank when we're done
-    BrowserTestUtils.loadURIString(gBrowser.selectedBrowser, "about:blank");
+    BrowserTestUtils.startLoadingURIString(
+      gBrowser.selectedBrowser,
+      "about:blank"
+    );
     await BrowserTestUtils.browserLoaded(gBrowser.selectedBrowser);
   });
 
@@ -344,6 +352,29 @@ add_task(async function test_sideloading() {
   info("Test telemetry events collected for addon1");
 
   const baseEventAddon1 = createBaseEventAddon(1);
+
+  Assert.deepEqual(
+    AddonTestUtils.getAMGleanEvents("manage", { addon_id: ID1 }),
+    [
+      {
+        addon_id: ID1,
+        method: "sideload_prompt",
+        addon_type: "extension",
+        source: "app-profile",
+        source_method: "sideload",
+        num_strings: "2",
+      },
+      {
+        addon_id: ID1,
+        method: "uninstall",
+        addon_type: "extension",
+        source: "app-profile",
+        source_method: "sideload",
+      },
+    ],
+    "Got the expected Glean events for addon1."
+  );
+
   const collectedEventsAddon1 = getEventsForAddonId(
     amEvents,
     baseEventAddon1.value
@@ -400,5 +431,34 @@ add_task(async function test_sideloading() {
     collectedEventsAddon2.length,
     expectedEventsAddon2.length,
     "Got the expected number of telemetry events for addon2"
+  );
+
+  Assert.deepEqual(
+    AddonTestUtils.getAMGleanEvents("manage", { addon_id: ID2 }),
+    [
+      {
+        addon_id: ID2,
+        method: "sideload_prompt",
+        addon_type: "extension",
+        source: "app-profile",
+        source_method: "sideload",
+        num_strings: "1",
+      },
+      {
+        addon_id: ID2,
+        method: "enable",
+        addon_type: "extension",
+        source: "app-profile",
+        source_method: "sideload",
+      },
+      {
+        addon_id: ID2,
+        method: "uninstall",
+        addon_type: "extension",
+        source: "app-profile",
+        source_method: "sideload",
+      },
+    ],
+    "Got the expected Glean events for addon2."
   );
 });

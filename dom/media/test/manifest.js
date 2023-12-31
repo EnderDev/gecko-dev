@@ -929,19 +929,15 @@ var gErrorTests = [
   { name: "448636.ogv", type: "video/ogg" },
   { name: "bug504843.ogv", type: "video/ogg" },
   { name: "bug501279.ogg", type: "audio/ogg" },
-  { name: "bug603918.webm", type: "video/webm" },
   { name: "bug604067.webm", type: "video/webm" },
   { name: "bug1535980.webm", type: "video/webm" },
   { name: "bug1799787.webm", type: "video/webm" },
   { name: "bogus.duh", type: "bogus/duh" },
 ];
 
-// These files would get error after receiving "loadedmetadata", we would like
-// to check duration in "onerror" and make sure the duration is still available.
-var gDurationTests = [
-  { name: "bug603918.webm", duration: 6.076 },
-  { name: "bug604067.webm", duration: 6.076 },
-];
+// Playing this file errors out after receiving "loadedmetadata", we still want
+// to check the duration in "onerror" and make sure it is still available.
+var gDurationTests = [{ name: "bug604067.webm", duration: 6.076 }];
 
 // These are files that have nontrivial duration and are useful for seeking within.
 var gSeekTests = [
@@ -955,6 +951,11 @@ var gSeekTests = [
   { name: "split.webm", type: "video/webm", duration: 1.967 },
   { name: "detodos.opus", type: "audio/ogg; codecs=opus", duration: 2.9135 },
   { name: "gizmo.mp4", type: "video/mp4", duration: 5.56 },
+  {
+    name: "/tests/dom/media/webaudio/test/half-a-second-1ch-44100-aac-afconvert.mp4",
+    type: 'audio/mp4; codecs="mp4a.40.2"',
+    duration: 0.5,
+  },
   { name: "owl.mp3", type: "audio/mpeg", duration: 3.343 },
   { name: "bogus.duh", type: "bogus/duh", duration: 123 },
 
@@ -2297,6 +2298,13 @@ function Log(token, msg) {
 
 // Number of tests to run in parallel.
 var PARALLEL_TESTS = 2;
+
+// Disable parallel test for media engine tests, see more info in bug 1840914.
+if (
+  SpecialPowers.Services.prefs.getIntPref("media.wmf.media-engine.enabled", 0)
+) {
+  PARALLEL_TESTS = 1;
+}
 
 // Prefs to set before running tests.  Use this to improve coverage of
 // conditions that might not otherwise be encountered on the test data.

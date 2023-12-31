@@ -61,9 +61,8 @@
       <popupnotificationcontent id="webRTC-selectSpeaker" orient="vertical">
         <html:div class="webRTC-selectDevice-selector-container">
           <xul:image id="webRTC-selectSpeaker-icon" data-l10n-id="popup-select-speaker-icon" class="webRTC-selectDevice-icon"/>
-          <menulist id="webRTC-selectSpeaker-menulist" aria-labelledby="webRTC-selectSpeaker-icon" size="large">
-            <menupopup id="webRTC-selectSpeaker-menupopup"/>
-          </menulist>
+          <richlistbox id="webRTC-selectSpeaker-richlistbox" aria-labelledby="webRTC-selectSpeaker-icon" size="large">
+          </richlistbox>
           <label id="webRTC-selectSpeaker-single-device-label" class="webRTC-selectDevice-label"></label>
         </html:div>
       </popupnotificationcontent>
@@ -251,3 +250,26 @@
         <html:span> Relay</html:span>
       </html:div>
     </template>
+
+    <popupnotification id="address-save-update-notification" class="address-capture-notification" hidden="true">
+      <popupnotificationcontent class="address-save-update-notification-content" orient="vertical">
+        <html:div class="address-capture-header">
+          <html:p/>
+        </html:div>
+        <html:div class="address-capture-description">
+          <html:p/>
+        </html:div>
+        <html:div class="address-capture-content">
+        </html:div>
+      </popupnotificationcontent>
+    </popupnotification>
+
+    <popupnotification id="address-edit-notification" class="address-capture-notification" hidden="true">
+      <popupnotificationcontent class="address-edit-notification-content" orient="vertical">
+        <html:div class="address-capture-header">
+          <html:p/>
+        </html:div>
+        <html:div class="address-capture-content">
+        </html:div>
+      </popupnotificationcontent>
+    </popupnotification>

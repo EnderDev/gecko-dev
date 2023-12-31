@@ -16,14 +16,19 @@ use std::ops;
 
 pub type NonUniformResult = Option<Handle<crate::Expression>>;
 
+// Remove this once we update our uniformity analysis and
+// add support for the `derivative_uniformity` diagnostic
+const DISABLE_UNIFORMITY_REQ_FOR_FRAGMENT_STAGE: bool = true;
+
 bitflags::bitflags! {
     /// Kinds of expressions that require uniform control flow.
     #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
     #[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct UniformityRequirements: u8 {
         const WORK_GROUP_BARRIER = 0x1;
-        const DERIVATIVE = 0x2;
-        const IMPLICIT_LEVEL = 0x4;
+        const DERIVATIVE = if DISABLE_UNIFORMITY_REQ_FOR_FRAGMENT_STAGE { 0 } else { 0x2 };
+        const IMPLICIT_LEVEL = if DISABLE_UNIFORMITY_REQ_FOR_FRAGMENT_STAGE { 0 } else { 0x4 };
     }
 }
 
@@ -59,6 +64,7 @@ impl Uniformity {
 }
 
 bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq)]
     struct ExitFlags: u8 {
         /// Control flow may return from the function, which makes all the
         /// subsequent statements within the current function (only!)
@@ -117,6 +123,7 @@ bitflags::bitflags! {
     /// Indicates how a global variable is used.
     #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
     #[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct GlobalUse: u8 {
         /// Data will be read from the variable.
         const READ = 0x1;
@@ -152,10 +159,10 @@ impl ExpressionInfo {
             ref_count: 0,
             assignable_global: None,
             // this doesn't matter at this point, will be overwritten
-            ty: TypeResolution::Value(crate::TypeInner::Scalar {
+            ty: TypeResolution::Value(crate::TypeInner::Scalar(crate::Scalar {
                 kind: crate::ScalarKind::Bool,
                 width: 0,
-            }),
+            })),
         }
     }
 }
@@ -253,6 +260,9 @@ pub struct FunctionInfo {
     ///
     /// [`GlobalVariable`]: crate::GlobalVariable
     sampling: crate::FastHashSet<Sampling>,
+
+    /// Indicates that the function is using dual source blending.
+    pub dual_source_blending: bool,
 }
 
 impl FunctionInfo {
@@ -411,13 +421,29 @@ impl FunctionInfo {
         })
     }
 
-    /// Computes the expression info and stores it in `self.expressions`.
-    /// Also, bumps the reference counts on dependent expressions.
+    /// Compute the [`ExpressionInfo`] for `handle`.
+    ///
+    /// Replace the dummy entry in [`self.expressions`] for `handle`
+    /// with a real `ExpressionInfo` value describing that expression.
+    ///
+    /// This function is called as part of a forward sweep through the
+    /// arena, so we can assume that all earlier expressions in the
+    /// arena already have valid info. Since expressions only depend
+    /// on earlier expressions, this includes all our subexpressions.
+    ///
+    /// Adjust the reference counts on all expressions we use.
+    ///
+    /// Also populate the [`sampling_set`], [`sampling`] and
+    /// [`global_uses`] fields of `self`.
+    ///
+    /// [`self.expressions`]: FunctionInfo::expressions
+    /// [`sampling_set`]: FunctionInfo::sampling_set
+    /// [`sampling`]: FunctionInfo::sampling
+    /// [`global_uses`]: FunctionInfo::global_uses
     #[allow(clippy::or_fun_call)]
     fn process_expression(
         &mut self,
         handle: Handle<crate::Expression>,
-        expression: &crate::Expression,
         expression_arena: &Arena<crate::Expression>,
         other_functions: &[FunctionInfo],
         resolve_context: &ResolveContext,
@@ -425,6 +451,7 @@ impl FunctionInfo {
     ) -> Result<(), ExpressionError> {
         use crate::{Expression as E, SampleLevel as Sl};
 
+        let expression = &expression_arena[handle];
         let mut assignable_global = None;
         let uniformity = match *expression {
             E::Access { base, index } => {
@@ -492,7 +519,6 @@ impl FunctionInfo {
                 requirements: UniformityRequirements::empty(),
             },
             // always uniform
-            E::Constant(_) => Uniformity::new(),
             E::Splat { size: _, value } => Uniformity {
                 non_uniform_result: self.add_ref(value),
                 requirements: UniformityRequirements::empty(),
@@ -501,6 +527,7 @@ impl FunctionInfo {
                 non_uniform_result: self.add_ref(vector),
                 requirements: UniformityRequirements::empty(),
             },
+            E::Literal(_) | E::Constant(_) | E::ZeroValue(_) => Uniformity::new(),
             E::Compose { ref components, .. } => {
                 let non_uniform_result = components
                     .iter()
@@ -672,12 +699,17 @@ impl FunctionInfo {
                 requirements: UniformityRequirements::empty(),
             },
             E::Math {
-                arg, arg1, arg2, ..
+                fun: _,
+                arg,
+                arg1,
+                arg2,
+                arg3,
             } => {
                 let arg1_nur = arg1.and_then(|h| self.add_ref(h));
                 let arg2_nur = arg2.and_then(|h| self.add_ref(h));
+                let arg3_nur = arg3.and_then(|h| self.add_ref(h));
                 Uniformity {
-                    non_uniform_result: self.add_ref(arg).or(arg1_nur).or(arg2_nur),
+                    non_uniform_result: self.add_ref(arg).or(arg1_nur).or(arg2_nur).or(arg3_nur),
                     requirements: UniformityRequirements::empty(),
                 }
             }
@@ -688,6 +720,13 @@ impl FunctionInfo {
             E::CallResult(function) => other_functions[function.index()].uniformity.clone(),
             E::AtomicResult { .. } | E::RayQueryProceedResult => Uniformity {
                 non_uniform_result: Some(handle),
+                requirements: UniformityRequirements::empty(),
+            },
+            E::WorkGroupUniformLoadResult { .. } => Uniformity {
+                // The result of WorkGroupUniformLoad is always uniform by definition
+                non_uniform_result: None,
+                // The call is what cares about uniformity, not the expression
+                // This expression is never emitted, so this requirement should never be used anyway?
                 requirements: UniformityRequirements::empty(),
             },
             E::ArrayLength(expr) => Uniformity {
@@ -776,6 +815,35 @@ impl FunctionInfo {
                     },
                     exit: ExitFlags::empty(),
                 },
+                S::WorkGroupUniformLoad { pointer, .. } => {
+                    let _condition_nur = self.add_ref(pointer);
+
+                    // Don't check that this call occurs in uniform control flow until Naga implements WGSL's standard
+                    // uniformity analysis (https://github.com/gfx-rs/naga/issues/1744).
+                    // The uniformity analysis Naga uses now is less accurate than the one in the WGSL standard,
+                    // causing Naga to reject correct uses of `workgroupUniformLoad` in some interesting programs.
+
+                    /* #[cfg(feature = "validate")]
+                    if self
+                        .flags
+                        .contains(super::ValidationFlags::CONTROL_FLOW_UNIFORMITY)
+                    {
+                        let condition_nur = self.add_ref(pointer);
+                        let this_disruptor =
+                            disruptor.or(condition_nur.map(UniformityDisruptor::Expression));
+                        if let Some(cause) = this_disruptor {
+                            return Err(FunctionError::NonUniformWorkgroupUniformLoad(cause)
+                                .with_span_static(*span, "WorkGroupUniformLoad"));
+                        }
+                    } */
+                    FunctionUniformity {
+                        result: Uniformity {
+                            non_uniform_result: None,
+                            requirements: UniformityRequirements::WORK_GROUP_BARRIER,
+                        },
+                        exit: ExitFlags::empty(),
+                    }
+                }
                 S::Block(ref b) => {
                     self.process_block(b, other_functions, disruptor, expression_arena)?
                 }
@@ -829,7 +897,7 @@ impl FunctionInfo {
                 S::Loop {
                     ref body,
                     ref continuing,
-                    break_if: _,
+                    break_if,
                 } => {
                     let body_uniformity =
                         self.process_block(body, other_functions, disruptor, expression_arena)?;
@@ -840,6 +908,9 @@ impl FunctionInfo {
                         continuing_disruptor,
                         expression_arena,
                     )?;
+                    if let Some(expr) = break_if {
+                        let _ = self.add_ref(expr);
+                    }
                     body_uniformity | continuing_uniformity
                 }
                 S::Return { value } => FunctionUniformity {
@@ -922,6 +993,18 @@ impl FunctionInfo {
 }
 
 impl ModuleInfo {
+    /// Populates `self.const_expression_types`
+    pub(super) fn process_const_expression(
+        &mut self,
+        handle: Handle<crate::Expression>,
+        resolve_context: &ResolveContext,
+        gctx: crate::proc::GlobalCtx,
+    ) -> Result<(), super::ConstExpressionError> {
+        self.const_expression_types[handle.index()] =
+            resolve_context.resolve(&gctx.const_expressions[handle], |h| Ok(&self[h]))?;
+        Ok(())
+    }
+
     /// Builds the `FunctionInfo` based on the function, and validates the
     /// uniform control flow if required by the expressions of this function.
     pub(super) fn process_function(
@@ -940,14 +1023,14 @@ impl ModuleInfo {
             global_uses: vec![GlobalUse::empty(); module.global_variables.len()].into_boxed_slice(),
             expressions: vec![ExpressionInfo::new(); fun.expressions.len()].into_boxed_slice(),
             sampling: crate::FastHashSet::default(),
+            dual_source_blending: false,
         };
         let resolve_context =
             ResolveContext::with_locals(module, &fun.local_variables, &fun.arguments);
 
-        for (handle, expr) in fun.expressions.iter() {
+        for (handle, _) in fun.expressions.iter() {
             if let Err(source) = info.process_expression(
                 handle,
-                expr,
                 &fun.expressions,
                 &self.functions,
                 &resolve_context,
@@ -955,6 +1038,12 @@ impl ModuleInfo {
             ) {
                 return Err(FunctionError::Expression { handle, source }
                     .with_span_handle(handle, &fun.expressions));
+            }
+        }
+
+        for (_, expr) in fun.local_variables.iter() {
+            if let Some(init) = expr.init {
+                let _ = info.add_ref(init);
             }
         }
 
@@ -975,26 +1064,13 @@ impl ModuleInfo {
 fn uniform_control_flow() {
     use crate::{Expression as E, Statement as S};
 
-    let mut constant_arena = Arena::new();
-    let constant = constant_arena.append(
-        crate::Constant {
-            name: None,
-            specialization: None,
-            inner: crate::ConstantInner::Scalar {
-                width: 4,
-                value: crate::ScalarValue::Uint(0),
-            },
-        },
-        Default::default(),
-    );
     let mut type_arena = crate::UniqueArena::new();
     let ty = type_arena.insert(
         crate::Type {
             name: None,
             inner: crate::TypeInner::Vector {
                 size: crate::VectorSize::Bi,
-                kind: crate::ScalarKind::Float,
-                width: 4,
+                scalar: crate::Scalar::F32,
             },
         },
         Default::default(),
@@ -1023,7 +1099,7 @@ fn uniform_control_flow() {
 
     let mut expressions = Arena::new();
     // checks the uniform control flow
-    let constant_expr = expressions.append(E::Constant(constant), Default::default());
+    let constant_expr = expressions.append(E::Literal(crate::Literal::U32(0)), Default::default());
     // checks the non-uniform control flow
     let derivative_expr = expressions.append(
         E::Derivative {
@@ -1061,9 +1137,10 @@ fn uniform_control_flow() {
         global_uses: vec![GlobalUse::empty(); global_var_arena.len()].into_boxed_slice(),
         expressions: vec![ExpressionInfo::new(); expressions.len()].into_boxed_slice(),
         sampling: crate::FastHashSet::default(),
+        dual_source_blending: false,
     };
     let resolve_context = ResolveContext {
-        constants: &constant_arena,
+        constants: &Arena::new(),
         types: &type_arena,
         special_types: &crate::SpecialTypes::default(),
         global_vars: &global_var_arena,
@@ -1071,10 +1148,9 @@ fn uniform_control_flow() {
         functions: &Arena::new(),
         arguments: &[],
     };
-    for (handle, expression) in expressions.iter() {
+    for (handle, _) in expressions.iter() {
         info.process_expression(
             handle,
-            expression,
             &expressions,
             &[],
             &resolve_context,
@@ -1133,21 +1209,28 @@ fn uniform_control_flow() {
         .into(),
         reject: crate::Block::new(),
     };
-    assert_eq!(
-        info.process_block(
+    {
+        let block_info = info.process_block(
             &vec![stmt_emit2, stmt_if_non_uniform].into(),
             &[],
             None,
-            &expressions
-        ),
-        Err(FunctionError::NonUniformControlFlow(
-            UniformityRequirements::DERIVATIVE,
-            derivative_expr,
-            UniformityDisruptor::Expression(non_uniform_global_expr)
-        )
-        .with_span()),
-    );
-    assert_eq!(info[derivative_expr].ref_count, 1);
+            &expressions,
+        );
+        if DISABLE_UNIFORMITY_REQ_FOR_FRAGMENT_STAGE {
+            assert_eq!(info[derivative_expr].ref_count, 2);
+        } else {
+            assert_eq!(
+                block_info,
+                Err(FunctionError::NonUniformControlFlow(
+                    UniformityRequirements::DERIVATIVE,
+                    derivative_expr,
+                    UniformityDisruptor::Expression(non_uniform_global_expr)
+                )
+                .with_span()),
+            );
+            assert_eq!(info[derivative_expr].ref_count, 1);
+        }
+    }
     assert_eq!(info[non_uniform_global], GlobalUse::READ);
 
     let stmt_emit3 = S::Emit(emit_range_globals);

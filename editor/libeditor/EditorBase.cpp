@@ -1560,7 +1560,11 @@ bool EditorBase::CheckForClipboardCommandListener(
     return false;
   }
 
-  RefPtr<EventTarget> et = GetDOMEventTarget();
+  RefPtr<EventTarget> et = IsHTMLEditor()
+                               ? AsHTMLEditor()->ComputeEditingHost(
+                                     HTMLEditor::LimitInBodyElement::No)
+                               : GetDOMEventTarget();
+
   while (et) {
     EventListenerManager* elm = et->GetExistingListenerManager();
     if (elm && elm->HasListenersFor(aCommand)) {
@@ -4060,6 +4064,8 @@ EditorBase::CreateTransactionForCollapsedRange(
     // of previous editable content.
     nsIContent* previousEditableContent = HTMLEditUtils::GetPreviousContent(
         *point.GetContainer(), {WalkTreeOption::IgnoreNonEditableNode},
+        IsTextEditor() ? BlockInlineCheck::UseHTMLDefaultStyle
+                       : BlockInlineCheck::UseComputedDisplayOutsideStyle,
         anonymousDivOrEditingHost);
     if (!previousEditableContent) {
       NS_WARNING("There was no editable content before the collapsed range");
@@ -4108,6 +4114,8 @@ EditorBase::CreateTransactionForCollapsedRange(
     // next editable content.
     nsIContent* nextEditableContent = HTMLEditUtils::GetNextContent(
         *point.GetContainer(), {WalkTreeOption::IgnoreNonEditableNode},
+        IsTextEditor() ? BlockInlineCheck::UseHTMLDefaultStyle
+                       : BlockInlineCheck::UseComputedDisplayOutsideStyle,
         anonymousDivOrEditingHost);
     if (!nextEditableContent) {
       NS_WARNING("There was no editable content after the collapsed range");
@@ -4175,9 +4183,11 @@ EditorBase::CreateTransactionForCollapsedRange(
         aHowToHandleCollapsedRange == HowToHandleCollapsedRange::ExtendBackward
             ? HTMLEditUtils::GetPreviousContent(
                   point, {WalkTreeOption::IgnoreNonEditableNode},
+                  BlockInlineCheck::UseComputedDisplayOutsideStyle,
                   anonymousDivOrEditingHost)
             : HTMLEditUtils::GetNextContent(
                   point, {WalkTreeOption::IgnoreNonEditableNode},
+                  BlockInlineCheck::UseComputedDisplayOutsideStyle,
                   anonymousDivOrEditingHost);
     if (!editableContent) {
       NS_WARNING("There was no editable content around the collapsed range");
@@ -4191,9 +4201,11 @@ EditorBase::CreateTransactionForCollapsedRange(
                   HowToHandleCollapsedRange::ExtendBackward
               ? HTMLEditUtils::GetPreviousContent(
                     *editableContent, {WalkTreeOption::IgnoreNonEditableNode},
+                    BlockInlineCheck::UseComputedDisplayOutsideStyle,
                     anonymousDivOrEditingHost)
               : HTMLEditUtils::GetNextContent(
                     *editableContent, {WalkTreeOption::IgnoreNonEditableNode},
+                    BlockInlineCheck::UseComputedDisplayOutsideStyle,
                     anonymousDivOrEditingHost);
     }
     if (!editableContent) {
@@ -4557,7 +4569,7 @@ nsresult EditorBase::HandleDropEvent(DragEvent* aDropEvent) {
   // same document, jump through some hoops to determine if mouse is over
   // selection (bail) and whether user wants to copy selection or delete it.
   if (sourceNode && sourceNode->IsEditable() && srcdoc == document) {
-    bool isPointInSelection = EditorUtils::IsPointInSelection(
+    bool isPointInSelection = nsContentUtils::IsPointInSelection(
         SelectionRef(), *droppedAt.GetContainer(), droppedAt.Offset());
     if (isPointInSelection) {
       // If source document and destination document is same and dropping
@@ -5161,7 +5173,7 @@ nsresult EditorBase::HandleKeyPressEvent(WidgetKeyboardEvent* aKeyboardEvent) {
 
     case NS_VK_BACK: {
       if (aKeyboardEvent->IsControl() || aKeyboardEvent->IsAlt() ||
-          aKeyboardEvent->IsMeta() || aKeyboardEvent->IsOS()) {
+          aKeyboardEvent->IsMeta()) {
         return NS_OK;
       }
       DebugOnly<nsresult> rvIgnored =
@@ -5177,8 +5189,7 @@ nsresult EditorBase::HandleKeyPressEvent(WidgetKeyboardEvent* aKeyboardEvent) {
       // modifies what delete does (cmd_cut in this case).
       // bailing here to allow the keybindings to do the cut.
       if (aKeyboardEvent->IsShift() || aKeyboardEvent->IsControl() ||
-          aKeyboardEvent->IsAlt() || aKeyboardEvent->IsMeta() ||
-          aKeyboardEvent->IsOS()) {
+          aKeyboardEvent->IsAlt() || aKeyboardEvent->IsMeta()) {
         return NS_OK;
       }
       DebugOnly<nsresult> rvIgnored =
@@ -5512,8 +5523,9 @@ nsresult EditorBase::FinalizeSelection() {
   // TODO: Running script from here makes harder to handle blur events.  We
   //       should do this asynchronously.
   focusManager->UpdateCaretForCaretBrowsingMode();
-  if (nsCOMPtr<nsINode> node = do_QueryInterface(GetDOMEventTarget())) {
-    if (node->OwnerDoc()->GetUnretargetedFocusedContent() != node) {
+  if (Element* rootElement = GetExposedRoot()) {
+    if (rootElement->OwnerDoc()->GetUnretargetedFocusedContent() !=
+        rootElement) {
       selectionController->SelectionWillLoseFocus();
     } else {
       // We leave this selection as the focused one. When the focus returns, it
@@ -5819,6 +5831,19 @@ bool EditorBase::CanKeepHandlingFocusEvent(
   if (!focusManager->GetFocusedElement()) {
     return false;
   }
+
+  // If there's an HTMLEditor registered in the target document and we
+  // are not that HTMLEditor (for cases like nested documents), let
+  // that HTMLEditor to handle the focus event.
+  if (IsHTMLEditor()) {
+    const HTMLEditor* precedentHTMLEditor =
+        aOriginalEventTargetNode.OwnerDoc()->GetHTMLEditor();
+
+    if (precedentHTMLEditor && precedentHTMLEditor != this) {
+      return false;
+    }
+  }
+
   const nsIContent* exposedTargetContent =
       aOriginalEventTargetNode.AsContent()
           ->FindFirstNonChromeOnlyAccessContent();
@@ -6413,10 +6438,6 @@ void EditorBase::AutoEditActionDataSetter::AppendTargetRange(
 }
 
 bool EditorBase::AutoEditActionDataSetter::IsBeforeInputEventEnabled() const {
-  if (!StaticPrefs::dom_input_events_beforeinput_enabled()) {
-    return false;
-  }
-
   // Don't dispatch "beforeinput" event when the editor user makes us stop
   // dispatching input event.
   if (mEditorBase.IsSuppressingDispatchingInputEvent()) {
@@ -6734,8 +6755,8 @@ void EditorBase::TopLevelEditSubActionData::WillDeleteContent(
 }
 
 void EditorBase::TopLevelEditSubActionData::DidSplitContent(
-    EditorBase& aEditorBase, nsIContent& aSplitContent, nsIContent& aNewContent,
-    SplitNodeDirection aSplitNodeDirection) {
+    EditorBase& aEditorBase, nsIContent& aSplitContent,
+    nsIContent& aNewContent) {
   MOZ_ASSERT(aEditorBase.AsHTMLEditor());
 
   if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
@@ -6746,14 +6767,9 @@ void EditorBase::TopLevelEditSubActionData::DidSplitContent(
     return;  // Temporarily disabled by edit sub-action handler.
   }
 
-  DebugOnly<nsresult> rvIgnored =
-      aSplitNodeDirection == SplitNodeDirection::LeftNodeIsNewOne
-          ? AddRangeToChangedRange(*aEditorBase.AsHTMLEditor(),
-                                   EditorRawDOMPoint(&aNewContent, 0),
-                                   EditorRawDOMPoint(&aSplitContent, 0))
-          : AddRangeToChangedRange(*aEditorBase.AsHTMLEditor(),
-                                   EditorRawDOMPoint::AtEndOf(aSplitContent),
-                                   EditorRawDOMPoint::AtEndOf(aNewContent));
+  DebugOnly<nsresult> rvIgnored = AddRangeToChangedRange(
+      *aEditorBase.AsHTMLEditor(), EditorRawDOMPoint::AtEndOf(aSplitContent),
+      EditorRawDOMPoint::AtEndOf(aNewContent));
   NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
                        "TopLevelEditSubActionData::AddRangeToChangedRange() "
                        "failed, but ignored");

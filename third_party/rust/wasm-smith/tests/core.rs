@@ -129,10 +129,8 @@ fn smoke_test_imports_config() {
                 let payload = payload.unwrap();
                 if let wasmparser::Payload::TypeSection(rdr) = payload {
                     // Gather the signature types to later check function types against.
-                    for ty in rdr {
-                        match ty.unwrap() {
-                            wasmparser::Type::Func(ft) => sig_types.push(ft),
-                        }
+                    for ty in rdr.into_iter_err_on_gc_types() {
+                        sig_types.push(ty.unwrap());
                     }
                 } else if let wasmparser::Payload::ImportSection(rdr) = payload {
                     // Read out imports, checking that they all are within the list of expected
@@ -302,6 +300,8 @@ fn parser_features_from_config(config: &impl Config) -> WasmFeatures {
         component_model: false,
         function_references: false,
         memory_control: false,
+        gc: false,
+        component_model_values: false,
     }
 }
 

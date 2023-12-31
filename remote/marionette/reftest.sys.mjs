@@ -2,8 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -20,7 +18,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   windowManager: "chrome://remote/content/shared/WindowManager.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "logger", () =>
+ChromeUtils.defineLazyGetter(lazy, "logger", () =>
   lazy.Log.get(lazy.Log.TYPES.MARIONETTE)
 );
 
@@ -809,13 +807,14 @@ browserRect.height: ${browserRect.height}`);
     await new Promise((resolve, reject) => {
       const doc = this.parentWindow.document;
       const script = doc.createElement("script");
-      script.src = "resource://pdf.js/build/pdf.js";
+      script.type = "module";
+      script.src = "resource://pdf.js/build/pdf.mjs";
       script.onload = resolve;
       script.onerror = () => reject(new Error("pdfjs load failed"));
       doc.documentElement.appendChild(script);
     });
     this.parentWindow.pdfjsLib.GlobalWorkerOptions.workerSrc =
-      "resource://pdf.js/build/pdf.worker.js";
+      "resource://pdf.js/build/pdf.worker.mjs";
   }
 
   async loadPdf(data) {

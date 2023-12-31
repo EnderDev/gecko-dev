@@ -8,6 +8,7 @@
 
 #include "mozilla/Attributes.h"
 #include "mozilla/CheckedInt.h"
+#include "mozilla/Compiler.h"
 #include "mozilla/FloatingPoint.h"
 #if JS_HAS_INTL_API
 #  include "mozilla/intl/String.h"
@@ -50,8 +51,7 @@
 #include "vm/RegExpObject.h"
 #include "vm/SelfHosting.h"
 #include "vm/StaticStrings.h"
-#include "vm/ToSource.h"       // js::ValueToSource
-#include "vm/WellKnownAtom.h"  // js_*_str
+#include "vm/ToSource.h"  // js::ValueToSource
 
 #include "vm/GeckoProfiler-inl.h"
 #include "vm/InlineCharBuffer-inl.h"
@@ -376,15 +376,13 @@ static bool str_uneval(JSContext* cx, unsigned argc, Value* vp) {
 }
 
 static const JSFunctionSpec string_functions[] = {
-    JS_FN(js_escape_str, str_escape, 1, JSPROP_RESOLVING),
-    JS_FN(js_unescape_str, str_unescape, 1, JSPROP_RESOLVING),
-    JS_FN(js_uneval_str, str_uneval, 1, JSPROP_RESOLVING),
-    JS_FN(js_decodeURI_str, str_decodeURI, 1, JSPROP_RESOLVING),
-    JS_FN(js_encodeURI_str, str_encodeURI, 1, JSPROP_RESOLVING),
-    JS_FN(js_decodeURIComponent_str, str_decodeURI_Component, 1,
-          JSPROP_RESOLVING),
-    JS_FN(js_encodeURIComponent_str, str_encodeURI_Component, 1,
-          JSPROP_RESOLVING),
+    JS_FN("escape", str_escape, 1, JSPROP_RESOLVING),
+    JS_FN("unescape", str_unescape, 1, JSPROP_RESOLVING),
+    JS_FN("uneval", str_uneval, 1, JSPROP_RESOLVING),
+    JS_FN("decodeURI", str_decodeURI, 1, JSPROP_RESOLVING),
+    JS_FN("encodeURI", str_encodeURI, 1, JSPROP_RESOLVING),
+    JS_FN("decodeURIComponent", str_decodeURI_Component, 1, JSPROP_RESOLVING),
+    JS_FN("encodeURIComponent", str_encodeURI_Component, 1, JSPROP_RESOLVING),
 
     JS_FS_END};
 
@@ -455,7 +453,7 @@ static const JSClassOps StringObjectClassOps = {
 };
 
 const JSClass StringObject::class_ = {
-    js_String_str,
+    "String",
     JSCLASS_HAS_RESERVED_SLOTS(StringObject::RESERVED_SLOTS) |
         JSCLASS_HAS_CACHED_PROTO(JSProto_String),
     &StringObjectClassOps, &StringObject::classSpec_};
@@ -541,9 +539,65 @@ bool js::str_toString(JSContext* cx, unsigned argc, Value* vp) {
   return CallNonGenericMethod<IsString, str_toString_impl>(cx, args);
 }
 
-/*
- * Java-like string native methods.
- */
+template <typename DestChar, typename SrcChar>
+static inline void CopyChars(DestChar* destChars, const SrcChar* srcChars,
+                             size_t length) {
+  if constexpr (std::is_same_v<DestChar, SrcChar>) {
+#if MOZ_IS_GCC
+    // Directly call memcpy to work around bug 1863131.
+    memcpy(destChars, srcChars, length * sizeof(DestChar));
+#else
+    PodCopy(destChars, srcChars, length);
+#endif
+  } else {
+    for (size_t i = 0; i < length; i++) {
+      destChars[i] = srcChars[i];
+    }
+  }
+}
+
+template <typename CharT>
+static inline void CopyChars(CharT* to, const JSLinearString* from,
+                             size_t begin, size_t length) {
+  MOZ_ASSERT(begin + length <= from->length());
+
+  JS::AutoCheckCannotGC nogc;
+  if constexpr (std::is_same_v<CharT, Latin1Char>) {
+    MOZ_ASSERT(from->hasLatin1Chars());
+    CopyChars(to, from->latin1Chars(nogc) + begin, length);
+  } else {
+    if (from->hasLatin1Chars()) {
+      CopyChars(to, from->latin1Chars(nogc) + begin, length);
+    } else {
+      CopyChars(to, from->twoByteChars(nogc) + begin, length);
+    }
+  }
+}
+
+template <typename CharT>
+static JSLinearString* SubstringInlineString(JSContext* cx,
+                                             Handle<JSLinearString*> left,
+                                             Handle<JSLinearString*> right,
+                                             size_t begin, size_t lhsLength,
+                                             size_t rhsLength) {
+  constexpr size_t MaxLength = std::is_same_v<CharT, Latin1Char>
+                                   ? JSFatInlineString::MAX_LENGTH_LATIN1
+                                   : JSFatInlineString::MAX_LENGTH_TWO_BYTE;
+
+  size_t length = lhsLength + rhsLength;
+  MOZ_ASSERT(length <= MaxLength, "total length fits in stack chars");
+  MOZ_ASSERT(JSInlineString::lengthFits<CharT>(length));
+
+  CharT chars[MaxLength] = {};
+
+  CopyChars(chars, left, begin, lhsLength);
+  CopyChars(chars + lhsLength, right, 0, rhsLength);
+
+  if (auto* str = cx->staticStrings().lookup(chars, length)) {
+    return str;
+  }
+  return NewInlineString<CanGC>(cx, chars, length);
+}
 
 JSString* js::SubstringKernel(JSContext* cx, HandleString str, int32_t beginInt,
                               int32_t lengthInt) {
@@ -561,7 +615,7 @@ JSString* js::SubstringKernel(JSContext* cx, HandleString str, int32_t beginInt,
    *
    * while() {
    *   text = text.substr(0, x) + "bla" + text.substr(x)
-   *   test.charCodeAt(x + 1)
+   *   text.charCodeAt(x + 1)
    * }
    */
   if (str->isRope()) {
@@ -588,20 +642,49 @@ JSString* js::SubstringKernel(JSContext* cx, HandleString str, int32_t beginInt,
     size_t lhsLength = rope->leftChild()->length() - begin;
     size_t rhsLength = begin + len - rope->leftChild()->length();
 
-    Rooted<JSRope*> ropeRoot(cx, rope);
-    RootedString lhs(
-        cx, NewDependentString(cx, ropeRoot->leftChild(), begin, lhsLength));
-    if (!lhs) {
+    Rooted<JSLinearString*> left(cx, rope->leftChild()->ensureLinear(cx));
+    if (!left) {
       return nullptr;
     }
 
-    RootedString rhs(
-        cx, NewDependentString(cx, ropeRoot->rightChild(), 0, rhsLength));
-    if (!rhs) {
+    Rooted<JSLinearString*> right(cx, rope->rightChild()->ensureLinear(cx));
+    if (!right) {
       return nullptr;
     }
 
-    return JSRope::new_<CanGC>(cx, lhs, rhs, len);
+    if (rope->hasLatin1Chars()) {
+      if (JSInlineString::lengthFits<Latin1Char>(len)) {
+        return SubstringInlineString<Latin1Char>(cx, left, right, begin,
+                                                 lhsLength, rhsLength);
+      }
+    } else {
+      if (JSInlineString::lengthFits<char16_t>(len)) {
+        return SubstringInlineString<char16_t>(cx, left, right, begin,
+                                               lhsLength, rhsLength);
+      }
+    }
+
+    left = NewDependentString(cx, left, begin, lhsLength);
+    if (!left) {
+      return nullptr;
+    }
+
+    right = NewDependentString(cx, right, 0, rhsLength);
+    if (!right) {
+      return nullptr;
+    }
+
+    // The dependent string of a two-byte string can be a Latin-1 string, so
+    // check again if the result fits into an inline string.
+    if (left->hasLatin1Chars() && right->hasLatin1Chars()) {
+      if (JSInlineString::lengthFits<Latin1Char>(len)) {
+        MOZ_ASSERT(str->hasTwoByteChars(), "Latin-1 ropes are handled above");
+        return SubstringInlineString<Latin1Char>(cx, left, right, 0, lhsLength,
+                                                 rhsLength);
+      }
+    }
+
+    return JSRope::new_<CanGC>(cx, left, right, len);
   }
 
   return NewDependentString(cx, str, begin, len);
@@ -1122,22 +1205,6 @@ static size_t ToUpperCaseLength(const CharT* chars, size_t startIndex,
 }
 
 template <typename DestChar, typename SrcChar>
-static inline void CopyChars(DestChar* destChars, const SrcChar* srcChars,
-                             size_t length) {
-  static_assert(!std::is_same_v<DestChar, SrcChar>,
-                "PodCopy is used for the same type case");
-  for (size_t i = 0; i < length; i++) {
-    destChars[i] = srcChars[i];
-  }
-}
-
-template <typename CharT>
-static inline void CopyChars(CharT* destChars, const CharT* srcChars,
-                             size_t length) {
-  PodCopy(destChars, srcChars, length);
-}
-
-template <typename DestChar, typename SrcChar>
 static inline bool ToUpperCase(JSContext* cx,
                                InlineCharBuffer<DestChar>& newChars,
                                const SrcChar* chars, size_t startIndex,
@@ -1242,18 +1309,14 @@ static JSString* ToUpperCase(JSContext* cx, JSLinearString* str) {
     // so rarely Latin-1 that we don't even consider creating a new
     // Latin-1 string.
     if constexpr (std::is_same_v<CharT, Latin1Char>) {
-      bool resultIsLatin1 = true;
-      for (size_t j = i; j < length; j++) {
-        Latin1Char c = chars[j];
-        if (c == unicode::MICRO_SIGN ||
-            c == unicode::LATIN_SMALL_LETTER_Y_WITH_DIAERESIS) {
-          MOZ_ASSERT(unicode::ToUpperCase(c) > JSString::MAX_LATIN1_CHAR);
-          resultIsLatin1 = false;
-          break;
-        } else {
-          MOZ_ASSERT(unicode::ToUpperCase(c) <= JSString::MAX_LATIN1_CHAR);
-        }
-      }
+      bool resultIsLatin1 = std::none_of(chars + i, chars + length, [](auto c) {
+        bool upperCaseIsTwoByte =
+            c == unicode::MICRO_SIGN ||
+            c == unicode::LATIN_SMALL_LETTER_Y_WITH_DIAERESIS;
+        MOZ_ASSERT(upperCaseIsTwoByte ==
+                   (unicode::ToUpperCase(c) > JSString::MAX_LATIN1_CHAR));
+        return upperCaseIsTwoByte;
+      });
 
       if (resultIsLatin1) {
         newChars.construct<Latin1Buffer>();
@@ -1565,7 +1628,6 @@ static bool str_normalize(JSContext* cx, unsigned argc, Value* vp) {
 
 #endif  // JS_HAS_INTL_API
 
-#ifdef NIGHTLY_BUILD
 /**
  * IsStringWellFormedUnicode ( string )
  * https://tc39.es/ecma262/#sec-isstringwellformedunicode
@@ -1695,8 +1757,6 @@ static bool str_toWellFormed(JSContext* cx, unsigned argc, Value* vp) {
 static const JSFunctionSpec wellFormed_functions[] = {
     JS_FN("isWellFormed", str_isWellFormed, 0, 0),
     JS_FN("toWellFormed", str_toWellFormed, 0, 0), JS_FS_END};
-
-#endif  // NIGHTLY_BUILD
 
 static bool str_charAt(JSContext* cx, unsigned argc, Value* vp) {
   AutoJSMethodProfilerEntry pseudoFrame(cx, "String.prototype", "charAt");
@@ -3072,32 +3132,16 @@ JSString* js::StringFlatReplaceString(JSContext* cx, HandleString string,
 JSString* js::str_replace_string_raw(JSContext* cx, HandleString string,
                                      HandleString pattern,
                                      HandleString replacement) {
-  Rooted<JSLinearString*> repl(cx, replacement->ensureLinear(cx));
-  if (!repl) {
-    return nullptr;
-  }
-
   Rooted<JSLinearString*> pat(cx, pattern->ensureLinear(cx));
   if (!pat) {
     return nullptr;
-  }
-
-  size_t patternLength = pat->length();
-  int32_t match;
-  uint32_t dollarIndex;
-
-  {
-    AutoCheckCannotGC nogc;
-    dollarIndex =
-        repl->hasLatin1Chars()
-            ? FindDollarIndex(repl->latin1Chars(nogc), repl->length())
-            : FindDollarIndex(repl->twoByteChars(nogc), repl->length());
   }
 
   /*
    * |string| could be a rope, so we want to avoid flattening it for as
    * long as possible.
    */
+  int32_t match;
   if (string->isRope()) {
     if (!RopeMatch(cx, &string->asRope(), pat, &match)) {
       return nullptr;
@@ -3109,6 +3153,21 @@ JSString* js::str_replace_string_raw(JSContext* cx, HandleString string,
   if (match < 0) {
     return string;
   }
+
+  Rooted<JSLinearString*> repl(cx, replacement->ensureLinear(cx));
+  if (!repl) {
+    return nullptr;
+  }
+  uint32_t dollarIndex;
+  {
+    AutoCheckCannotGC nogc;
+    dollarIndex =
+        repl->hasLatin1Chars()
+            ? FindDollarIndex(repl->latin1Chars(nogc), repl->length())
+            : FindDollarIndex(repl->twoByteChars(nogc), repl->length());
+  }
+
+  size_t patternLength = pat->length();
 
   if (dollarIndex != UINT32_MAX) {
     repl = InterpretDollarReplacement(cx, string, repl, dollarIndex, match,
@@ -3653,11 +3712,11 @@ ArrayObject* js::StringSplitString(JSContext* cx, HandleString str,
 }
 
 static const JSFunctionSpec string_methods[] = {
-    JS_FN(js_toSource_str, str_toSource, 0, 0),
+    JS_FN("toSource", str_toSource, 0, 0),
 
     /* Java-like methods. */
-    JS_INLINABLE_FN(js_toString_str, str_toString, 0, 0, StringToString),
-    JS_INLINABLE_FN(js_valueOf_str, str_toString, 0, 0, StringValueOf),
+    JS_INLINABLE_FN("toString", str_toString, 0, 0, StringToString),
+    JS_INLINABLE_FN("valueOf", str_toString, 0, 0, StringValueOf),
     JS_INLINABLE_FN("toLowerCase", str_toLowerCase, 0, 0, StringToLowerCase),
     JS_INLINABLE_FN("toUpperCase", str_toUpperCase, 0, 0, StringToUpperCase),
     JS_INLINABLE_FN("charAt", str_charAt, 1, 0, StringCharAt),
@@ -3805,7 +3864,7 @@ static inline bool CodeUnitToString(JSContext* cx, uint16_t ucode,
   }
 
   char16_t c = char16_t(ucode);
-  JSString* str = NewStringCopyNDontDeflate<CanGC>(cx, &c, 1);
+  JSString* str = NewInlineString<CanGC>(cx, {c}, 1);
   if (!str) {
     return false;
   }
@@ -3875,7 +3934,7 @@ bool js::str_fromCodePoint_one_arg(JSContext* cx, HandleValue code,
 
   char16_t chars[] = {unicode::LeadSurrogate(codePoint),
                       unicode::TrailSurrogate(codePoint)};
-  JSString* str = NewStringCopyNDontDeflate<CanGC>(cx, chars, 2);
+  JSString* str = NewInlineString<CanGC>(cx, chars, 2);
   if (!str) {
     return false;
   }
@@ -3992,8 +4051,19 @@ SharedShape* StringObject::assignInitialShape(JSContext* cx,
 
 JSObject* StringObject::createPrototype(JSContext* cx, JSProtoKey key) {
   Rooted<JSString*> empty(cx, cx->runtime()->emptyString);
+
+  // Because the `length` property of a StringObject is both non-configurable
+  // and non-writable, we need to take the slow path of proxy result
+  // validation for them, and so we need to ensure that the initial ObjectFlags
+  // reflect that. Normally this would be handled for us, but the special
+  // SharedShape::ensureInitialCustomShape path which ultimately takes us
+  // through StringObject::assignInitialShape which adds the problematic
+  // property sneaks past our flag setting logic and results in a failed
+  // lookup of the initial shape in SharedShape::insertInitialShape.
   Rooted<StringObject*> proto(
-      cx, GlobalObject::createBlankPrototype<StringObject>(cx, cx->global()));
+      cx, GlobalObject::createBlankPrototype<StringObject>(
+              cx, cx->global(),
+              ObjectFlags({ObjectFlag::NeedsProxyGetSetResultValidation})));
   if (!proto) {
     return nullptr;
   }
@@ -4032,13 +4102,11 @@ static bool StringClassFinish(JSContext* cx, HandleObject ctor,
     return false;
   }
 
-#ifdef NIGHTLY_BUILD
   // Define isWellFormed/toWellFormed functions.
   if (cx->realm()->creationOptions().getWellFormedUnicodeStringsEnabled() &&
       !JS_DefineFunctions(cx, nativeProto, wellFormed_functions)) {
     return false;
   }
-#endif
 
   return true;
 }
@@ -4520,16 +4588,15 @@ static bool BuildFlatMatchArray(JSContext* cx, HandleString str,
     return true;
   }
 
-  // Get the templateObject that defines the shape and type of the output
-  // object.
-  ArrayObject* templateObject =
-      cx->realm()->regExps.getOrCreateMatchResultTemplateObject(cx);
-  if (!templateObject) {
+  // Get the shape for the match result object.
+  Rooted<SharedShape*> shape(
+      cx, cx->global()->regExpRealm().getOrCreateMatchResultShape(cx));
+  if (!shape) {
     return false;
   }
 
-  Rooted<ArrayObject*> arr(
-      cx, NewDenseFullyAllocatedArrayWithTemplate(cx, 1, templateObject));
+  Rooted<ArrayObject*> arr(cx,
+                           NewDenseFullyAllocatedArrayWithShape(cx, 1, shape));
   if (!arr) {
     return false;
   }
@@ -4538,11 +4605,11 @@ static bool BuildFlatMatchArray(JSContext* cx, HandleString str,
   arr->setDenseInitializedLength(1);
   arr->initDenseElement(0, StringValue(pattern));
 
-  // Set the |index| property. (TemplateObject positions it in slot 0).
-  arr->setSlot(0, Int32Value(match));
+  // Set the |index| property.
+  arr->initSlot(RegExpRealm::MatchResultObjectIndexSlot, Int32Value(match));
 
-  // Set the |input| property. (TemplateObject positions it in slot 1).
-  arr->setSlot(1, StringValue(str));
+  // Set the |input| property.
+  arr->initSlot(RegExpRealm::MatchResultObjectInputSlot, StringValue(str));
 
 #ifdef DEBUG
   RootedValue test(cx);

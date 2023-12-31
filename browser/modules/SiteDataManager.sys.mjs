@@ -2,17 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-
 const lazy = {};
 
-XPCOMUtils.defineLazyGetter(lazy, "gStringBundle", function () {
+ChromeUtils.defineLazyGetter(lazy, "gStringBundle", function () {
   return Services.strings.createBundle(
     "chrome://browser/locale/siteData.properties"
   );
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "gBrandBundle", function () {
+ChromeUtils.defineLazyGetter(lazy, "gBrandBundle", function () {
   return Services.strings.createBundle(
     "chrome://branding/locale/brand.properties"
   );
@@ -418,40 +416,6 @@ export var SiteDataManager = {
     }
   },
 
-  _removeQuotaUsage(site) {
-    let promises = [];
-    let removals = new Set();
-    for (let principal of site.principals) {
-      let { originNoSuffix } = principal;
-      if (removals.has(originNoSuffix)) {
-        // In case of encountering
-        //   - https://www.foo.com
-        //   - https://www.foo.com^userContextId=2
-        // below we have already removed across OAs so skip the same origin without suffix
-        continue;
-      }
-      removals.add(originNoSuffix);
-      promises.push(
-        new Promise(resolve => {
-          // We are clearing *All* across OAs so need to ensure a principal without suffix here,
-          // or the call of `clearStoragesForPrincipal` would fail.
-          principal =
-            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
-              originNoSuffix
-            );
-          let request = this._qms.clearStoragesForPrincipal(
-            principal,
-            null,
-            null,
-            true
-          );
-          request.callback = resolve;
-        })
-      );
-    }
-    return Promise.all(promises);
-  },
-
   _removeCookies(site) {
     for (let cookie of site.cookies) {
       Services.cookies.remove(
@@ -509,7 +473,8 @@ export var SiteDataManager = {
         Ci.nsIClearDataService.CLEAR_COOKIES |
         Ci.nsIClearDataService.CLEAR_DOM_STORAGES |
         Ci.nsIClearDataService.CLEAR_EME |
-        Ci.nsIClearDataService.CLEAR_ALL_CACHES;
+        Ci.nsIClearDataService.CLEAR_ALL_CACHES |
+        Ci.nsIClearDataService.CLEAR_COOKIE_BANNER_EXECUTED_RECORD;
       promises.push(
         new Promise(function (resolve) {
           const { clearData } = Services;

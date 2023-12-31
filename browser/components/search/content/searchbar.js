@@ -15,6 +15,7 @@
     FormHistory: "resource://gre/modules/FormHistory.sys.mjs",
     SearchSuggestionController:
       "resource://gre/modules/SearchSuggestionController.sys.mjs",
+    UrlbarPrefs: "resource:///modules/UrlbarPrefs.sys.mjs",
   });
 
   /**
@@ -54,10 +55,7 @@
       let searchbar = this;
       this.observer = {
         observe(aEngine, aTopic, aVerb) {
-          if (
-            aTopic == "browser-search-engine-modified" ||
-            (aTopic == "browser-search-service" && aVerb == "init-complete")
-          ) {
+          if (aTopic == "browser-search-engine-modified") {
             // Make sure the engine list is refetched next time it's needed
             searchbar._engines = null;
 
@@ -111,7 +109,6 @@
       window.addEventListener("unload", this.destroy);
 
       Services.obs.addObserver(this.observer, "browser-search-engine-modified");
-      Services.obs.addObserver(this.observer, "browser-search-service");
 
       this._initialized = true;
 
@@ -125,6 +122,10 @@
                 return;
               }
 
+              // Ensure the popup header is updated if the user has somehow
+              // managed to open the popup before the search service has finished
+              // initializing.
+              this._textbox.popup.updateHeader();
               // Refresh the display (updating icon, etc)
               this.updateDisplay();
               BrowserSearch.updateOpenSearchBadge();
@@ -217,7 +218,6 @@
           this.observer,
           "browser-search-engine-modified"
         );
-        Services.obs.removeObserver(this.observer, "browser-search-service");
       }
 
       // Make sure to break the cycle from _textbox to us. Otherwise we leak
@@ -426,6 +426,13 @@
         "searchbar",
         details
       );
+
+      // Record when the user uses the search bar
+      lazy.UrlbarPrefs.set(
+        "browser.search.widget.lastUsed",
+        new Date().toISOString()
+      );
+
       // null parameter below specifies HTML response for search
       let params = {
         postData: submission.postData,

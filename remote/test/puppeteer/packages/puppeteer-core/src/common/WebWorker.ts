@@ -15,15 +15,17 @@
  */
 import {Protocol} from 'devtools-protocol';
 
-import {createDeferredPromise} from '../util/DeferredPromise.js';
+import {Realm} from '../api/Realm.js';
 
 import {CDPSession} from './Connection.js';
 import {ConsoleMessageType} from './ConsoleMessage.js';
 import {EventEmitter} from './EventEmitter.js';
 import {ExecutionContext} from './ExecutionContext.js';
+import {IsolatedWorld} from './IsolatedWorld.js';
 import {CDPJSHandle} from './JSHandle.js';
+import {TimeoutSettings} from './TimeoutSettings.js';
 import {EvaluateFunc, HandleFor} from './types.js';
-import {debugError} from './util.js';
+import {debugError, withSourcePuppeteerURLIfNone} from './util.js';
 
 /**
  * @internal
@@ -38,7 +40,7 @@ export type ConsoleAPICalledCallback = (
  * @internal
  */
 export type ExceptionThrownCallback = (
-  details: Protocol.Runtime.ExceptionDetails
+  event: Protocol.Runtime.ExceptionThrownEvent
 ) => void;
 
 /**
@@ -68,8 +70,12 @@ export type ExceptionThrownCallback = (
  * @public
  */
 export class WebWorker extends EventEmitter {
-  #executionContext = createDeferredPromise<ExecutionContext>();
+  /**
+   * @internal
+   */
+  readonly timeoutSettings = new TimeoutSettings();
 
+  #world: IsolatedWorld;
   #client: CDPSession;
   #url: string;
 
@@ -85,24 +91,27 @@ export class WebWorker extends EventEmitter {
     super();
     this.#client = client;
     this.#url = url;
+    this.#world = new IsolatedWorld(this, new TimeoutSettings());
 
     this.#client.once('Runtime.executionContextCreated', async event => {
-      const context = new ExecutionContext(client, event.context);
-      this.#executionContext.resolve(context);
-    });
-    this.#client.on('Runtime.consoleAPICalled', async event => {
-      const context = await this.#executionContext;
-      return consoleAPICalled(
-        event.type,
-        event.args.map((object: Protocol.Runtime.RemoteObject) => {
-          return new CDPJSHandle(context, object);
-        }),
-        event.stackTrace
+      this.#world.setContext(
+        new ExecutionContext(client, event.context, this.#world)
       );
     });
-    this.#client.on('Runtime.exceptionThrown', exception => {
-      return exceptionThrown(exception.exceptionDetails);
+    this.#client.on('Runtime.consoleAPICalled', async event => {
+      try {
+        return consoleAPICalled(
+          event.type,
+          event.args.map((object: Protocol.Runtime.RemoteObject) => {
+            return new CDPJSHandle(this.#world, object);
+          }),
+          event.stackTrace
+        );
+      } catch (err) {
+        debugError(err);
+      }
     });
+    this.#client.on('Runtime.exceptionThrown', exceptionThrown);
 
     // This might fail if the target is closed before we receive all execution contexts.
     this.#client.send('Runtime.enable').catch(debugError);
@@ -111,8 +120,8 @@ export class WebWorker extends EventEmitter {
   /**
    * @internal
    */
-  async executionContext(): Promise<ExecutionContext> {
-    return this.#executionContext;
+  mainRealm(): Realm {
+    return this.#world;
   }
 
   /**
@@ -145,13 +154,16 @@ export class WebWorker extends EventEmitter {
    */
   async evaluate<
     Params extends unknown[],
-    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>
+    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>,
   >(
     pageFunction: Func | string,
     ...args: Params
   ): Promise<Awaited<ReturnType<Func>>> {
-    const context = await this.#executionContext;
-    return context.evaluate(pageFunction, ...args);
+    pageFunction = withSourcePuppeteerURLIfNone(
+      this.evaluate.name,
+      pageFunction
+    );
+    return await this.mainRealm().evaluate(pageFunction, ...args);
   }
 
   /**
@@ -168,12 +180,15 @@ export class WebWorker extends EventEmitter {
    */
   async evaluateHandle<
     Params extends unknown[],
-    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>
+    Func extends EvaluateFunc<Params> = EvaluateFunc<Params>,
   >(
     pageFunction: Func | string,
     ...args: Params
   ): Promise<HandleFor<Awaited<ReturnType<Func>>>> {
-    const context = await this.#executionContext;
-    return context.evaluateHandle(pageFunction, ...args);
+    pageFunction = withSourcePuppeteerURLIfNone(
+      this.evaluateHandle.name,
+      pageFunction
+    );
+    return await this.mainRealm().evaluateHandle(pageFunction, ...args);
   }
 }

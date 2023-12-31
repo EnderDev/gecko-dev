@@ -3,13 +3,19 @@
 
 "use strict";
 
-Cu.importGlobalProperties(["structuredClone"]);
-
 const CONFIG = [
   {
     // Engine initially default, but the defaults will be changed to engine-pref.
     webExtension: {
       id: "engine@search.mozilla.org",
+      name: "Test search engine",
+      search_url: "https://www.google.com/search",
+      params: [
+        {
+          name: "q",
+          value: "{searchTerms}",
+        },
+      ],
     },
     appliesTo: [
       {
@@ -26,6 +32,14 @@ const CONFIG = [
     // This will become defaults when region is changed to FR.
     webExtension: {
       id: "engine-pref@search.mozilla.org",
+      name: "engine-pref",
+      search_url: "https://www.google.com/search",
+      params: [
+        {
+          name: "q",
+          value: "{searchTerms}",
+        },
+      ],
     },
     appliesTo: [
       {
@@ -39,28 +53,15 @@ const CONFIG = [
   },
 ];
 
-const CONFIG_UPDATED = [
-  {
-    webExtension: {
-      id: "engine-pref@search.mozilla.org",
-    },
-    appliesTo: [
-      {
-        included: { everywhere: true },
-      },
-      {
-        included: { regions: ["FR"] },
-        default: "yes",
-      },
-    ],
-  },
-];
+const CONFIG_UPDATED = CONFIG.filter(r =>
+  r.webExtension.id.startsWith("engine-pref")
+);
 
 let stub;
 let settingsFilePath;
 let userSettings;
 
-add_task(async function setup() {
+add_setup(async function () {
   SearchSettings.SETTINGS_INVALIDATION_DELAY = 100;
   SearchTestUtils.useMockIdleService();
   await SearchTestUtils.useTestEngines("data", null, CONFIG);

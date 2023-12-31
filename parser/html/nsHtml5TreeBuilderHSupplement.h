@@ -23,7 +23,18 @@ int32_t mHandlesUsed;
 nsTArray<mozilla::UniquePtr<nsIContent*[]>> mOldHandles;
 nsHtml5TreeOpStage* mSpeculativeLoadStage;
 nsresult mBroken;
-bool mCurrentHtmlScriptIsAsyncOrDefer;
+// Controls whether the current HTML script goes through the more complex
+// path that accommodates the possibility of the script becoming a
+// parser-blocking script and the possibility of the script inserting
+// content into this parse using document.write (as it is observable from
+// the Web).
+//
+// Notably, in some cases scripts that do NOT NEED the more complex path
+// BREAK the parse if they incorrectly go onto the complex path as their
+// other handling doesn't necessarily take care of the responsibilities
+// associated with the more complex path. See comments in
+// `nsHtml5TreeBuilder::createElement` in the CppSupplement for details.
+bool mCurrentHtmlScriptCannotDocumentWriteOrBlock;
 bool mPreventScriptExecution;
 /**
  * Whether to actually generate speculative load operations that actually
@@ -100,13 +111,22 @@ nsHtml5TreeBuilder(nsAHtml5TreeOpSink* aOpSink, nsHtml5TreeOpStage* aStage,
 
 ~nsHtml5TreeBuilder();
 
+bool WantsLineAndColumn() {
+  // Perhaps just checking mBuilder would be sufficient.
+  // For createContextualFragment, we have non-null mBuilder and
+  // false for mPreventScriptExecution. However, do the line and
+  // column that get attached to script elements make any sense
+  // anyway in that case?
+  return !(mBuilder && mPreventScriptExecution);
+}
+
 void StartPlainTextViewSource(const nsAutoString& aTitle);
 
 void StartPlainText();
 
 void StartPlainTextBody();
 
-bool HasScript();
+bool HasScriptThatMayDocumentWriteOrBlock();
 
 void SetOpSink(nsAHtml5TreeOpSink* aOpSink) { mOpSink = aOpSink; }
 

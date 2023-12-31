@@ -9,26 +9,24 @@
 #include "nsIRunnable.h"
 #include "nsThreadUtils.h"
 #include <algorithm>
-#include <initializer_list>
 #include "GeckoProfiler.h"
-#include "mozilla/EventQueue.h"
 #include "mozilla/BackgroundHangMonitor.h"
+#include "mozilla/EventQueue.h"
 #include "mozilla/InputTaskManager.h"
 #include "mozilla/VsyncTaskManager.h"
 #include "mozilla/IOInterposer.h"
-#include "mozilla/StaticMutex.h"
+#include "mozilla/StaticPtr.h"
 #include "mozilla/SchedulerGroup.h"
 #include "mozilla/ScopeExit.h"
-#include "mozilla/Unused.h"
 #include "nsIThreadInternal.h"
-#include "nsQueryObject.h"
 #include "nsThread.h"
 #include "prenv.h"
 #include "prsystem.h"
 
 namespace mozilla {
 
-std::unique_ptr<TaskController> TaskController::sSingleton;
+StaticAutoPtr<TaskController> TaskController::sSingleton;
+
 thread_local size_t mThreadPoolIndex = -1;
 std::atomic<uint64_t> Task::sCurrentTaskSeqNo = 0;
 
@@ -190,14 +188,9 @@ Task* Task::GetHighestPriorityDependency() {
   return currentTask == this ? nullptr : currentTask;
 }
 
-TaskController* TaskController::Get() {
-  MOZ_ASSERT(sSingleton.get());
-  return sSingleton.get();
-}
-
 void TaskController::Initialize() {
   MOZ_ASSERT(!sSingleton);
-  sSingleton = std::make_unique<TaskController>();
+  sSingleton = new TaskController();
 }
 
 void ThreadFuncPoolThread(void* aIndex) {
@@ -273,16 +266,15 @@ void TaskController::Shutdown() {
   VsyncTaskManager::Cleanup();
   if (sSingleton) {
     sSingleton->ShutdownThreadPoolInternal();
-    sSingleton->ShutdownInternal();
+    sSingleton = nullptr;
   }
   MOZ_ASSERT(!sSingleton);
 }
 
 void TaskController::ShutdownThreadPoolInternal() {
   {
-    // Prevent racecondition on mShuttingDown and wait.
+    // Prevent race condition on mShuttingDown and wait.
     MutexAutoLock lock(mGraphMutex);
-
     mShuttingDown = true;
     mThreadPoolCV.NotifyAll();
   }
@@ -290,8 +282,6 @@ void TaskController::ShutdownThreadPoolInternal() {
     PR_JoinThread(thread.mThread);
   }
 }
-
-void TaskController::ShutdownInternal() { sSingleton = nullptr; }
 
 void TaskController::RunPoolThread() {
   IOInterposer::RegisterCurrentThread();
@@ -331,7 +321,8 @@ void TaskController::RunPoolThread() {
           task = nextTask;
         }
 
-        if (task->IsMainThreadOnly() || task->mInProgress) {
+        if (task->GetKind() == Task::Kind::MainThreadOnly ||
+            task->mInProgress) {
           continue;
         }
 
@@ -353,7 +344,7 @@ void TaskController::RunPoolThread() {
           MutexAutoUnlock unlock(mGraphMutex);
           lastTask = nullptr;
           AUTO_PROFILE_FOLLOWING_TASK(task);
-          taskCompleted = task->Run();
+          taskCompleted = task->Run() == Task::TaskResult::Complete;
           ranTask = true;
         }
 
@@ -416,7 +407,7 @@ void TaskController::RunPoolThread() {
 void TaskController::AddTask(already_AddRefed<Task>&& aTask) {
   RefPtr<Task> task(aTask);
 
-  if (!task->IsMainThreadOnly()) {
+  if (task->GetKind() == Task::Kind::OffMainThreadOnly) {
     MutexAutoLock lock(mPoolInitializationMutex);
     if (!mThreadPoolInitialized) {
       InitializeThreadPool();
@@ -453,10 +444,13 @@ void TaskController::AddTask(already_AddRefed<Task>&& aTask) {
 
   std::pair<std::set<RefPtr<Task>, Task::PriorityCompare>::iterator, bool>
       insertion;
-  if (task->IsMainThreadOnly()) {
-    insertion = mMainThreadTasks.insert(std::move(task));
-  } else {
-    insertion = mThreadableTasks.insert(std::move(task));
+  switch (task->GetKind()) {
+    case Task::Kind::MainThreadOnly:
+      insertion = mMainThreadTasks.insert(std::move(task));
+      break;
+    case Task::Kind::OffMainThreadOnly:
+      insertion = mThreadableTasks.insert(std::move(task));
+      break;
   }
   (*insertion.first)->mIterator = insertion.first;
   MOZ_ASSERT(insertion.second);
@@ -527,7 +521,7 @@ void TaskController::ProcessPendingMTTask(bool aMayWait) {
 void TaskController::ReprioritizeTask(Task* aTask, uint32_t aPriority) {
   MutexAutoLock lock(mGraphMutex);
   std::set<RefPtr<Task>, Task::PriorityCompare>* queue = &mMainThreadTasks;
-  if (!aTask->IsMainThreadOnly()) {
+  if (aTask->GetKind() == Task::Kind::OffMainThreadOnly) {
     queue = &mThreadableTasks;
   }
 
@@ -548,13 +542,13 @@ void TaskController::ReprioritizeTask(Task* aTask, uint32_t aPriority) {
 class RunnableTask : public Task {
  public:
   RunnableTask(already_AddRefed<nsIRunnable>&& aRunnable, int32_t aPriority,
-               bool aMainThread = true)
-      : Task(aMainThread, aPriority), mRunnable(aRunnable) {}
+               Kind aKind)
+      : Task(aKind, aPriority), mRunnable(aRunnable) {}
 
-  virtual bool Run() override {
+  virtual TaskResult Run() override {
     mRunnable->Run();
     mRunnable = nullptr;
-    return true;
+    return TaskResult::Complete;
   }
 
   void SetIdleDeadline(TimeStamp aDeadline) override {
@@ -587,7 +581,8 @@ class RunnableTask : public Task {
 void TaskController::DispatchRunnable(already_AddRefed<nsIRunnable>&& aRunnable,
                                       uint32_t aPriority,
                                       TaskManager* aManager) {
-  RefPtr<RunnableTask> task = new RunnableTask(std::move(aRunnable), aPriority);
+  RefPtr<RunnableTask> task = new RunnableTask(std::move(aRunnable), aPriority,
+                                               Task::Kind::MainThreadOnly);
 
   task->SetManager(aManager);
   TaskController::Get()->AddTask(task.forget());
@@ -812,7 +807,8 @@ bool TaskController::DoExecuteNextTaskOnlyMainThreadInternal(
 
       task = GetFinalDependency(task);
 
-      if (!task->IsMainThreadOnly() || task->mInProgress ||
+      if (task->GetKind() == Task::Kind::OffMainThreadOnly ||
+          task->mInProgress ||
           (task->mTaskManager && task->mTaskManager->mCurrentSuspended)) {
         continue;
       }
@@ -877,7 +873,7 @@ bool TaskController::DoExecuteNextTaskOnlyMainThreadInternal(
           AutoSetMainThreadRunnableName nameGuard(name);
 #endif
           AUTO_PROFILE_FOLLOWING_TASK(task);
-          result = task->Run();
+          result = task->Run() == Task::TaskResult::Complete;
         }
 
         // Task itself should keep manager alive.
@@ -958,7 +954,7 @@ void TaskController::MaybeInterruptTask(Task* aTask) {
     Task* firstDependency = aTask->mDependencies.begin()->get();
     if (aTask->GetPriority() <= firstDependency->GetPriority() &&
         !firstDependency->mCompleted &&
-        aTask->IsMainThreadOnly() == firstDependency->IsMainThreadOnly()) {
+        aTask->GetKind() == firstDependency->GetKind()) {
       // This task has the same or a higher priority as one of its dependencies,
       // never any need to interrupt.
       return;
@@ -972,7 +968,7 @@ void TaskController::MaybeInterruptTask(Task* aTask) {
     return;
   }
 
-  if (aTask->IsMainThreadOnly()) {
+  if (aTask->GetKind() == Task::Kind::MainThreadOnly) {
     mMayHaveMainThreadTask = true;
 
     EnsureMainThreadTasksScheduled();
@@ -983,7 +979,7 @@ void TaskController::MaybeInterruptTask(Task* aTask) {
 
     // We could go through the steps above here and interrupt an off main
     // thread task in case it has a lower priority.
-    if (!finalDependency->IsMainThreadOnly()) {
+    if (finalDependency->GetKind() == Task::Kind::OffMainThreadOnly) {
       return;
     }
 

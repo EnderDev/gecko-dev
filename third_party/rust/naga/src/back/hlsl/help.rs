@@ -133,7 +133,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
             }
             crate::ImageClass::Sampled { kind, multi } => {
                 let multi_str = if multi { "MS" } else { "" };
-                let scalar_kind_str = kind.to_hlsl_str(4)?;
+                let scalar_kind_str = crate::Scalar { kind, width: 4 }.to_hlsl_str()?;
                 write!(self.out, "{multi_str}<{scalar_kind_str}4>")?
             }
             crate::ImageClass::Storage { format, .. } => {
@@ -159,10 +159,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
     /// <https://docs.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-object-rwbyteaddressbuffer-getdimensions>
     pub(super) fn write_wrapped_array_length_function(
         &mut self,
-        module: &crate::Module,
         wal: WrappedArrayLength,
-        expr_handle: Handle<crate::Expression>,
-        func_ctx: &FunctionCtx,
     ) -> BackendResult {
         use crate::back::INDENT;
 
@@ -170,9 +167,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
         const RETURN_VARIABLE_NAME: &str = "ret";
 
         // Write function return type and name
-        let ret_ty = func_ctx.info[expr_handle].ty.inner_with(&module.types);
-        self.write_value_type(module, ret_ty)?;
-        write!(self.out, " ")?;
+        write!(self.out, "uint ")?;
         self.write_wrapped_array_length_function_name(wal)?;
 
         // Write function parameters
@@ -249,7 +244,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
         const MIP_LEVEL_PARAM: &str = "mip_level";
 
         // Write function return type and name
-        let ret_ty = func_ctx.info[expr_handle].ty.inner_with(&module.types);
+        let ret_ty = func_ctx.resolve_type(expr_handle, &module.types);
         self.write_value_type(module, ret_ty)?;
         write!(self.out, " ")?;
         self.write_wrapped_image_query_function_name(wiq)?;
@@ -347,12 +342,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
         module: &crate::Module,
         constructor: WrappedConstructor,
     ) -> BackendResult {
-        let name = crate::TypeInner::hlsl_type_id(
-            constructor.ty,
-            &module.types,
-            &module.constants,
-            &self.names,
-        )?;
+        let name = crate::TypeInner::hlsl_type_id(constructor.ty, module.to_ctx(), &self.names)?;
         write!(self.out, "Construct{name}")?;
         Ok(())
     }
@@ -411,8 +401,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
                 size: crate::ArraySize::Constant(size),
                 ..
             } => {
-                let count = module.constants[size].to_array_length().unwrap();
-                for i in 0..count as usize {
+                for i in 0..size.get() as usize {
                     write_arg(i, base)?;
                 }
             }
@@ -486,8 +475,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
                 write!(self.out, " {RETURN_VARIABLE_NAME}")?;
                 self.write_array_size(module, base, crate::ArraySize::Constant(size))?;
                 write!(self.out, " = {{ ")?;
-                let count = module.constants[size].to_array_length().unwrap();
-                for i in 0..count {
+                for i in 0..size.get() {
                     if i != 0 {
                         write!(self.out, ", ")?;
                     }
@@ -670,8 +658,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
         let vec_ty = match module.types[member.ty].inner {
             crate::TypeInner::Matrix { rows, width, .. } => crate::TypeInner::Vector {
                 size: rows,
-                kind: crate::ScalarKind::Float,
-                width,
+                scalar: crate::Scalar::float(width),
             },
             _ => unreachable!(),
         };
@@ -749,10 +736,9 @@ impl<'a, W: Write> super::Writer<'a, W> {
             _ => unreachable!(),
         };
         let scalar_ty = match module.types[member.ty].inner {
-            crate::TypeInner::Matrix { width, .. } => crate::TypeInner::Scalar {
-                kind: crate::ScalarKind::Float,
-                width,
-            },
+            crate::TypeInner::Matrix { width, .. } => {
+                crate::TypeInner::Scalar(crate::Scalar::float(width))
+            }
             _ => unreachable!(),
         };
         self.write_value_type(module, &scalar_ty)?;
@@ -793,14 +779,89 @@ impl<'a, W: Write> super::Writer<'a, W> {
         Ok(())
     }
 
-    /// Helper function that write wrapped function for `Expression::ImageQuery` and `Expression::ArrayLength`
-    ///
-    /// <https://docs.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-getdimensions>
+    /// Write functions to create special types.
+    pub(super) fn write_special_functions(&mut self, module: &crate::Module) -> BackendResult {
+        for (type_key, struct_ty) in module.special_types.predeclared_types.iter() {
+            match type_key {
+                &crate::PredeclaredType::ModfResult { size, width }
+                | &crate::PredeclaredType::FrexpResult { size, width } => {
+                    let arg_type_name_owner;
+                    let arg_type_name = if let Some(size) = size {
+                        arg_type_name_owner = format!(
+                            "{}{}",
+                            if width == 8 { "double" } else { "float" },
+                            size as u8
+                        );
+                        &arg_type_name_owner
+                    } else if width == 8 {
+                        "double"
+                    } else {
+                        "float"
+                    };
+
+                    let (defined_func_name, called_func_name, second_field_name, sign_multiplier) =
+                        if matches!(type_key, &crate::PredeclaredType::ModfResult { .. }) {
+                            (super::writer::MODF_FUNCTION, "modf", "whole", "")
+                        } else {
+                            (
+                                super::writer::FREXP_FUNCTION,
+                                "frexp",
+                                "exp_",
+                                "sign(arg) * ",
+                            )
+                        };
+
+                    let struct_name = &self.names[&NameKey::Type(*struct_ty)];
+
+                    writeln!(
+                        self.out,
+                        "{struct_name} {defined_func_name}({arg_type_name} arg) {{
+    {arg_type_name} other;
+    {struct_name} result;
+    result.fract = {sign_multiplier}{called_func_name}(arg, other);
+    result.{second_field_name} = other;
+    return result;
+}}"
+                    )?;
+                    writeln!(self.out)?;
+                }
+                &crate::PredeclaredType::AtomicCompareExchangeWeakResult { .. } => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Helper function that writes compose wrapped functions
+    pub(super) fn write_wrapped_compose_functions(
+        &mut self,
+        module: &crate::Module,
+        expressions: &crate::Arena<crate::Expression>,
+    ) -> BackendResult {
+        for (handle, _) in expressions.iter() {
+            if let crate::Expression::Compose { ty, .. } = expressions[handle] {
+                match module.types[ty].inner {
+                    crate::TypeInner::Struct { .. } | crate::TypeInner::Array { .. } => {
+                        let constructor = WrappedConstructor { ty };
+                        if self.wrapped.constructors.insert(constructor) {
+                            self.write_wrapped_constructor_function(module, constructor)?;
+                        }
+                    }
+                    _ => {}
+                };
+            }
+        }
+        Ok(())
+    }
+
+    /// Helper function that writes various wrapped functions
     pub(super) fn write_wrapped_functions(
         &mut self,
         module: &crate::Module,
         func_ctx: &FunctionCtx,
     ) -> BackendResult {
+        self.write_wrapped_compose_functions(module, func_ctx.expressions)?;
+
         for (handle, _) in func_ctx.expressions.iter() {
             match func_ctx.expressions[handle] {
                 crate::Expression::ArrayLength(expr) => {
@@ -823,13 +884,12 @@ impl<'a, W: Write> super::Writer<'a, W> {
                         writable: storage_access.contains(crate::StorageAccess::STORE),
                     };
 
-                    if !self.wrapped.array_lengths.contains(&wal) {
-                        self.write_wrapped_array_length_function(module, wal, handle, func_ctx)?;
-                        self.wrapped.array_lengths.insert(wal);
+                    if self.wrapped.array_lengths.insert(wal) {
+                        self.write_wrapped_array_length_function(wal)?;
                     }
                 }
                 crate::Expression::ImageQuery { image, query } => {
-                    let wiq = match *func_ctx.info[image].ty.inner_with(&module.types) {
+                    let wiq = match *func_ctx.resolve_type(image, &module.types) {
                         crate::TypeInner::Image {
                             dim,
                             arrayed,
@@ -843,17 +903,15 @@ impl<'a, W: Write> super::Writer<'a, W> {
                         _ => unreachable!("we only query images"),
                     };
 
-                    if !self.wrapped.image_queries.contains(&wiq) {
+                    if self.wrapped.image_queries.insert(wiq) {
                         self.write_wrapped_image_query_function(module, wiq, handle, func_ctx)?;
-                        self.wrapped.image_queries.insert(wiq);
                     }
                 }
                 // Write `WrappedConstructor` for structs that are loaded from `AddressSpace::Storage`
                 // since they will later be used by the fn `write_storage_load`
                 crate::Expression::Load { pointer } => {
-                    let pointer_space = func_ctx.info[pointer]
-                        .ty
-                        .inner_with(&module.types)
+                    let pointer_space = func_ctx
+                        .resolve_type(pointer, &module.types)
                         .pointer_space();
 
                     if let Some(crate::AddressSpace::Storage { .. }) = pointer_space {
@@ -874,37 +932,24 @@ impl<'a, W: Write> super::Writer<'a, W> {
                                 }
 
                                 let constructor = WrappedConstructor { ty };
-                                if !writer.wrapped.constructors.contains(&constructor) {
+                                if writer.wrapped.constructors.insert(constructor) {
                                     writer
                                         .write_wrapped_constructor_function(module, constructor)?;
-                                    writer.wrapped.constructors.insert(constructor);
                                 }
                             }
                             crate::TypeInner::Array { base, .. } => {
                                 write_wrapped_constructor(writer, base, module)?;
+
                                 let constructor = WrappedConstructor { ty };
-                                if !writer.wrapped.constructors.contains(&constructor) {
+                                if writer.wrapped.constructors.insert(constructor) {
                                     writer
                                         .write_wrapped_constructor_function(module, constructor)?;
-                                    writer.wrapped.constructors.insert(constructor);
                                 }
                             }
                             _ => {}
                         };
 
                         Ok(())
-                    }
-                }
-                crate::Expression::Compose { ty, components: _ } => {
-                    let constructor = match module.types[ty].inner {
-                        crate::TypeInner::Struct { .. } | crate::TypeInner::Array { .. } => {
-                            WrappedConstructor { ty }
-                        }
-                        _ => continue,
-                    };
-                    if !self.wrapped.constructors.contains(&constructor) {
-                        self.write_wrapped_constructor_function(module, constructor)?;
-                        self.wrapped.constructors.insert(constructor);
                     }
                 }
                 // We treat matrices of the form `matCx2` as a sequence of C `vec2`s
@@ -932,7 +977,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
                                 let ty = base_ty_handle.unwrap();
                                 let access = WrappedStructMatrixAccess { ty, index };
 
-                                if !self.wrapped.struct_matrix_access.contains(&access) {
+                                if self.wrapped.struct_matrix_access.insert(access) {
                                     self.write_wrapped_struct_matrix_get_function(module, access)?;
                                     self.write_wrapped_struct_matrix_set_function(module, access)?;
                                     self.write_wrapped_struct_matrix_set_vec_function(
@@ -941,7 +986,6 @@ impl<'a, W: Write> super::Writer<'a, W> {
                                     self.write_wrapped_struct_matrix_set_scalar_function(
                                         module, access,
                                     )?;
-                                    self.wrapped.struct_matrix_access.insert(access);
                                 }
                             }
                             _ => {}
@@ -950,33 +994,6 @@ impl<'a, W: Write> super::Writer<'a, W> {
                 }
                 _ => {}
             };
-        }
-
-        Ok(())
-    }
-
-    pub(super) fn write_wrapped_constructor_function_for_constant(
-        &mut self,
-        module: &crate::Module,
-        constant: &crate::Constant,
-    ) -> BackendResult {
-        if let crate::ConstantInner::Composite { ty, ref components } = constant.inner {
-            match module.types[ty].inner {
-                crate::TypeInner::Struct { .. } | crate::TypeInner::Array { .. } => {
-                    let constructor = WrappedConstructor { ty };
-                    if !self.wrapped.constructors.contains(&constructor) {
-                        self.write_wrapped_constructor_function(module, constructor)?;
-                        self.wrapped.constructors.insert(constructor);
-                    }
-                }
-                _ => {}
-            }
-            for constant in components {
-                self.write_wrapped_constructor_function_for_constant(
-                    module,
-                    &module.constants[*constant],
-                )?;
-            }
         }
 
         Ok(())
@@ -996,7 +1013,7 @@ impl<'a, W: Write> super::Writer<'a, W> {
         if extra == 0 {
             self.write_expr(module, coordinate, func_ctx)?;
         } else {
-            let num_coords = match *func_ctx.info[coordinate].ty.inner_with(&module.types) {
+            let num_coords = match *func_ctx.resolve_type(coordinate, &module.types) {
                 crate::TypeInner::Scalar { .. } => 1,
                 crate::TypeInner::Vector { size, .. } => size as usize,
                 _ => unreachable!(),
@@ -1092,9 +1109,8 @@ impl<'a, W: Write> super::Writer<'a, W> {
                 }) = super::writer::get_inner_matrix_data(module, global.ty)
                 {
                     let entry = WrappedMatCx2 { columns };
-                    if !self.wrapped.mat_cx2s.contains(&entry) {
+                    if self.wrapped.mat_cx2s.insert(entry) {
                         self.write_mat_cx2_typedef_and_functions(entry)?;
-                        self.wrapped.mat_cx2s.insert(entry);
                     }
                 }
             }
@@ -1111,9 +1127,8 @@ impl<'a, W: Write> super::Writer<'a, W> {
                         }) = super::writer::get_inner_matrix_data(module, member.ty)
                         {
                             let entry = WrappedMatCx2 { columns };
-                            if !self.wrapped.mat_cx2s.contains(&entry) {
+                            if self.wrapped.mat_cx2s.insert(entry) {
                                 self.write_mat_cx2_typedef_and_functions(entry)?;
-                                self.wrapped.mat_cx2s.insert(entry);
                             }
                         }
                     }

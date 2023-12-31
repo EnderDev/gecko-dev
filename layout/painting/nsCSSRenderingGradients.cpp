@@ -37,6 +37,8 @@
 #include "mozilla/webrender/WebRenderAPI.h"
 #include "Units.h"
 
+#include "mozilla/StaticPrefs_layout.h"
+
 using namespace mozilla;
 using namespace mozilla::gfx;
 
@@ -408,7 +410,7 @@ static void ResolveMidpoints(nsTArray<ColorStop>& stops) {
       const float alpha =
           srgb1.alpha + multiplier * (srgb2.alpha - srgb1.alpha);
 
-      newStop.mColor = StyleAbsoluteColor::Srgb(red, green, blue, alpha);
+      newStop.mColor = StyleAbsoluteColor::SrgbLegacy(red, green, blue, alpha);
     }
 
     stops.ReplaceElementsAt(x, 1, newStops, 9);
@@ -552,7 +554,7 @@ static StyleAbsoluteColor GetSpecifiedColor(
     const StyleGenericGradientItem<StyleColor, T>& aItem,
     const ComputedStyle& aStyle) {
   if (aItem.IsInterpolationHint()) {
-    return StyleAbsoluteColor::Transparent();
+    return StyleAbsoluteColor::TRANSPARENT_BLACK;
   }
   const StyleColor& c = aItem.IsSimpleColorStop()
                             ? aItem.AsSimpleColorStop()
@@ -769,7 +771,7 @@ void nsCSSGradientRenderer::Paint(gfxContext& aContext, const nsRect& aDest,
       mGradient->IsLinear() &&
       (mLineStart.x == mLineEnd.x) != (mLineStart.y == mLineEnd.y) &&
       aRepeatSize.width == aDest.width && aRepeatSize.height == aDest.height &&
-      !mGradient->AsLinear().repeating && !aSrc.IsEmpty() && !cellContainsFill;
+      !(mGradient->Repeating()) && !aSrc.IsEmpty() && !cellContainsFill;
 
   gfxMatrix matrix;
   if (forceRepeatToCoverTiles) {
@@ -819,7 +821,7 @@ void nsCSSGradientRenderer::Paint(gfxContext& aContext, const nsRect& aDest,
   // Eliminate negative-position stops if the gradient is radial.
   double firstStop = mStops[0].mPosition;
   if (mGradient->IsRadial() && firstStop < 0.0) {
-    if (mGradient->AsRadial().repeating) {
+    if (mGradient->AsRadial().flags & StyleGradientFlags::REPEATING) {
       // Choose an instance of the repeated pattern that gives us all positive
       // stop-offsets.
       double lastStop = mStops[mStops.Length() - 1].mPosition;
@@ -872,7 +874,8 @@ void nsCSSGradientRenderer::Paint(gfxContext& aContext, const nsRect& aDest,
     MOZ_ASSERT(firstStop >= 0.0, "Failed to fix stop offsets");
   }
 
-  if (mGradient->IsRadial() && !mGradient->AsRadial().repeating) {
+  if (mGradient->IsRadial() &&
+      !(mGradient->AsRadial().flags & StyleGradientFlags::REPEATING)) {
     // Direct2D can only handle a particular class of radial gradients because
     // of the way the it specifies gradients. Setting firstStop to 0, when we
     // can, will help us stay on the fast path. Currently we don't do this
@@ -1084,7 +1087,7 @@ void nsCSSGradientRenderer::Paint(gfxContext& aContext, const nsRect& aDest,
 
       gfxRect dirtyFillRect = fillRect.Intersect(dirtyAreaToFill);
       gfxRect fillRectRelativeToTile = dirtyFillRect - tileRect.TopLeft();
-      auto edgeColor = StyleAbsoluteColor::Transparent();
+      auto edgeColor = StyleAbsoluteColor::TRANSPARENT_BLACK;
       if (mGradient->IsLinear() && !isRepeat &&
           RectIsBeyondLinearGradientEdge(fillRectRelativeToTile, matrix, mStops,
                                          gradientStart, gradientEnd,
@@ -1194,11 +1197,75 @@ void nsCSSGradientRenderer::BuildWebRenderParameters(
   aMode =
       mGradient->Repeating() ? wr::ExtendMode::Repeat : wr::ExtendMode::Clamp;
 
-  aStops.SetLength(mStops.Length());
-  for (uint32_t i = 0; i < mStops.Length(); i++) {
-    aStops[i].color = wr::ToColorF(ToDeviceColor(mStops[i].mColor));
-    aStops[i].color.a *= aOpacity;
-    aStops[i].offset = mStops[i].mPosition;
+  // If the interpolation space is not sRGB, or if color management is active,
+  // we need to add additional stops so that the sRGB interpolation in WebRender
+  // still closely approximates the correct curves.  We prefer avoiding this if
+  // the gradient is simple because WebRender has fast rendering of linear
+  // gradients with 2 stops (which represent >99% of all gradients on the web).
+  //
+  // WebRender doesn't have easy access to StyleAbsoluteColor and CMS display
+  // color correction, so we just expand the gradient stop table significantly
+  // so that gamma and hue interpolation errors become imperceptible.
+  //
+  // This always turns into 128 pairs of stops inside WebRender as an
+  // implementation detail, so the number of stops we generate here should have
+  // very little impact on performance as the texture upload is always the same,
+  // except for the special linear gradient 2-stop case, and it is gpucache so
+  // if it does not change it is not re-uploaded.
+  //
+  // Color management bugs that this addresses:
+  // * https://bugzilla.mozilla.org/show_bug.cgi?id=939387
+  // * https://bugzilla.mozilla.org/show_bug.cgi?id=1248178
+  StyleColorInterpolationMethod styleColorInterpolationMethod =
+      mGradient->ColorInterpolationMethod();
+  if (mStops.Length() >= 2 &&
+      (styleColorInterpolationMethod.space != StyleColorSpace::Srgb ||
+       gfxPlatform::GetCMSMode() == CMSMode::All)) {
+    aStops.SetLengthAndRetainStorage(0);
+    // this could be made tunable, but at 1.0/128 the error is largely
+    // irrelevant, as WebRender re-encodes it to 128 pairs of stops.
+    //
+    // note that we don't attempt to place the positions of these stops
+    // precisely at intervals, we just add this many extra stops across the
+    // range where it is convenient.
+    const int fullRangeExtraStops = 128;
+    // we always emit at least two stops (start and end) for each input stop,
+    // which avoids ambiguity with incomplete oklch/lch/hsv/hsb color stops for
+    // the last stop pair, where the last color stop can't be interpreted on its
+    // own because it actually depends on the previous stop.
+    aStops.SetLength(mStops.Length() * 2 + fullRangeExtraStops);
+    uint32_t outputStop = 0;
+    for (uint32_t i = 0; i < mStops.Length() - 1; i++) {
+      auto& start = mStops[i];
+      auto& end = i + 1 < mStops.Length() ? mStops[i + 1] : mStops[i];
+      StyleAbsoluteColor startColor = start.mColor;
+      StyleAbsoluteColor endColor = end.mColor;
+      int extraStops = (int)(floor(end.mPosition * fullRangeExtraStops) -
+                             floor(start.mPosition * fullRangeExtraStops));
+      extraStops = clamped(extraStops, 1, fullRangeExtraStops);
+      float step = 1.0f / (float)extraStops;
+      for (int extraStop = 0;
+           extraStop <= extraStops && outputStop < aStops.Capacity();
+           extraStop++) {
+        auto lerp = (float)extraStop * step;
+        auto position =
+            start.mPosition + lerp * (end.mPosition - start.mPosition);
+        StyleAbsoluteColor color = Servo_InterpolateColor(
+            styleColorInterpolationMethod, &endColor, &startColor, lerp);
+        aStops[outputStop].color = wr::ToColorF(ToDeviceColor(color));
+        aStops[outputStop].color.a *= aOpacity;
+        aStops[outputStop].offset = (float)position;
+        outputStop++;
+      }
+    }
+    aStops.SetLength(outputStop);
+  } else {
+    aStops.SetLength(mStops.Length());
+    for (uint32_t i = 0; i < mStops.Length(); i++) {
+      aStops[i].color = wr::ToColorF(ToDeviceColor(mStops[i].mColor));
+      aStops[i].color.a *= aOpacity;
+      aStops[i].offset = (float)mStops[i].mPosition;
+    }
   }
 
   aLineStart = LayoutDevicePoint(mLineStart.x, mLineStart.y);

@@ -92,8 +92,6 @@ RTCPSender::FeedbackState::FeedbackState()
     : packets_sent(0),
       media_bytes_sent(0),
       send_bitrate(0),
-      last_rr_ntp_secs(0),
-      last_rr_ntp_frac(0),
       remote_sr(0),
       receiver(nullptr) {}
 
@@ -244,7 +242,7 @@ int32_t RTCPSender::SendLossNotification(const FeedbackState& feedback_state,
                                          bool buffering_allowed) {
   int32_t error_code = -1;
   auto callback = [&](rtc::ArrayView<const uint8_t> packet) {
-    transport_->SendRtcp(packet.data(), packet.size());
+    transport_->SendRtcp(packet);
     error_code = 0;
     if (event_log_) {
       event_log_->Log(std::make_unique<RtcEventRtcpPacketOutgoing>(packet));
@@ -284,7 +282,7 @@ void RTCPSender::SetRemb(int64_t bitrate_bps, std::vector<uint32_t> ssrcs) {
   RTC_CHECK_GE(bitrate_bps, 0);
   MutexLock lock(&mutex_rtcp_sender_);
   if (method_ == RtcpMode::kOff) {
-    RTC_LOG(LS_WARNING) << "Can't send rtcp if it is disabled.";
+    RTC_LOG(LS_WARNING) << "Can't send RTCP if it is disabled.";
     return;
   }
   remb_bitrate_ = bitrate_bps;
@@ -661,7 +659,7 @@ int32_t RTCPSender::SendRTCP(const FeedbackState& feedback_state,
                              const uint16_t* nack_list) {
   int32_t error_code = -1;
   auto callback = [&](rtc::ArrayView<const uint8_t> packet) {
-    if (transport_->SendRtcp(packet.data(), packet.size())) {
+    if (transport_->SendRtcp(packet)) {
       error_code = 0;
       if (event_log_) {
         event_log_->Log(std::make_unique<RtcEventRtcpPacketOutgoing>(packet));
@@ -690,7 +688,7 @@ absl::optional<int32_t> RTCPSender::ComputeCompoundRTCPPacket(
     const uint16_t* nack_list,
     PacketSender& sender) {
   if (method_ == RtcpMode::kOff) {
-    RTC_LOG(LS_WARNING) << "Can't send rtcp if it is disabled.";
+    RTC_LOG(LS_WARNING) << "Can't send RTCP if it is disabled.";
     return -1;
   }
   // Add the flag as volatile. Non volatile entries will not be overwritten.
@@ -818,24 +816,14 @@ std::vector<rtcp::ReportBlock> RTCPSender::CreateReportBlocks(
   if (!receive_statistics_)
     return result;
 
-  // TODO(danilchap): Support sending more than `RTCP_MAX_REPORT_BLOCKS` per
-  // compound rtcp packet when single rtcp module is used for multiple media
-  // streams.
   result = receive_statistics_->RtcpReportBlocks(RTCP_MAX_REPORT_BLOCKS);
 
-  if (!result.empty() && ((feedback_state.last_rr_ntp_secs != 0) ||
-                          (feedback_state.last_rr_ntp_frac != 0))) {
+  if (!result.empty() && feedback_state.last_rr.Valid()) {
     // Get our NTP as late as possible to avoid a race.
     uint32_t now = CompactNtp(clock_->CurrentNtpTime());
-
-    uint32_t receive_time = feedback_state.last_rr_ntp_secs & 0x0000FFFF;
-    receive_time <<= 16;
-    receive_time += (feedback_state.last_rr_ntp_frac & 0xffff0000) >> 16;
-
+    uint32_t receive_time = CompactNtp(feedback_state.last_rr);
     uint32_t delay_since_last_sr = now - receive_time;
-    // TODO(danilchap): Instead of setting same value on all report blocks,
-    // set only when media_ssrc match sender ssrc of the sender report
-    // remote times were taken from.
+
     for (auto& report_block : result) {
       report_block.SetLastSr(feedback_state.remote_sr);
       report_block.SetDelayLastSr(delay_since_last_sr);
@@ -889,7 +877,7 @@ void RTCPSender::SetVideoBitrateAllocation(
     const VideoBitrateAllocation& bitrate) {
   MutexLock lock(&mutex_rtcp_sender_);
   if (method_ == RtcpMode::kOff) {
-    RTC_LOG(LS_WARNING) << "Can't send rtcp if it is disabled.";
+    RTC_LOG(LS_WARNING) << "Can't send RTCP if it is disabled.";
     return;
   }
   // Check if this allocation is first ever, or has a different set of
@@ -941,7 +929,7 @@ void RTCPSender::SendCombinedRtcpPacket(
   {
     MutexLock lock(&mutex_rtcp_sender_);
     if (method_ == RtcpMode::kOff) {
-      RTC_LOG(LS_WARNING) << "Can't send rtcp if it is disabled.";
+      RTC_LOG(LS_WARNING) << "Can't send RTCP if it is disabled.";
       return;
     }
 
@@ -950,7 +938,7 @@ void RTCPSender::SendCombinedRtcpPacket(
   }
   RTC_DCHECK_LE(max_packet_size, IP_PACKET_SIZE);
   auto callback = [&](rtc::ArrayView<const uint8_t> packet) {
-    if (transport_->SendRtcp(packet.data(), packet.size())) {
+    if (transport_->SendRtcp(packet)) {
       if (event_log_)
         event_log_->Log(std::make_unique<RtcEventRtcpPacketOutgoing>(packet));
     }

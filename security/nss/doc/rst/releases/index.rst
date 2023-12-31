@@ -8,6 +8,10 @@ Releases
    :glob:
    :hidden:
 
+   nss_3_95.rst
+   nss_3_94.rst
+   nss_3_93.rst
+   nss_3_92.rst
    nss_3_91_0.rst
    nss_3_90_0.rst
    nss_3_89_1.rst
@@ -55,27 +59,30 @@ Releases
 
 .. note::
 
-   **NSS 3.91.0** is the latest version of NSS.
-   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_91_0_release_notes`
+   **NSS 3.95.0** is the latest version of NSS.
+   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_95_0_release_notes`
 
-   **NSS 3.90.0 (ESR)** is the latest version of NSS.
-   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_90_0_release_notes`
+   **NSS 3.90.1 (ESR)** is the latest version of NSS.
+   Complete release notes are available here: :ref:`mozilla_projects_nss_nss_3_90_1_release_notes`
 
 .. container::
 
-   Changes in 3.91 included in this release:
+   Changes in 3.95 included in this release:
 
- - Bug 1837431 - Implementation of the HW support check for ADX instruction
- - Bug 1836925 - Removing the support of Curve25519
- - Bug 1839795 - Fix comment about the addition of ticketSupportsEarlyData.
- - Bug 1839327 - Adding args to enable-legacy-db build
- - Bug 1835357 dbtests.sh failure in "certutil dump keys with explicit default trust flags"
- - Bug 1837617: Initialize flags in slot structures
- - Bug 1835425: Improve the length check of RSA input to avoid heap overflow
- - Bug 1829112 - Followup Fixes
- - Bug 1784253: avoid processing unexpected inputs by checking for m_exptmod base sign
- - Bug 1826652: add a limit check on order_k to avoid infinite loop
- - Bug 1834851 - Update HACL* to commit 5f6051d2.
- - Bug 1753026 - add SHA3 to cryptohi and softoken.
- - Bug 1753026: HACL SHA3
- - Bug 1836781 - Disabling ASM C25519 for A but X86_64
+  - Bug 1842932 - Bump builtins version number.
+  - Bug 1851044: Remove Email trust bit from Autoridad de Certificacion Firmaprofesional CIF A62634068 root cert.
+  - Bug 1855318: Remove 4 DigiCert (Symantec/Verisign) Root Certificates from NSS.
+  - Bug 1851049: Remove 3 TrustCor Root Certificates from NSS.
+  - Bug 1850982 - Remove Camerfirma root certificates from NSS.
+  - Bug 1842935 - Remove old Autoridad de Certificacion Firmaprofesional Certificate.
+  - Bug 1860670 - Add four Commscope root certificates to NSS.
+  - Bug 1850598 - Add TrustAsia Global Root CA G3 and G4 root certificates.
+  - Bug 1863605 - Include P-384 and P-521 Scalar Validation from HACL*
+  - Bug 1861728 - Include P-256 Scalar Validation from HACL*.
+  - Bug 1861265 After the HACL 256 ECC patch, NSS incorrectly encodes 256 ECC without DER wrapping at the softoken level
+  - Bug 1837987:Add means to provide library parameters to C_Initialize
+  - Bug 1573097 - clang format
+  - Bug 1854795 - add OSXSAVE and XCR0 tests to AVX2 detection.
+  - Bug 1858241 - Typo in ssl3_AppendHandshakeNumber
+  - Bug 1858241 - Introducing input check of ssl3_AppendHandshakeNumber
+  - Bug 1573097 - Fix Invalid casts in instance.c

@@ -11,11 +11,9 @@
   preview/ion.ftl                                  (../components/ion/content/ion.ftl)
   preview/protections.ftl                          (../components/protections/content/protections.ftl)
   preview/interventions.ftl                        (../components/urlbar/content/interventions.ftl)
-  preview/firefoxSuggest.ftl                       (../components/urlbar/content/firefoxSuggest.ftl)
-#ifdef NIGHTLY_BUILD
+  preview/enUS-searchFeatures.ftl                  (../components/urlbar/content/enUS-searchFeatures.ftl)
   preview/shopping.ftl                             (../components/shopping/content/shopping.ftl)
-#endif
-  preview/stripOnShare.ftl                         (../components/urlbar/content/stripOnShare.ftl)
+  preview/onboarding.ftl                           (../components/newtab/aboutwelcome/content/onboarding.ftl)
   browser                                          (%browser/**/*.ftl)
 
 @AB_CD@.jar:

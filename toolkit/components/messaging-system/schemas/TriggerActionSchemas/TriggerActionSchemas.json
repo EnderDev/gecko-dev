@@ -201,22 +201,23 @@
             "id": {
               "type": "string",
               "enum": ["featureCalloutCheck"]
-            },
-            "context": {
-              "type": "object",
-              "properties": {
-                "source": {
-                  "type": "string",
-                  "enum": ["firefoxview"],
-                  "description": "Which about page is the source of the trigger"
-                }
-              },
-              "additionalProperties": false
             }
           },
           "additionalProperties": false,
           "required": ["id"],
-          "description": "Happens when navigating to about:firefoxview or other about pages with Feature Callout tours enabled"
+          "description": "Used to display Feature Callouts in Firefox View. Can only be used for Feature Callouts."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "enum": ["pdfJsFeatureCalloutCheck"]
+            }
+          },
+          "additionalProperties": false,
+          "required": ["id"],
+          "description": "Used to display Feature Callouts on PDF.js pages. Can only be used for Feature Callouts."
         },
         {
           "type": "object",
@@ -259,12 +260,36 @@
           "properties": {
             "id": {
               "type": "string",
+              "enum": ["cookieBannerHandled"]
+            }
+          },
+          "additionalProperties": false,
+          "required": ["id"],
+          "description": "Happens when Firefox automatically engages with a cookie consent banner"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
               "enum": ["messagesLoaded"]
             }
           },
           "additionalProperties": false,
           "required": ["id"],
           "description": "Happens as soon as a message is loaded"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "enum": ["pageActionInUrlbar"]
+            }
+          },
+          "additionalProperties": false,
+          "required": ["id"],
+          "description": "Happens when a page action appears in the urlbar. The specific page action(s) to watch can be specified by id in the targeting expression."
         }
       ]
     }

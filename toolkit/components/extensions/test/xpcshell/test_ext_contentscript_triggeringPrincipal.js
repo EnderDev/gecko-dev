@@ -21,6 +21,9 @@ Services.prefs.setIntPref(
   4096
 );
 
+// Do not limit the number of CSP reports.
+Services.prefs.setIntPref("security.csp.reporting.limit.count", 0);
+
 // Do not trunacate the blocked-uri in CSP reports for frame navigations.
 Services.prefs.setBoolPref(
   "security.csp.truncate_blocked_uri_for_frame_navigations",
@@ -525,7 +528,6 @@ function testInlineCSS() {
     // Test creating <style> element from the extension side and then appending
     // to it using insertAdjacentHTML, with the same rules as above.
     testModifyAfterInject("insertAdjacentHTML", (style, css) => {
-      // eslint-disable-next-line no-unsanitized/method
       style.insertAdjacentHTML("beforeend", css);
     });
 

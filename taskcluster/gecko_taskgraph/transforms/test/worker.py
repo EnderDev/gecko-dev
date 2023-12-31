@@ -28,6 +28,16 @@ WINDOWS_WORKER_TYPES = {
         "virtual-with-gpu": "t-win10-64-gpu-s",
         "hardware": "t-win10-64-ref-hw",
     },
+    "windows11-64-2009-hw-ref-shippable": {
+        "virtual": "win11-64-2009-hw-ref",
+        "virtual-with-gpu": "win11-64-2009-hw-ref",
+        "hardware": "win11-64-2009-hw-ref",
+    },
+    "windows11-64-2009-hw-ref": {
+        "virtual": "win11-64-2009-hw-ref",
+        "virtual-with-gpu": "win11-64-2009-hw-ref",
+        "hardware": "win11-64-2009-hw-ref",
+    },
     "windows10-64-2009-qr": {
         "virtual": "win10-64-2009",
         "virtual-with-gpu": "win10-64-2009-gpu",
@@ -94,6 +104,7 @@ WINDOWS_WORKER_TYPES = {
 MACOSX_WORKER_TYPES = {
     "macosx1015-64": "t-osx-1015-r8",
     "macosx1100-64": "t-osx-1100-m1",
+    "macosx1300-64": "t-osx-1300-m2",
 }
 
 transforms = TransformSequence()
@@ -114,6 +125,8 @@ def set_worker_type(config, tasks):
             task["worker-type"] = MACOSX_WORKER_TYPES["macosx1015-64"]
         elif test_platform.startswith("macosx1100-64"):
             task["worker-type"] = MACOSX_WORKER_TYPES["macosx1100-64"]
+        elif test_platform.startswith("macosx1300-64"):
+            task["worker-type"] = MACOSX_WORKER_TYPES["macosx1300-64"]
         elif test_platform.startswith("win"):
             # figure out what platform the job needs to run on
             if task["virtualization"] == "hardware":
@@ -121,6 +134,10 @@ def set_worker_type(config, tasks):
                 if test_platform.startswith("windows10-64-ref-hw-2017"):
                     win_worker_type_platform = WINDOWS_WORKER_TYPES[
                         "windows10-64-ref-hw-2017"
+                    ]
+                elif test_platform.startswith("windows11-64-2009-hw-ref"):
+                    win_worker_type_platform = WINDOWS_WORKER_TYPES[
+                        "windows11-64-2009-hw-ref"
                     ]
                 else:
                     win_worker_type_platform = WINDOWS_WORKER_TYPES["windows10-64"]

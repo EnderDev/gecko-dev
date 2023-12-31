@@ -64,7 +64,6 @@ user_pref("services.settings.server", "data:,#remote-settings-dummy/v1");
 user_pref("media.autoplay.default", 0); // 0=Allowed, 1=Blocked, 2=Prompt
 user_pref("media.autoplay.blocking_policy", 0);
 user_pref("media.autoplay.ask-permission", false);
-user_pref("media.autoplay.block-webaudio", false);
 user_pref("media.allowed-to-play.enabled", true);
 // Ensure media can always play without delay
 user_pref("media.block-autoplay-until-in-foreground", false);
@@ -77,6 +76,8 @@ user_pref("browser.region.network.url", "");
 user_pref("browser.tabs.unloadOnLowMemory", false);
 // Don't pull Top Sites content from the network
 user_pref("browser.topsites.contile.enabled", false);
+// Don't pull sponsored Top Sites content from the network
+user_pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);
 // Default Glean to "record but don't report" mode. Docs:
 // https://firefox-source-docs.mozilla.org/toolkit/components/glean/dev/preferences.html
 user_pref("telemetry.fog.test.localhost_port", -1);

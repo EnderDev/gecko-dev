@@ -48,6 +48,7 @@
 #include "RTCStatsReport.h"
 
 #include "mozilla/net/StunAddrsRequestChild.h"
+#include "MediaEventSource.h"
 #include "MediaTransportHandler.h"
 #include "nsIHttpChannelInternal.h"
 #include "RTCDtlsTransport.h"
@@ -495,8 +496,9 @@ class PeerConnectionImpl final
 
   void OnDtlsStateChange(const std::string& aTransportId,
                          TransportLayer::State aState);
-  void UpdateConnectionState();
   dom::RTCPeerConnectionState GetNewConnectionState() const;
+  // Returns whether we need to fire a state change event
+  bool UpdateConnectionState();
 
   // initialize telemetry for when calls start
   void StartCallTelem();
@@ -581,6 +583,8 @@ class PeerConnectionImpl final
   static void SetupPreferredRtpExtensions(
       std::vector<RtpExtensionHeader>& aPreferredheaders);
 
+  void BreakCycles();
+
  private:
   virtual ~PeerConnectionImpl();
   PeerConnectionImpl(const PeerConnectionImpl& rhs);
@@ -589,7 +593,7 @@ class PeerConnectionImpl final
   RefPtr<dom::RTCStatsPromise> GetDataChannelStats(
       const RefPtr<DataChannelConnection>& aDataChannelConnection,
       const DOMHighResTimeStamp aTimestamp);
-  nsresult CalculateFingerprint(const std::string& algorithm,
+  nsresult CalculateFingerprint(const nsACString& algorithm,
                                 std::vector<uint8_t>* fingerprint) const;
   nsresult ConfigureJsepSessionCodecs();
 
@@ -842,8 +846,6 @@ class PeerConnectionImpl final
 
   already_AddRefed<nsIHttpChannelInternal> GetChannel() const;
 
-  void BreakCycles();
-
   bool HasPendingSetParameters() const;
   void InvalidateLastReturnedParameters();
 
@@ -929,14 +931,23 @@ class PeerConnectionImpl final
     void AlpnNegotiated_s(const std::string& aAlpn, bool aPrivacyRequested);
     void ConnectionStateChange_s(const std::string& aTransportId,
                                  TransportLayer::State aState);
+    void OnPacketReceived_s(const std::string& aTransportId,
+                            const MediaPacket& aPacket);
+
+    MediaEventSourceExc<MediaPacket>& RtcpReceiveEvent() {
+      return mRtcpReceiveEvent;
+    }
 
    private:
     const std::string mHandle;
     RefPtr<MediaTransportHandler> mSource;
     RefPtr<nsISerialEventTarget> mSTSThread;
+    RefPtr<PacketDumper> mPacketDumper;
+    MediaEventProducerExc<MediaPacket> mRtcpReceiveEvent;
   };
 
   mozilla::UniquePtr<SignalHandler> mSignalHandler;
+  MediaEventListener mRtcpReceiveListener;
 
   // Make absolutely sure our refcount does not go to 0 before Close() is called
   // This is because Close does a stats query, which needs the

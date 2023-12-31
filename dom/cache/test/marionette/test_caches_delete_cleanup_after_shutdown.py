@@ -132,15 +132,18 @@ class CachesDeleteCleanupAtShutdownTestCase(MarionetteTestCase):
         self.marionette.restart(in_app=in_app)
         print("restart successful")
 
-        self.marionette.navigate(self.marionette.absolute_url("dom/cacheUsage.html"))
+        self.marionette.navigate(
+            self.marionette.absolute_url("dom/cache/cacheUsage.html")
+        )
         return ensureCleanCallback()
 
     def test_ensure_cache_cleanup_after_clean_restart(self):
-        self.marionette.navigate(self.marionette.absolute_url("dom/cacheUsage.html"))
+        self.marionette.navigate(
+            self.marionette.absolute_url("dom/cache/cacheUsage.html")
+        )
         beforeUsage = self.getUsage()
 
         def ensureCleanCallback():
-
             Wait(self.marionette, timeout=60).until(
                 lambda x: (self.getUsage() - beforeUsage)
                 < EXPECTED_CACHEDIR_SIZE_AFTER_CLEANUP,
@@ -158,7 +161,9 @@ class CachesDeleteCleanupAtShutdownTestCase(MarionetteTestCase):
             assert False
 
     def test_ensure_cache_cleanup_after_unclean_restart(self):
-        self.marionette.navigate(self.marionette.absolute_url("dom/cacheUsage.html"))
+        self.marionette.navigate(
+            self.marionette.absolute_url("dom/cache/cacheUsage.html")
+        )
         beforeUsage = self.getUsage()
 
         def ensureCleanCallback():

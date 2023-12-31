@@ -462,12 +462,6 @@ nsCSPContext::AppendPolicy(const nsAString& aPolicyString, bool aReportOnly,
     }
 
     mPolicies.AppendElement(policy);
-
-    // set the flag on the document for CSP telemetry
-    nsCOMPtr<Document> doc = do_QueryReferent(mLoadingContext);
-    if (doc) {
-      doc->SetHasCSP(true);
-    }
   }
 
   return NS_OK;
@@ -481,8 +475,7 @@ nsCSPContext::GetAllowsEval(bool* outShouldReportViolation,
   *outAllowsEval = true;
 
   for (uint32_t i = 0; i < mPolicies.Length(); i++) {
-    if (!mPolicies[i]->allows(SCRIPT_SRC_DIRECTIVE, CSP_UNSAFE_EVAL, u""_ns,
-                              false)) {
+    if (!mPolicies[i]->allows(SCRIPT_SRC_DIRECTIVE, CSP_UNSAFE_EVAL, u""_ns)) {
       // policy is violated: must report the violation and allow the inline
       // script if the policy is report-only.
       *outShouldReportViolation = true;
@@ -509,9 +502,8 @@ nsCSPContext::GetAllowsWasmEval(bool* outShouldReportViolation,
   for (uint32_t i = 0; i < mPolicies.Length(); i++) {
     // Either 'unsafe-eval' or 'wasm-unsafe-eval' can allow this
     if (!mPolicies[i]->allows(SCRIPT_SRC_DIRECTIVE, CSP_WASM_UNSAFE_EVAL,
-                              u""_ns, false) &&
-        !mPolicies[i]->allows(SCRIPT_SRC_DIRECTIVE, CSP_UNSAFE_EVAL, u""_ns,
-                              false)) {
+                              u""_ns) &&
+        !mPolicies[i]->allows(SCRIPT_SRC_DIRECTIVE, CSP_UNSAFE_EVAL, u""_ns)) {
       // policy is violated: must report the violation and allow the inline
       // script if the policy is report-only.
       *outShouldReportViolation = true;
@@ -608,15 +600,17 @@ nsCSPContext::GetAllowsInline(CSPDirective aDirective, bool aHasUnsafeHash,
 
   // always iterate all policies, otherwise we might not send out all reports
   for (uint32_t i = 0; i < mPolicies.Length(); i++) {
-    bool allowed =
-        mPolicies[i]->allows(aDirective, CSP_UNSAFE_INLINE, u""_ns,
-                             aParserCreated) ||
-        mPolicies[i]->allows(aDirective, CSP_NONCE, aNonce, aParserCreated);
+    // https://w3c.github.io/webappsec-csp/#match-element-to-source-list
+    // Step 1. If §6.7.3.2 Does a source list allow all inline behavior for
+    // type? returns "Allows" given list and type, return "Matches".
+    if (mPolicies[i]->allowsAllInlineBehavior(aDirective)) {
+      continue;
+    }
 
-    // If the inlined script or style is allowed by either unsafe-inline or the
-    // nonce, go ahead and shortcut this loop so we can avoid allocating
-    // unecessary strings
-    if (allowed) {
+    // Step 2. If type is "script" or "style", and §6.7.3.1 Is element
+    // nonceable? returns "Nonceable" when executed upon element: [...]
+    // TODO(Bug 1397308) Implement "is element nonceable?" CSP checks
+    if (mPolicies[i]->allows(aDirective, CSP_NONCE, aNonce)) {
       continue;
     }
 
@@ -634,15 +628,28 @@ nsCSPContext::GetAllowsInline(CSPDirective aDirective, bool aHasUnsafeHash,
       content = aContentOfPseudoScript;
     }
 
-    // Per https://w3c.github.io/webappsec-csp/#match-element-to-source-list
+    // Step 3. Let unsafe-hashes flag be false.
+    // Step 4. For each expression of list: [...]
+    bool unsafeHashesFlag =
+        mPolicies[i]->allows(aDirective, CSP_UNSAFE_HASHES, u""_ns);
+
     // Step 5. If type is "script" or "style", or unsafe-hashes flag is true:
     //
     // aHasUnsafeHash is true for event handlers (type "script attribute"),
     // style= attributes (type "style attribute") and the javascript: protocol.
-    if (!aHasUnsafeHash || mPolicies[i]->allows(aDirective, CSP_UNSAFE_HASHES,
-                                                u""_ns, aParserCreated)) {
-      allowed =
-          mPolicies[i]->allows(aDirective, CSP_HASH, content, aParserCreated);
+    if (!aHasUnsafeHash || unsafeHashesFlag) {
+      if (mPolicies[i]->allows(aDirective, CSP_HASH, content)) {
+        continue;
+      }
+    }
+
+    // TODO(Bug 1844290): Figure out how/if strict-dynamic for inline scripts is
+    // specified
+    bool allowed = false;
+    if ((aDirective == SCRIPT_SRC_ELEM_DIRECTIVE ||
+         aDirective == SCRIPT_SRC_ATTR_DIRECTIVE) &&
+        mPolicies[i]->allows(aDirective, CSP_STRICT_DYNAMIC, u""_ns)) {
+      allowed = !aParserCreated;
     }
 
     if (!allowed) {
@@ -809,7 +816,7 @@ nsCSPContext::LogViolationDetails(
   for (uint32_t p = 0; p < mPolicies.Length(); p++) {
     NS_ASSERTION(mPolicies[p], "null pointer in nsTArray<nsCSPPolicy>");
 
-    if (mPolicies[p]->allows(SCRIPT_SRC_DIRECTIVE, keyword, u""_ns, false)) {
+    if (mPolicies[p]->allows(SCRIPT_SRC_DIRECTIVE, keyword, u""_ns)) {
       continue;
     }
 
@@ -845,7 +852,7 @@ nsCSPContext::SetRequestContextWithDocument(Document* aDocument) {
   mQueueUpMessages = !mInnerWindowID;
   mCallingChannelLoadGroup = aDocument->GetDocumentLoadGroup();
   // set the flag on the document for CSP telemetry
-  mEventTarget = aDocument->EventTargetFor(TaskCategory::Other);
+  mEventTarget = GetMainThreadSerialEventTarget();
 
   MOZ_ASSERT(mLoadingPrincipal, "need a valid requestPrincipal");
   MOZ_ASSERT(mSelfURI, "need mSelfURI to translate 'self' into actual URI");
@@ -1134,11 +1141,62 @@ nsresult nsCSPContext::GatherSecurityPolicyViolationEventData(
   return NS_OK;
 }
 
+bool nsCSPContext::ShouldThrottleReport(
+    const mozilla::dom::SecurityPolicyViolationEventInit& aViolationEventInit) {
+  // Fetch rate limiting preferences
+  const uint32_t kLimitCount =
+      StaticPrefs::security_csp_reporting_limit_count();
+  const uint32_t kTimeSpanSeconds =
+      StaticPrefs::security_csp_reporting_limit_timespan();
+
+  // Disable throttling if either of the preferences is set to 0.
+  if (kLimitCount == 0 || kTimeSpanSeconds == 0) {
+    return false;
+  }
+
+  TimeDuration throttleSpan = TimeDuration::FromSeconds(kTimeSpanSeconds);
+  if (mSendReportLimitSpanStart.IsNull() ||
+      ((TimeStamp::Now() - mSendReportLimitSpanStart) > throttleSpan)) {
+    // Initial call or timespan exceeded, reset counter and timespan.
+    mSendReportLimitSpanStart = TimeStamp::Now();
+    mSendReportLimitCount = 1;
+    // Also make sure we warn about omitted messages. (XXX or only do this once
+    // per context?)
+    mWarnedAboutTooManyReports = false;
+    return false;
+  }
+
+  if (mSendReportLimitCount < kLimitCount) {
+    mSendReportLimitCount++;
+    return false;
+  }
+
+  // Rate limit reached
+  if (!mWarnedAboutTooManyReports) {
+    logToConsole("tooManyReports", {}, aViolationEventInit.mSourceFile,
+                 aViolationEventInit.mSample, aViolationEventInit.mLineNumber,
+                 aViolationEventInit.mColumnNumber, nsIScriptError::errorFlag);
+    mWarnedAboutTooManyReports = true;
+  }
+  return true;
+}
+
 nsresult nsCSPContext::SendReports(
     const mozilla::dom::SecurityPolicyViolationEventInit& aViolationEventInit,
     uint32_t aViolatedPolicyIndex) {
   EnsureIPCPoliciesRead();
   NS_ENSURE_ARG_MAX(aViolatedPolicyIndex, mPolicies.Length() - 1);
+
+  nsTArray<nsString> reportURIs;
+  mPolicies[aViolatedPolicyIndex]->getReportURIs(reportURIs);
+  // There is nowhere to send reports to.
+  if (reportURIs.IsEmpty()) {
+    return NS_OK;
+  }
+
+  if (ShouldThrottleReport(aViolationEventInit)) {
+    return NS_OK;
+  }
 
   dom::CSPReport report;
 
@@ -1198,10 +1256,6 @@ nsresult nsCSPContext::SendReports(
   }
 
   // ---------- Assembled, now send it to all the report URIs ----------- //
-
-  nsTArray<nsString> reportURIs;
-  mPolicies[aViolatedPolicyIndex]->getReportURIs(reportURIs);
-
   nsCOMPtr<Document> doc = do_QueryReferent(mLoadingContext);
   nsCOMPtr<nsIURI> reportURI;
   nsCOMPtr<nsIChannel> reportChannel;

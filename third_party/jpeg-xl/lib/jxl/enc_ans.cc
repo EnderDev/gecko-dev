@@ -19,20 +19,23 @@
 
 #include "lib/jxl/ans_common.h"
 #include "lib/jxl/base/bits.h"
+#include "lib/jxl/base/fast_math-inl.h"
 #include "lib/jxl/dec_ans.h"
 #include "lib/jxl/enc_aux_out.h"
 #include "lib/jxl/enc_cluster.h"
 #include "lib/jxl/enc_context_map.h"
 #include "lib/jxl/enc_fields.h"
 #include "lib/jxl/enc_huffman.h"
-#include "lib/jxl/fast_math-inl.h"
 #include "lib/jxl/fields.h"
 
 namespace jxl {
 
 namespace {
 
-bool ans_fuzzer_friendly_ = false;
+#if !JXL_IS_DEBUG_BUILD
+constexpr
+#endif
+    bool ans_fuzzer_friendly_ = false;
 
 static const int kMaxNumSymbolsForSmallCode = 4;
 
@@ -1463,7 +1466,7 @@ void ApplyLZ77(const HistogramParams& params, size_t num_contexts,
   } else if (params.lz77_method == HistogramParams::LZ77Method::kOptimal) {
     ApplyLZ77_Optimal(params, num_contexts, tokens, lz77, tokens_lz77);
   } else {
-    JXL_ABORT("Not implemented");
+    JXL_UNREACHABLE("Not implemented");
   }
 }
 }  // namespace

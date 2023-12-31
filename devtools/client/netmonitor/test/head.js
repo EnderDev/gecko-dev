@@ -1491,3 +1491,47 @@ function typeInNetmonitor(string, monitor) {
     EventUtils.synthesizeKey(ch, {}, monitor.panelWin);
   }
 }
+
+/**
+ * Opens/ closes the URL preview in the headers side panel
+ *
+ * @param {Boolean} shouldExpand
+ * @param {NetMonitorPanel} monitor
+ * @returns
+ */
+async function toggleUrlPreview(shouldExpand, monitor) {
+  const { document } = monitor.panelWin;
+  const wait = waitUntil(() => {
+    const rowSize = document.querySelectorAll(
+      "#headers-panel .url-preview tr.treeRow"
+    ).length;
+    return shouldExpand ? rowSize > 1 : rowSize == 1;
+  });
+
+  clickElement(
+    document.querySelector(
+      "#headers-panel .url-preview tr:first-child span.treeIcon.theme-twisty"
+    ),
+    monitor
+  );
+  return wait;
+}
+
+/**
+ * Wait for the eager evaluated result from the split console
+ * @param {Object} hud
+ * @param {String} text - expected evaluation result
+ */
+async function waitForEagerEvaluationResult(hud, text) {
+  await waitUntil(() => {
+    const elem = hud.ui.outputNode.querySelector(".eager-evaluation-result");
+    if (elem) {
+      if (text instanceof RegExp) {
+        return text.test(elem.innerText);
+      }
+      return elem.innerText == text;
+    }
+    return false;
+  });
+  ok(true, `Got eager evaluation result ${text}`);
+}

@@ -11,11 +11,11 @@
 #include <type_traits>
 
 #include "lib/jxl/ac_strategy.h"
+#include "lib/jxl/base/common.h"
 #include "lib/jxl/base/compiler_specific.h"
 #include "lib/jxl/base/padded_bytes.h"
 #include "lib/jxl/base/span.h"
 #include "lib/jxl/color_encoding_internal.h"
-#include "lib/jxl/common.h"
 #include "lib/jxl/compressed_dc.h"
 #include "lib/jxl/dct_scales.h"
 #include "lib/jxl/dct_util.h"
@@ -25,6 +25,7 @@
 #include "lib/jxl/enc_group.h"
 #include "lib/jxl/enc_modular.h"
 #include "lib/jxl/enc_quant_weights.h"
+#include "lib/jxl/frame_dimensions.h"
 #include "lib/jxl/frame_header.h"
 #include "lib/jxl/image.h"
 #include "lib/jxl/image_bundle.h"
@@ -138,9 +139,6 @@ Status InitializePassesEncoder(const Image3F& opsin, const JxlCmsInterface& cms,
     dc_frame_info.ib_needs_color_transform = false;
     dc_frame_info.save_before_color_transform = true;  // Implicitly true
     AuxOut dc_aux_out;
-    if (aux_out) {
-      dc_aux_out.debug_prefix = aux_out->debug_prefix;
-    }
     JXL_CHECK(EncodeFrame(cparams, dc_frame_info, shared.metadata, ib,
                           state.get(), cms, pool, special_frame.get(),
                           aux_out ? &dc_aux_out : nullptr));
@@ -170,8 +168,10 @@ Status InitializePassesEncoder(const Image3F& opsin, const JxlCmsInterface& cms,
     // dc_frame_info.dc_level = shared.frame_header.dc_level + 1, and
     // dc_frame_info.dc_level is used by EncodeFrame. However, if EncodeFrame
     // outputs multiple frames, this assumption could be wrong.
-    shared.dc_storage =
-        CopyImage(dec_state->shared->dc_frames[shared.frame_header.dc_level]);
+    const Image3F& dc_frame =
+        dec_state->shared->dc_frames[shared.frame_header.dc_level];
+    shared.dc_storage = Image3F(dc_frame.xsize(), dc_frame.ysize());
+    CopyImageTo(dc_frame, &shared.dc_storage);
     ZeroFillImage(&shared.quant_dc);
     shared.dc = &shared.dc_storage;
     JXL_CHECK(encoded_size == 0);
@@ -197,10 +197,6 @@ Status InitializePassesEncoder(const Image3F& opsin, const JxlCmsInterface& cms,
                                 ThreadPool::NoInit, compute_ac_meta,
                                 "Compute AC Metadata"));
 
-  if (aux_out != nullptr) {
-    aux_out->InspectImage3F("compressed_image:InitializeFrameEncCache:dc_dec",
-                            shared.dc_storage);
-  }
   return true;
 }
 

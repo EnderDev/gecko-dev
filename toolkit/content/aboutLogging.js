@@ -20,7 +20,7 @@ const { CustomizableUI } = ChromeUtils.importESModule(
   "resource:///modules/CustomizableUI.sys.mjs"
 );
 
-XPCOMUtils.defineLazyGetter(this, "ProfilerPopupBackground", function () {
+ChromeUtils.defineLazyGetter(this, "ProfilerPopupBackground", function () {
   return ChromeUtils.import(
     "resource://devtools/client/performance-new/shared/background.jsm.js"
   );
@@ -52,6 +52,25 @@ function moduleEnvVarPresent() {
  * [1]: The keys of the `presets` object defined in
  * https://searchfox.org/mozilla-central/source/devtools/client/performance-new/shared/background.jsm.js
  */
+
+const gOsSpecificLoggingPresets = (() => {
+  // Microsoft Windows
+  if (navigator.platform.startsWith("Win")) {
+    return {
+      windows: {
+        modules:
+          "timestamp,sync,Widget:5,BaseWidget:5,WindowsEvent:4,TaskbarConcealer:5",
+        l10nIds: {
+          label: "about-logging-preset-windows-label",
+          description: "about-logging-preset-windows-description",
+        },
+      },
+    };
+  }
+
+  return {};
+})();
+
 const gLoggingPresets = {
   networking: {
     modules:
@@ -87,7 +106,7 @@ const gLoggingPresets = {
   },
   "media-playback": {
     modules:
-      "HTMLMediaElement:4,HTMLMediaElementEvents:4,cubeb:5,PlatformDecoderModule:5,AudioSink:5,AudioSinkWrapper:5,MediaDecoderStateMachine:4,MediaDecoder:4,MediaFormatReader:5",
+      "HTMLMediaElement:4,HTMLMediaElementEvents:4,cubeb:5,PlatformDecoderModule:5,AudioSink:5,AudioSinkWrapper:5,MediaDecoderStateMachine:4,MediaDecoder:4,MediaFormatReader:5,GMP:5",
     l10nIds: {
       label: "about-logging-preset-media-playback-label",
       description: "about-logging-preset-media-playback-description",
@@ -103,6 +122,26 @@ const gLoggingPresets = {
     },
     profilerPreset: "media",
   },
+  webgpu: {
+    modules:
+      "wgpu_core::*:5,wgpu_hal::*:5,wgpu_types::*:5,naga::*:5,wgpu_bindings::*:5,WebGPU:5",
+    l10nIds: {
+      label: "about-logging-preset-webgpu-label",
+      description: "about-logging-preset-webgpu-description",
+    },
+  },
+  gfx: {
+    modules:
+      "webrender::*:5,webrender_bindings::*:5,webrender_types::*:5,gfx2d:5,WebRenderBridgeParent:5,DcompSurface:5,apz.displayport:5,layout:5,dl.content:5,dl.parent:5,nsRefreshDriver:5,fontlist:5,fontinit:5,textrun:5,textrunui:5,textperf:5",
+    l10nIds: {
+      label: "about-logging-preset-gfx-label",
+      description: "about-logging-preset-gfx-description",
+    },
+    // The graphics profiler preset enables the threads we want but loses the screenshots.
+    // We could add an extra preset for that if we miss it.
+    profilerPreset: "graphics",
+  },
+  ...gOsSpecificLoggingPresets,
   custom: {
     modules: "",
     l10nIds: {

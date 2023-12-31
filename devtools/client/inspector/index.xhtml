@@ -166,10 +166,11 @@
                   id="ruleview-searchbox"
                   class="devtools-filterinput"
                   type="search"
-                  data-localization="placeholder=inspector.filterStyles.placeholder"
+                  data-localization="aria-label=inspector.filterStyles.label;placeholder=inspector.filterStyles.placeholder"
                 />
                 <button
                   id="ruleview-searchinput-clear"
+                  data-localization="title=inspector.filterStylesClearButton.title"
                   class="devtools-searchinput-clear"
                 ></button>
               </div>
@@ -242,11 +243,12 @@
                 id="computed-searchbox"
                 class="devtools-filterinput"
                 type="search"
-                data-localization="placeholder=inspector.filterStyles.placeholder"
+                data-localization="aria-label=inspector.filterStyles.label;placeholder=inspector.filterStyles.placeholder"
               />
               <button
                 id="computed-searchinput-clear"
                 class="devtools-searchinput-clear"
+                data-localization="title=inspector.filterStylesClearButton.title"
               ></button>
             </div>
             <div class="devtools-separator"></div>
@@ -264,12 +266,12 @@
 
           <div id="computed-container" role="document">
             <div id="computed-container-focusable" tabindex="-1">
-              <div
+              <ul
                 id="computed-property-container"
                 class="devtools-monospace"
                 tabindex="0"
                 dir="ltr"
-              ></div>
+              ></ul>
               <div
                 id="computed-no-results"
                 class="devtools-sidepanel-no-result"

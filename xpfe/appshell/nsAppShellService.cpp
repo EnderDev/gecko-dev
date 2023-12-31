@@ -33,6 +33,7 @@
 #include "mozilla/StartupTimeline.h"
 #include "mozilla/StaticPrefs_browser.h"
 #include "mozilla/StaticPrefs_fission.h"
+#include "mozilla/Try.h"
 #include "mozilla/intl/LocaleService.h"
 #include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/Document.h"
@@ -685,7 +686,7 @@ nsresult nsAppShellService::JustCreateTopWindow(
     isPrivateBrowsingWindow = parentContext->UsePrivateBrowsing();
   }
 
-  if (nsDocShell* docShell = window->GetDocShell()) {
+  if (RefPtr<nsDocShell> docShell = window->GetDocShell()) {
     MOZ_ASSERT(docShell->GetBrowsingContext()->IsChrome());
 
     docShell->SetPrivateBrowsing(isPrivateBrowsingWindow);

@@ -14,12 +14,9 @@
 #include "nsLayoutUtils.h"
 #include "nsPresContext.h"
 #include "nsGkAtoms.h"
-#include "nsNameSpaceManager.h"
 #include "nsNodeInfoManager.h"
 #include "nsContentCreatorFunctions.h"
 #include "nsFontMetrics.h"
-#include "nsCSSPseudoElements.h"
-#include "nsStyleConsts.h"
 #include <algorithm>
 
 using namespace mozilla;
@@ -37,13 +34,12 @@ nsProgressFrame::nsProgressFrame(ComputedStyle* aStyle,
 
 nsProgressFrame::~nsProgressFrame() = default;
 
-void nsProgressFrame::DestroyFrom(nsIFrame* aDestructRoot,
-                                  PostDestroyData& aPostDestroyData) {
+void nsProgressFrame::Destroy(DestroyContext& aContext) {
   NS_ASSERTION(!GetPrevContinuation(),
                "nsProgressFrame should not have continuations; if it does we "
                "need to call RegUnregAccessKey only for the first.");
-  aPostDestroyData.AddAnonymousContent(mBarDiv.forget());
-  nsContainerFrame::DestroyFrom(aDestructRoot, aPostDestroyData);
+  aContext.AddAnonymousContent(mBarDiv.forget());
+  nsContainerFrame::Destroy(aContext);
 }
 
 nsresult nsProgressFrame::CreateAnonymousContent(
@@ -53,7 +49,12 @@ nsresult nsProgressFrame::CreateAnonymousContent(
   mBarDiv = doc->CreateHTMLElement(nsGkAtoms::div);
 
   // Associate ::-moz-progress-bar pseudo-element to the anonymous child.
-  mBarDiv->SetPseudoElementType(PseudoStyleType::mozProgressBar);
+  if (StaticPrefs::layout_css_modern_range_pseudos_enabled()) {
+    // TODO(emilio): Create also a slider-track pseudo-element.
+    mBarDiv->SetPseudoElementType(PseudoStyleType::sliderFill);
+  } else {
+    mBarDiv->SetPseudoElementType(PseudoStyleType::mozProgressBar);
+  }
 
   // XXX(Bug 1631371) Check if this should use a fallible operation as it
   // pretended earlier, or change the return type to void.

@@ -1,25 +1,38 @@
-From: Byron Campen <docfaraday@gmail.com>
-Date: Tue, 4 Apr 2023 16:34:00 -0500
-Subject: Bug 1822194 - (fix-3b51cd328e) - Add missing designated initializer
- that gcc is sad about.
+From: stransky <stransky@redhat.com>
+Date: Tue, 29 Aug 2023 12:43:00 +0000
+Subject: Bug 1821629 [DMABuf] Don't use DMABuf if it's disabled by Firefox gfx
+ config r=ng,webrtc-reviewers
 
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/108046c7cbb21c6cf19320c0804e9aee1a3eb4bf
+Differential Revision: https://phabricator.services.mozilla.com/D172224
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/158a888cad8869a2f0026fa7cfaaa13ecbfcf2ed
 ---
- modules/audio_processing/audio_processing_impl.cc | 1 +
- 1 file changed, 1 insertion(+)
+ .../linux/wayland/shared_screencast_stream.cc            | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
 
-diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
-index c80cc76a3d..c304453388 100644
---- a/modules/audio_processing/audio_processing_impl.cc
-+++ b/modules/audio_processing/audio_processing_impl.cc
-@@ -450,6 +450,7 @@ AudioProcessingImpl::GetGainController2ExperimentParams() {
-                   },
-               .adaptive_digital_controller =
-                   {
-+                      .enabled = false,
-                       .headroom_db = static_cast<float>(headroom_db.Get()),
-                       .max_gain_db = static_cast<float>(max_gain_db.Get()),
-                       .initial_gain_db =
--- 
-2.34.1
-
+diff --git a/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc b/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
+index 0c26e7a7d5..22aa355e44 100644
+--- a/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
++++ b/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
+@@ -28,6 +28,13 @@
+ #include "rtc_base/synchronization/mutex.h"
+ #include "rtc_base/time_utils.h"
+ 
++// Wrapper for gfxVars::UseDMABuf() as we can't include gfxVars here.
++// We don't want to use dmabuf of known broken systems.
++// See FEATURE_DMABUF for details.
++namespace mozilla::gfx {
++bool IsDMABufEnabled();
++}
++
+ namespace webrtc {
+ 
+ const int kBytesPerPixel = 4;
+@@ -294,7 +301,7 @@ void SharedScreenCastStreamPrivate::OnStreamParamChanged(
+   that->modifier_ =
+       has_modifier ? that->spa_video_format_.modifier : DRM_FORMAT_MOD_INVALID;
+   std::vector<const spa_pod*> params;
+-  const int buffer_types = has_modifier
++  const int buffer_types = has_modifier && mozilla::gfx::IsDMABufEnabled()
+                                ? (1 << SPA_DATA_DmaBuf) | (1 << SPA_DATA_MemFd)
+                                : (1 << SPA_DATA_MemFd);
+ 

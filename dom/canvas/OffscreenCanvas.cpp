@@ -66,6 +66,9 @@ OffscreenCanvas::OffscreenCanvas(
       mDisplay(aDisplay) {}
 
 OffscreenCanvas::~OffscreenCanvas() {
+  if (mDisplay) {
+    mDisplay->DestroyCanvas();
+  }
   NS_ReleaseOnMainThread("OffscreenCanvas::mExpandedReader",
                          mExpandedReader.forget());
 }
@@ -144,6 +147,23 @@ void OffscreenCanvas::SetHeight(uint32_t aHeight, ErrorResult& aRv) {
   CanvasAttrChanged();
 }
 
+void OffscreenCanvas::SetSize(const nsIntSize& aSize, ErrorResult& aRv) {
+  if (mNeutered) {
+    aRv.ThrowInvalidStateError(
+        "Cannot set dimensions of placeholder canvas transferred to worker.");
+    return;
+  }
+
+  if (NS_WARN_IF(aSize.IsEmpty())) {
+    aRv.ThrowRangeError("OffscreenCanvas size is empty, must be non-empty.");
+    return;
+  }
+
+  mWidth = aSize.width;
+  mHeight = aSize.height;
+  CanvasAttrChanged();
+}
+
 void OffscreenCanvas::GetContext(
     JSContext* aCx, const OffscreenRenderingContextId& aContextId,
     JS::Handle<JS::Value> aContextOptions,
@@ -177,6 +197,27 @@ void OffscreenCanvas::GetContext(
       aResult.SetNull();
       aRv.Throw(NS_ERROR_NOT_IMPLEMENTED);
       return;
+  }
+
+  // If we are on a worker, we need to give our OffscreenCanvasDisplayHelper
+  // object access to a worker ref so we can dispatch properly during painting
+  // if we need to flush our contents to its ImageContainer for display.
+  RefPtr<ThreadSafeWorkerRef> workerRef;
+  if (mDisplay) {
+    if (WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate()) {
+      RefPtr<StrongWorkerRef> strongRef = StrongWorkerRef::Create(
+          workerPrivate, "OffscreenCanvas::GetContext",
+          [display = mDisplay]() { display->DestroyCanvas(); });
+      if (NS_WARN_IF(!strongRef)) {
+        aResult.SetNull();
+        aRv.ThrowUnknownError("Worker shutting down");
+        return;
+      }
+
+      workerRef = new ThreadSafeWorkerRef(strongRef);
+    } else {
+      MOZ_ASSERT(NS_IsMainThread());
+    }
   }
 
   RefPtr<nsISupports> result = CanvasRenderingContextHelper::GetOrCreateContext(
@@ -220,7 +261,8 @@ void OffscreenCanvas::GetContext(
   }
 
   if (mDisplay) {
-    mDisplay->UpdateContext(mCurrentContextType, childId);
+    mDisplay->UpdateContext(this, std::move(workerRef), mCurrentContextType,
+                            childId);
   }
 }
 
@@ -280,10 +322,28 @@ void OffscreenCanvas::CommitFrameToCompositor() {
   mDisplay->CommitFrameToCompositor(mCurrentContext, mTextureType, update);
 }
 
-OffscreenCanvasCloneData* OffscreenCanvas::ToCloneData() {
-  return new OffscreenCanvasCloneData(mDisplay, mWidth, mHeight,
-                                      mCompositorBackendType, mTextureType,
-                                      mNeutered, mIsWriteOnly, mExpandedReader);
+UniquePtr<OffscreenCanvasCloneData> OffscreenCanvas::ToCloneData(
+    JSContext* aCx) {
+  if (NS_WARN_IF(mNeutered)) {
+    ErrorResult rv;
+    rv.ThrowDataCloneError(
+        "Cannot clone placeholder canvas that is already transferred.");
+    MOZ_ALWAYS_TRUE(rv.MaybeSetPendingException(aCx));
+    return nullptr;
+  }
+
+  if (NS_WARN_IF(mCurrentContext)) {
+    ErrorResult rv;
+    rv.ThrowInvalidStateError("Cannot clone canvas with context.");
+    MOZ_ALWAYS_TRUE(rv.MaybeSetPendingException(aCx));
+    return nullptr;
+  }
+
+  auto cloneData = MakeUnique<OffscreenCanvasCloneData>(
+      mDisplay, mWidth, mHeight, mCompositorBackendType, mTextureType,
+      mNeutered, mIsWriteOnly, mExpandedReader);
+  SetNeutered();
+  return cloneData;
 }
 
 already_AddRefed<ImageBitmap> OffscreenCanvas::TransferToImageBitmap(
@@ -527,7 +587,7 @@ NS_IMPL_ADDREF_INHERITED(OffscreenCanvas, DOMEventTargetHelper)
 NS_IMPL_RELEASE_INHERITED(OffscreenCanvas, DOMEventTargetHelper)
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(OffscreenCanvas)
-  NS_INTERFACE_MAP_ENTRY(nsISupports)
+  NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, EventTarget)
 NS_INTERFACE_MAP_END_INHERITING(DOMEventTargetHelper)
 
 }  // namespace mozilla::dom

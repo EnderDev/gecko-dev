@@ -23,7 +23,9 @@ ChromeUtils.defineESModuleGetters(this, {
   sinon: "resource://testing-common/Sinon.sys.mjs",
 });
 
-var { HttpServer } = ChromeUtils.import("resource://testing-common/httpd.js");
+var { HttpServer } = ChromeUtils.importESModule(
+  "resource://testing-common/httpd.sys.mjs"
+);
 var { AddonTestUtils } = ChromeUtils.importESModule(
   "resource://testing-common/AddonTestUtils.sys.mjs"
 );
@@ -474,11 +476,6 @@ let consoleAllowList = [
   // Harness issues.
   'property "localProfileDir" is non-configurable and can\'t be deleted',
   'property "profileDir" is non-configurable and can\'t be deleted',
-  // These can be emitted by `resource://services-settings/Utils.jsm` when
-  // remote settings is fetched (e.g. via IgnoreLists).
-  "NetworkError: Network request failed",
-  // Also remote settings, see bug 1812040.
-  "Unexpected content-type",
 ];
 
 let endConsoleListening = TestUtils.listenForConsoleMessages();

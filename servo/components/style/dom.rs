@@ -14,7 +14,7 @@ use crate::context::{PostAnimationTasks, UpdateAnimationsTasks};
 use crate::data::ElementData;
 use crate::media_queries::Device;
 use crate::properties::{AnimationDeclarations, ComputedValues, PropertyDeclarationBlock};
-use crate::selector_parser::{AttrValue, Lang, PseudoElement, SelectorImpl};
+use crate::selector_parser::{AttrValue, CustomState, Lang, PseudoElement, SelectorImpl};
 use crate::shared_lock::{Locked, SharedRwLock};
 use crate::stylist::CascadeData;
 use crate::values::computed::Display;
@@ -22,7 +22,7 @@ use crate::values::AtomIdent;
 use crate::WeakAtom;
 use atomic_refcell::{AtomicRef, AtomicRefMut};
 use dom::ElementState;
-use selectors::matching::{QuirksMode, VisitedHandlingMode};
+use selectors::matching::{ElementSelectorFlags, QuirksMode, VisitedHandlingMode};
 use selectors::sink::Push;
 use selectors::Element as SelectorsElement;
 use servo_arc::{Arc, ArcBorrow};
@@ -512,6 +512,11 @@ pub trait TElement:
     /// Get this element's state, for non-tree-structural pseudos.
     fn state(&self) -> ElementState;
 
+    /// Returns whether this element's CustomStateSet contains a given state.
+    fn has_custom_state(&self, _state: &CustomState) -> bool {
+        false
+    }
+
     /// Returns whether this element has a `part` attribute.
     fn has_part_attr(&self) -> bool;
 
@@ -897,6 +902,12 @@ pub trait TElement:
         &self,
         display: &Display,
     ) -> euclid::default::Size2D<Option<app_units::Au>>;
+
+    /// Returns true if the element has all of specified selector flags.
+    fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool;
+
+    /// Returns the search direction for relative selector invalidation, if it is on the search path.
+    fn relative_selector_search_direction(&self) -> Option<ElementSelectorFlags>;
 }
 
 /// TNode and TElement aren't Send because we want to be careful and explicit

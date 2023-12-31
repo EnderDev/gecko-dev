@@ -12,7 +12,7 @@
 #include "CubebDeviceEnumerator.h"
 #include "MediaTimer.h"
 #include "MediaTrackConstraints.h"
-#include "MediaTrackGraphImpl.h"
+#include "MediaTrackGraph.h"
 #include "MediaTrackListener.h"
 #include "VideoStreamTrack.h"
 #include "VideoUtils.h"
@@ -47,7 +47,7 @@
 #include "nsAppDirectoryServiceDefs.h"
 #include "nsArray.h"
 #include "nsContentUtils.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
 #include "nsHashPropertyBag.h"
 #include "nsIEventTarget.h"
 #include "nsIPermissionManager.h"
@@ -55,7 +55,6 @@
 #include "nsJSUtils.h"
 #include "nsNetCID.h"
 #include "nsNetUtil.h"
-#include "nsPIDOMWindow.h"
 #include "nsProxyRelease.h"
 #include "nspr.h"
 #include "nss.h"
@@ -72,12 +71,7 @@
 #endif
 
 #if defined(XP_WIN)
-#  include <iphlpapi.h>
 #  include <objbase.h>
-#  include <tchar.h>
-#  include <winsock2.h>
-
-#  include "mozilla/WindowsVersion.h"
 #endif
 
 // A specialization of nsMainThreadPtrHolder for
@@ -2088,7 +2082,6 @@ MediaManager::MediaManager(already_AddRefed<TaskQueue> aMediaThread)
   mPrefs.mHPFOn = false;
   mPrefs.mNoiseOn = false;
   mPrefs.mTransientOn = false;
-  mPrefs.mResidualEchoOn = false;
   mPrefs.mAgc2Forced = false;
 #ifdef MOZ_WEBRTC
   mPrefs.mAgc =
@@ -2111,13 +2104,12 @@ MediaManager::MediaManager(already_AddRefed<TaskQueue> aMediaThread)
   }
   LOG("%s: default prefs: %dx%d @%dfps, %dHz test tones, aec: %s,"
       "agc: %s, hpf: %s, noise: %s, agc level: %d, agc version: %s, noise "
-      "level: %d, transient: %s, residual echo: %s, channels %d",
+      "level: %d, transient: %s, channels %d",
       __FUNCTION__, mPrefs.mWidth, mPrefs.mHeight, mPrefs.mFPS, mPrefs.mFreq,
       mPrefs.mAecOn ? "on" : "off", mPrefs.mAgcOn ? "on" : "off",
       mPrefs.mHPFOn ? "on" : "off", mPrefs.mNoiseOn ? "on" : "off", mPrefs.mAgc,
       mPrefs.mAgc2Forced ? "2" : "1", mPrefs.mNoise,
-      mPrefs.mTransientOn ? "on" : "off", mPrefs.mResidualEchoOn ? "on" : "off",
-      mPrefs.mChannels);
+      mPrefs.mTransientOn ? "on" : "off", mPrefs.mChannels);
 }
 
 NS_IMPL_ISUPPORTS(MediaManager, nsIMediaManagerService, nsIMemoryReporter,
@@ -2243,27 +2235,6 @@ media::Parent<media::NonE10s>* MediaManager::GetNonE10sParent() {
     mNonE10sParent = new media::Parent<media::NonE10s>();
   }
   return mNonE10sParent;
-}
-
-/* static */
-void MediaManager::StartupInit() {
-#ifdef WIN32
-  if (!IsWin8OrLater()) {
-    // Bug 1107702 - Older Windows fail in GetAdaptersInfo (and others) if the
-    // first(?) call occurs after the process size is over 2GB (kb/2588507).
-    // Attempt to 'prime' the pump by making a call at startup.
-    unsigned long out_buf_len = sizeof(IP_ADAPTER_INFO);
-    PIP_ADAPTER_INFO pAdapterInfo = (IP_ADAPTER_INFO*)moz_xmalloc(out_buf_len);
-    if (GetAdaptersInfo(pAdapterInfo, &out_buf_len) == ERROR_BUFFER_OVERFLOW) {
-      free(pAdapterInfo);
-      pAdapterInfo = (IP_ADAPTER_INFO*)moz_xmalloc(out_buf_len);
-      GetAdaptersInfo(pAdapterInfo, &out_buf_len);
-    }
-    if (pAdapterInfo) {
-      free(pAdapterInfo);
-    }
-  }
-#endif
 }
 
 /* static */
@@ -3357,8 +3328,6 @@ void MediaManager::GetPrefs(nsIPrefBranch* aBranch, const char* aData) {
               &mPrefs.mNoiseOn);
   GetPrefBool(aBranch, "media.getusermedia.transient_enabled", aData,
               &mPrefs.mTransientOn);
-  GetPrefBool(aBranch, "media.getusermedia.residual_echo_enabled", aData,
-              &mPrefs.mResidualEchoOn);
   GetPrefBool(aBranch, "media.getusermedia.agc2_forced", aData,
               &mPrefs.mAgc2Forced);
   GetPref(aBranch, "media.getusermedia.agc", aData, &mPrefs.mAgc);

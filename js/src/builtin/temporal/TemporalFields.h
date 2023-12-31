@@ -141,49 +141,51 @@ class MutableWrappedPtrOperations<temporal::TemporalFields, Wrapper>
 namespace js::temporal {
 
 /**
- * PrepareTemporalFields ( fields, fieldNames, requiredFields )
+ * PrepareTemporalFields ( fields, fieldNames, requiredFields [ ,
+ * duplicateBehaviour ] )
  */
 bool PrepareTemporalFields(JSContext* cx, JS::Handle<JSObject*> fields,
                            std::initializer_list<TemporalField> fieldNames,
                            std::initializer_list<TemporalField> requiredFields,
                            JS::MutableHandle<TemporalFields> result);
 
-/**
- * PrepareTemporalFields ( fields, fieldNames, requiredFields )
- */
-PlainObject* PrepareTemporalFields(
-    JSContext* cx, JS::Handle<JSObject*> fields,
-    JS::Handle<JS::StackGCVector<JS::PropertyKey>> fieldNames);
+using TemporalFieldNames = JS::StackGCVector<JS::PropertyKey>;
 
 /**
- * PrepareTemporalFields ( fields, fieldNames, requiredFields )
+ * PrepareTemporalFields ( fields, fieldNames, requiredFields [ ,
+ * duplicateBehaviour ] )
+ */
+PlainObject* PrepareTemporalFields(JSContext* cx, JS::Handle<JSObject*> fields,
+                                   JS::Handle<TemporalFieldNames> fieldNames);
+
+/**
+ * PrepareTemporalFields ( fields, fieldNames, requiredFields [ ,
+ * duplicateBehaviour ] )
  */
 PlainObject* PrepareTemporalFields(
     JSContext* cx, JS::Handle<JSObject*> fields,
-    JS::Handle<JS::StackGCVector<JS::PropertyKey>> fieldNames,
+    JS::Handle<TemporalFieldNames> fieldNames,
     std::initializer_list<TemporalField> requiredFields);
 
 /**
- * PrepareTemporalFields ( fields, fieldNames, requiredFields )
+ * PrepareTemporalFields ( fields, fieldNames, requiredFields [ ,
+ * duplicateBehaviour ] )
  */
 PlainObject* PreparePartialTemporalFields(
     JSContext* cx, JS::Handle<JSObject*> fields,
-    JS::Handle<JS::StackGCVector<JS::PropertyKey>> fieldNames);
+    JS::Handle<TemporalFieldNames> fieldNames);
 
-/**
- * MergeLists ( a, b )
- */
-[[nodiscard]] bool MergeTemporalFieldNames(
-    const JS::StackGCVector<JS::PropertyKey>& receiverFieldNames,
-    const JS::StackGCVector<JS::PropertyKey>& inputFieldNames,
-    JS::StackGCVector<JS::PropertyKey>& mergedFieldNames);
+[[nodiscard]] bool ConcatTemporalFieldNames(
+    const TemporalFieldNames& receiverFieldNames,
+    const TemporalFieldNames& inputFieldNames,
+    TemporalFieldNames& concatenatedFieldNames);
 
 [[nodiscard]] bool AppendSorted(
-    JSContext* cx, JS::StackGCVector<JS::PropertyKey>& fieldNames,
+    JSContext* cx, TemporalFieldNames& fieldNames,
     std::initializer_list<TemporalField> additionalNames);
 
-[[nodiscard]] bool SortTemporalFieldNames(
-    JSContext* cx, JS::StackGCVector<JS::PropertyKey>& fieldNames);
+[[nodiscard]] bool SortTemporalFieldNames(JSContext* cx,
+                                          TemporalFieldNames& fieldNames);
 
 } /* namespace js::temporal */
 

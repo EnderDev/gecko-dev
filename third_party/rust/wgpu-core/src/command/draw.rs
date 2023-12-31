@@ -67,6 +67,8 @@ pub enum RenderCommandError {
     InvalidRenderBundle(id::RenderBundleId),
     #[error("Bind group index {index} is greater than the device's requested `max_bind_group` limit {max}")]
     BindGroupIndexOutOfRange { index: u32, max: u32 },
+    #[error("Vertex buffer index {index} is greater than the device's requested `max_vertex_buffers` limit {max}")]
+    VertexBufferIndexOutOfRange { index: u32, max: u32 },
     #[error("Dynamic buffer offset {0} does not respect device's requested `{1}` limit {2}")]
     UnalignedBufferOffset(u64, &'static str, u32),
     #[error("Number of buffer offsets ({actual}) does not match the number of dynamic bindings ({expected})")]
@@ -89,8 +91,8 @@ pub enum RenderCommandError {
     MissingTextureUsage(#[from] MissingTextureUsageError),
     #[error(transparent)]
     PushConstants(#[from] PushConstantUploadError),
-    #[error("Viewport width {0} and/or height {1} are less than or equal to 0")]
-    InvalidViewportDimension(f32, f32),
+    #[error("Viewport has invalid rect {0:?}; origin and/or size is less than or equal to 0, and/or is not contained in the render target {1:?}")]
+    InvalidViewportRect(Rect<f32>, wgt::Extent3d),
     #[error("Viewport minDepth {0} and/or maxDepth {1} are not in [0, 1]")]
     InvalidViewportDepth(f32, f32),
     #[error("Scissor {0:?} is not contained in the render target {1:?}")]
@@ -243,6 +245,10 @@ pub enum RenderCommand {
         query_set_id: id::QuerySetId,
         query_index: u32,
     },
+    BeginOcclusionQuery {
+        query_index: u32,
+    },
+    EndOcclusionQuery,
     BeginPipelineStatisticsQuery {
         query_set_id: id::QuerySetId,
         query_index: u32,

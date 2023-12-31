@@ -19,6 +19,7 @@
 #include "jit/JitSpewer.h"
 #include "jit/ScriptFromCalleeToken.h"
 #include "jit/TrialInlining.h"
+#include "js/ColumnNumber.h"  // JS::LimitedColumnNumberOneOrigin
 #include "vm/BytecodeUtil.h"
 #include "vm/Compartment.h"
 #include "vm/FrameIter.h"  // js::OnlyJSJitFrameIter
@@ -38,6 +39,7 @@ using mozilla::CheckedInt;
 JitScript::JitScript(JSScript* script, Offset fallbackStubsOffset,
                      Offset endOffset, const char* profileString)
     : profileString_(profileString),
+      owningScript_(script),
       endOffset_(endOffset),
       icScript_(script->getWarmUpCount(),
                 fallbackStubsOffset - offsetOfICScript(),
@@ -55,13 +57,15 @@ JitScript::JitScript(JSScript* script, Offset fallbackStubsOffset,
 
 #ifdef DEBUG
 JitScript::~JitScript() {
-  // The contents of the stub space are removed and freed separately after the
-  // next minor GC. See prepareForDestruction.
-  MOZ_ASSERT(jitScriptStubSpace_.isEmpty());
+  // The contents of the AllocSite LifoAlloc are removed and freed separately
+  // after the next minor GC. See prepareForDestruction.
+  MOZ_ASSERT(allocSitesSpace_.isEmpty());
 
   // BaselineScript and IonScript must have been destroyed at this point.
   MOZ_ASSERT(!hasBaselineScript());
   MOZ_ASSERT(!hasIonScript());
+
+  MOZ_ASSERT(!isInList());
 }
 #else
 JitScript::~JitScript() = default;
@@ -120,6 +124,8 @@ bool JSScript::createJitScript(JSContext* cx) {
 
   jitScript->icScript()->initICEntries(cx, this);
 
+  cx->zone()->jitZone()->registerJitScript(jitScript.get());
+
   warmUpData_.initJitScript(jitScript.release());
   AddCellMemory(this, allocSize.value(), MemoryUse::JitScript);
 
@@ -170,6 +176,8 @@ void JSScript::releaseJitScriptOnFinalize(JS::GCContext* gcx) {
 }
 
 void JitScript::trace(JSTracer* trc) {
+  TraceEdge(trc, &owningScript_, "JitScript::owningScript_");
+
   icScript_.trace(trc);
 
   if (hasBaselineScript()) {
@@ -189,12 +197,41 @@ void JitScript::trace(JSTracer* trc) {
   }
 }
 
+void JitScript::traceWeak(JSTracer* trc) {
+  if (!icScript_.traceWeak(trc)) {
+    notePurgedStubs();
+  }
+
+  if (hasInliningRoot()) {
+    if (!inliningRoot()->traceWeak(trc)) {
+      notePurgedStubs();
+    }
+  }
+
+  if (hasIonScript()) {
+    ionScript()->traceWeak(trc);
+  }
+}
+
 void ICScript::trace(JSTracer* trc) {
   // Mark all IC stub codes hanging off the IC stub entries.
   for (size_t i = 0; i < numICEntries(); i++) {
     ICEntry& ent = icEntry(i);
     ent.trace(trc);
   }
+}
+
+bool ICScript::traceWeak(JSTracer* trc) {
+  // Mark all IC stub codes hanging off the IC stub entries.
+  bool allSurvived = true;
+  for (size_t i = 0; i < numICEntries(); i++) {
+    ICEntry& ent = icEntry(i);
+    if (!ent.traceWeak(trc)) {
+      allSurvived = false;
+    }
+  }
+
+  return allSurvived;
 }
 
 bool ICScript::addInlinedChild(JSContext* cx, UniquePtr<ICScript> child,
@@ -274,19 +311,20 @@ void JitScript::ensureProfileString(JSContext* cx, JSScript* script) {
 void JitScript::Destroy(Zone* zone, JitScript* script) {
   script->prepareForDestruction(zone);
 
+  // Remove from JitZone's linked list of JitScripts.
+  script->remove();
+
   js_delete(script);
 }
 
 void JitScript::prepareForDestruction(Zone* zone) {
-  // When the script contains pointers to nursery things, the store buffer can
-  // contain entries that point into the fallback stub space. Since we can
-  // destroy scripts outside the context of a GC, this situation could result
-  // in us trying to mark invalid store buffer entries.
-  //
-  // Defer freeing any allocated blocks until after the next minor GC.
-  jitScriptStubSpace_.freeAllAfterMinorGC(zone);
+  // Defer freeing AllocSite memory until after the next minor GC, because the
+  // nursery can point to these alloc sites.
+  JSRuntime* rt = zone->runtimeFromMainThread();
+  rt->gc.queueAllLifoBlocksForFreeAfterMinorGC(&allocSitesSpace_);
 
   // Trigger write barriers.
+  owningScript_ = nullptr;
   baselineScript_.set(zone, nullptr);
   ionScript_.set(zone, nullptr);
 }
@@ -320,7 +358,15 @@ static bool ComputeBinarySearchMid(FallbackStubs stubs, uint32_t pcOffset,
 
 ICEntry& ICScript::icEntryFromPCOffset(uint32_t pcOffset) {
   size_t mid;
-  MOZ_ALWAYS_TRUE(ComputeBinarySearchMid(FallbackStubs(this), pcOffset, &mid));
+  bool success = ComputeBinarySearchMid(FallbackStubs(this), pcOffset, &mid);
+#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
+  if (!success) {
+    MOZ_CRASH_UNSAFE_PRINTF("Missing icEntry for offset %d (max offset: %d)",
+                            int(pcOffset),
+                            int(fallbackStub(numICEntries() - 1)->pcOffset()));
+  }
+#endif
+  MOZ_ALWAYS_TRUE(success);
 
   MOZ_ASSERT(mid < numICEntries());
 
@@ -353,7 +399,7 @@ ICEntry* ICScript::interpreterICEntryFromPCOffset(uint32_t pcOffset) {
   return nullptr;
 }
 
-void JitScript::purgeOptimizedStubs(JSScript* script) {
+void JitScript::purgeStubs(JSScript* script) {
   MOZ_ASSERT(script->jitScript() == this);
 
   Zone* zone = script->zone();
@@ -368,54 +414,20 @@ void JitScript::purgeOptimizedStubs(JSScript* script) {
 
   JitSpew(JitSpew_BaselineIC, "Purging optimized stubs");
 
-  icScript()->purgeOptimizedStubs(zone);
+  icScript()->purgeStubs(zone);
   if (hasInliningRoot()) {
-    inliningRoot()->purgeOptimizedStubs(zone);
+    inliningRoot()->purgeStubs(zone);
   }
-#ifdef DEBUG
-  failedICHash_.reset();
-  hasPurgedStubs_ = true;
-#endif
+
+  notePurgedStubs();
 }
 
-void ICScript::purgeOptimizedStubs(Zone* zone) {
+void ICScript::purgeStubs(Zone* zone) {
   for (size_t i = 0; i < numICEntries(); i++) {
     ICEntry& entry = icEntry(i);
-    ICStub* lastStub = entry.firstStub();
-    while (!lastStub->isFallback()) {
-      lastStub = lastStub->toCacheIRStub()->next();
-    }
-
-    // Unlink all stubs allocated in the optimized space.
-    ICStub* stub = entry.firstStub();
-    ICCacheIRStub* prev = nullptr;
-
-    while (stub != lastStub) {
-      if (!stub->toCacheIRStub()->allocatedInFallbackSpace()) {
-        lastStub->toFallbackStub()->unlinkStub(zone, &entry, prev,
-                                               stub->toCacheIRStub());
-        stub = stub->toCacheIRStub()->next();
-        continue;
-      }
-
-      prev = stub->toCacheIRStub();
-      stub = stub->toCacheIRStub()->next();
-    }
-
-    lastStub->toFallbackStub()->clearHasFoldedStub();
+    ICFallbackStub* fallback = fallbackStub(i);
+    fallback->discardStubs(zone, &entry);
   }
-
-#ifdef DEBUG
-  // All remaining stubs must be allocated in the fallback space.
-  for (size_t i = 0; i < numICEntries(); i++) {
-    ICEntry& entry = icEntry(i);
-    ICStub* stub = entry.firstStub();
-    while (!stub->isFallback()) {
-      MOZ_ASSERT(stub->toCacheIRStub()->allocatedInFallbackSpace());
-      stub = stub->toCacheIRStub()->next();
-    }
-  }
-#endif
 }
 
 bool JitScript::ensureHasCachedBaselineJitData(JSContext* cx,
@@ -548,14 +560,14 @@ void jit::JitSpewBaselineICStats(JSScript* script, const char* dumpReason) {
     uint32_t pcOffset = fallback->pcOffset();
     jsbytecode* pc = script->offsetToPC(pcOffset);
 
-    unsigned column;
+    JS::LimitedColumnNumberOneOrigin column;
     unsigned int line = PCToLineNumber(script, pc, &column);
 
     spew->beginObject();
     spew->property("op", CodeName(JSOp(*pc)));
     spew->property("pc", pcOffset);
     spew->property("line", line);
-    spew->property("column", column);
+    spew->property("column", column.zeroOriginValue());
 
     spew->beginListProperty("counts");
     ICStub* stub = entry.firstStub();
@@ -572,14 +584,24 @@ void jit::JitSpewBaselineICStats(JSScript* script, const char* dumpReason) {
 }
 #endif
 
-static void MarkActiveJitScripts(JSContext* cx,
-                                 const JitActivationIterator& activation) {
+static void MarkActiveJitScriptsAndCopyStubs(
+    JSContext* cx, const JitActivationIterator& activation,
+    ICStubSpace& newStubSpace) {
   for (OnlyJSJitFrameIter iter(activation); !iter.done(); ++iter) {
     const JSJitFrameIter& frame = iter.frame();
     switch (frame.type()) {
       case FrameType::BaselineJS:
         frame.script()->jitScript()->setActive();
         break;
+      case FrameType::BaselineStub: {
+        auto* layout = reinterpret_cast<BaselineStubFrameLayout*>(frame.fp());
+        if (layout->maybeStubPtr() && !layout->maybeStubPtr()->isFallback()) {
+          ICCacheIRStub* stub = layout->maybeStubPtr()->toCacheIRStub();
+          ICCacheIRStub* newStub = stub->clone(cx, newStubSpace);
+          layout->setStubPtr(newStub);
+        }
+        break;
+      }
       case FrameType::Exit:
         if (frame.exitFrame()->is<LazyLinkExitFrameLayout>()) {
           LazyLinkExitFrameLayout* ll =
@@ -605,14 +627,15 @@ static void MarkActiveJitScripts(JSContext* cx,
   }
 }
 
-void jit::MarkActiveJitScripts(Zone* zone) {
+void jit::MarkActiveJitScriptsAndCopyStubs(Zone* zone,
+                                           ICStubSpace& newStubSpace) {
   if (zone->isAtomsZone()) {
     return;
   }
   JSContext* cx = TlsContext.get();
   for (JitActivationIterator iter(cx); !iter.done(); ++iter) {
     if (iter->compartment()->zone() == zone) {
-      MarkActiveJitScripts(cx, iter);
+      MarkActiveJitScriptsAndCopyStubs(cx, iter, newStubSpace);
     }
   }
 }
@@ -644,14 +667,11 @@ gc::AllocSite* JitScript::createAllocSite(JSScript* script) {
     return nullptr;
   }
 
-  ICStubSpace* stubSpace = jitScriptStubSpace();
-  auto* site =
-      static_cast<gc::AllocSite*>(stubSpace->alloc(sizeof(gc::AllocSite)));
+  auto* site = allocSitesSpace_.new_<gc::AllocSite>(script->zone(), script,
+                                                    JS::TraceKind::Object);
   if (!site) {
     return nullptr;
   }
-
-  new (site) gc::AllocSite(script->zone(), script, JS::TraceKind::Object);
 
   allocSites_.infallibleAppend(site);
 
@@ -676,13 +696,6 @@ bool JitScript::resetAllocSites(bool resetNurserySites,
   }
 
   return anyReset;
-}
-
-JitScriptICStubSpace* ICScript::jitScriptStubSpace() {
-  if (isInlined()) {
-    return inliningRoot_->jitScriptStubSpace();
-  }
-  return outerJitScript()->jitScriptStubSpace();
 }
 
 JitScript* ICScript::outerJitScript() {

@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "nsIThreadRetargetableStreamListener.h"
 #include "nsString.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/LinkedList.h"
@@ -706,6 +707,25 @@ nsCORSListenerProxy::OnDataAvailable(nsIRequest* aRequest,
   return listener->OnDataAvailable(aRequest, aInputStream, aOffset, aCount);
 }
 
+NS_IMETHODIMP
+nsCORSListenerProxy::OnDataFinished(nsresult aStatus) {
+  nsCOMPtr<nsIStreamListener> listener;
+  {
+    MutexAutoLock lock(mMutex);
+    listener = mOuterListener;
+  }
+  if (!listener) {
+    return NS_ERROR_FAILURE;
+  }
+  nsCOMPtr<nsIThreadRetargetableStreamListener> retargetableListener =
+      do_QueryInterface(listener);
+  if (retargetableListener) {
+    return retargetableListener->OnDataFinished(aStatus);
+  }
+
+  return NS_OK;
+}
+
 void nsCORSListenerProxy::SetInterceptController(
     nsINetworkInterceptController* aInterceptController) {
   mInterceptController = aInterceptController;
@@ -1042,8 +1062,7 @@ nsresult nsCORSListenerProxy::UpdateChannel(nsIChannel* aChannel,
     }
   }
 
-  rv = http->SetRequestHeader(nsDependentCString(net::nsHttp::Origin), origin,
-                              false);
+  rv = http->SetRequestHeader(net::nsHttp::Origin.val(), origin, false);
   NS_ENSURE_SUCCESS(rv, rv);
 
   // Make cookie-less if needed. We don't need to do anything here if the
@@ -1548,8 +1567,12 @@ nsresult nsCORSListenerProxy::StartCORSPreflight(
 
   nsPreflightCache::CacheEntry* entry = nullptr;
 
-  // Disable cache if devtools says so.
-  bool disableCache = Preferences::GetBool("devtools.cache.disabled");
+  nsLoadFlags loadFlags;
+  rv = aRequestChannel->GetLoadFlags(&loadFlags);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Disable preflight cache if devtools says so or on other force reloads
+  bool disableCache = (loadFlags & nsIRequest::LOAD_BYPASS_CACHE);
 
   if (sPreflightCache && !disableCache) {
     OriginAttributes attrs;
@@ -1584,10 +1607,6 @@ nsresult nsCORSListenerProxy::StartCORSPreflight(
   rv = aRequestChannel->GetNotificationCallbacks(getter_AddRefs(callbacks));
   NS_ENSURE_SUCCESS(rv, rv);
   nsCOMPtr<nsILoadContext> loadContext = do_GetInterface(callbacks);
-
-  nsLoadFlags loadFlags;
-  rv = aRequestChannel->GetLoadFlags(&loadFlags);
-  NS_ENSURE_SUCCESS(rv, rv);
 
   // Preflight requests should never be intercepted by service workers and
   // are always anonymous.

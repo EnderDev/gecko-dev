@@ -168,7 +168,7 @@ There are two different species of Talos tests:
 In addition we have some variations on existing tests:
 
 -  Heavy_: Run tests with the heavy user profile instead of a blank one
--  `Web extension`_: Run tests with a web extension to see the perf impact extension have
+-  WebExtension_: Run tests with a WebExtension to see the perf impact extension have
 -  `Real-world WebExtensions`_: Run tests with a set of 5 popular real-world WebExtensions installed and enabled.
 
 Some tests measure different things:
@@ -251,14 +251,14 @@ Currently we have issues with this on windows (takes too long to unpack
 the files from the profile), so we have turned this off there. Our goal
 is to run this on basic pageload and startup tests.
 
-Web extension
+WebExtension
 =============
 
-Web Extensions are what Firefox has switched to and there are different
+WebExtensions are what Firefox has switched to and there are different
 code paths and APIs used vs addons. Historically we don't test with
 addons (other than our test addons) and are missing out on common
 slowdowns. In 2017 we started running some startup and basic pageload
-tests with a web extension in the profile (`bug
+tests with a WebExtension in the profile (`bug
 1398974 <https://bugzilla.mozilla.org/show_bug.cgi?id=1398974>`__). We
 have updated the Extension to be more real world and will continue to do
 that.
@@ -1551,6 +1551,7 @@ For the sample commands found below, note that the capitalization used is import
 
    * cycles: 5
    * extensions: ['${talos}/pageloader', '${talos}/tests/devtools/addon']
+   * gecko_profile_extra_threads: DOM Worker
    * gecko_profile_interval: 10
    * linux_counters: None
    * mac_counters: None
@@ -3446,7 +3447,6 @@ For the sample commands found below, note that the capitalization used is import
    * reporting: time from *performance.timing.navigationStart* to *pagerendered* event in ms (lower is better)
    * data: load a PDF 20 times
    * pdfpaint: True
-   * preferences: {'pdfjs.eventBusDispatchToDOM': True}
    * timeout: 600
    * tpmanifest: ${talos}/tests/pdfpaint/pdfpaint.manifest
    * tppagecycles: 20
@@ -5787,7 +5787,7 @@ For the sample commands found below, note that the capitalization used is import
       49;people.com.cn/people.com.cn/index.html;96.49;103.64;115.12;66.05;117.84
 
    * extensions: ['${talos}/tests/tabswitch', '${talos}/pageloader']
-   * preferences: {'addon.test.tabswitch.urlfile': '${talos}/tests/tp5o.html', 'addon.test.tabswitch.webserver': '${webserver}', 'addon.test.tabswitch.maxurls': -1, 'browser.toolbars.bookmarks.visibility': 'never'}
+   * preferences: {'addon.test.tabswitch.urlfile': '${talos}/tests/tp5o.html', 'addon.test.tabswitch.webserver': '${webserver}', 'addon.test.tabswitch.maxurls': -1}
    * timeout: 900
    * tploadnocache: True
    * tpmanifest: ${talos}/tests/tabswitch/tabswitch.manifest
@@ -8260,7 +8260,7 @@ For the sample commands found below, note that the capitalization used is import
    * they just mean that we need to re-baseline our
         expectations from the test.
    * gecko_profile_interval: 10
-   * preferences: {'layout.frame_rate': 0, 'docshell.event_starvation_delay_hint': 1, 'dom.send_after_paint_to_content': False}
+   * preferences: {'layout.frame_rate': 0, 'docshell.event_starvation_delay_hint': 1, 'dom.send_after_paint_to_content': False, 'places.history.enabled': False}
    * timeout: 600
    * tpchrome: False
    * tpcycles: 1

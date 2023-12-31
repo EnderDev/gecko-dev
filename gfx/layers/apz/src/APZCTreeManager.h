@@ -111,7 +111,7 @@ class APZCTreeManager : public IAPZCTreeManager, public APZInputBridge {
   typedef mozilla::layers::AsyncDragMetrics AsyncDragMetrics;
   using HitTestResult = IAPZHitTester::HitTestResult;
 
-  /**
+  /*
    * A result from APZCTreeManager::FindHandoffParent.
    */
   struct TargetApzcForNodeResult {
@@ -128,11 +128,10 @@ class APZCTreeManager : public IAPZCTreeManager, public APZInputBridge {
   struct TreeBuildingState;
 
  public:
-  explicit APZCTreeManager(LayersId aRootLayersId,
-                           UniquePtr<IAPZHitTester> aHitTester = nullptr);
-
   static mozilla::LazyLogModule sLog;
 
+  static already_AddRefed<APZCTreeManager> Create(
+      LayersId aRootLayersId, UniquePtr<IAPZHitTester> aHitTester = nullptr);
   void SetSampler(APZSampler* aSampler);
   void SetUpdater(APZUpdater* aUpdater);
 
@@ -511,6 +510,10 @@ class APZCTreeManager : public IAPZCTreeManager, public APZInputBridge {
   already_AddRefed<wr::WebRenderAPI> GetWebRenderAPI() const;
 
  protected:
+  APZCTreeManager(LayersId aRootLayersId, UniquePtr<IAPZHitTester> aHitTester);
+
+  void Init();
+
   // Protected destructor, to discourage deletion outside of Release():
   virtual ~APZCTreeManager();
 
@@ -526,7 +529,7 @@ class APZCTreeManager : public IAPZCTreeManager, public APZInputBridge {
   void UnlockTree() MOZ_CAPABILITY_RELEASE(mTreeLock);
 
   // Protected hooks for gtests subclass
-  virtual AsyncPanZoomController* NewAPZCInstance(
+  virtual already_AddRefed<AsyncPanZoomController> NewAPZCInstance(
       LayersId aLayersId, GeckoContentController* aController);
 
  public:
@@ -562,6 +565,37 @@ class APZCTreeManager : public IAPZCTreeManager, public APZInputBridge {
   ParentLayerToScreenMatrix4x4 GetApzcToGeckoTransform(
       const AsyncPanZoomController* aApzc,
       const AsyncTransformComponents& aComponents) const;
+
+  /*
+   * A common utility function used for GetApzcToGeckoTransform and
+   * GetOopifApzcToRootContentApzcTransform.
+   *
+   * NOTE: The matrix returned by this function can NOT be used to convert
+   * metrics in |aStartApzc| to |aStopApzc|. If you want the conversion matrix,
+   * you will have to use either GetApzcToGeckoTransform or
+   * GetOopifApzcToRootContentApzcTransform.
+   */
+  ParentLayerToParentLayerMatrix4x4 GetApzcToApzcTransform(
+      const AsyncPanZoomController* aStartApzc,
+      const AsyncPanZoomController* aStopApzc,
+      const AsyncTransformComponents& aComponents) const;
+
+  /*
+   * Returns the transform matrix from |aApzc| to the root content APZC of
+   * |aApzc|.
+   * |aApzc| must be the root APZC of an out-of-process iframe.
+   */
+  ParentLayerToParentLayerMatrix4x4 GetOopifApzcToRootContentApzcTransform(
+      AsyncPanZoomController* aApzc) const;
+
+  /**
+   * Convert the given |aRect| in the document coordinates of |aApzc| to the top
+   * level document coordinates.
+   * |aApzc| must be an in-process root APZC.
+   */
+  CSSRect ConvertRectInApzcToRoot(AsyncPanZoomController* aApzc,
+                                  const CSSRect& aRect) const;
+
   ScreenPoint GetCurrentMousePosition() const;
   void SetCurrentMousePosition(const ScreenPoint& aNewPos);
 
@@ -642,8 +676,10 @@ class APZCTreeManager : public IAPZCTreeManager, public APZInputBridge {
   // The map lock is required within these functions; if the map lock is already
   // being held by the caller, the second overload should be used. If the map
   // lock is not being held at the call site, the first overload should be used.
-  SideBits SidesStuckToRootContent(const HitTestingTreeNode* aNode) const;
+  SideBits SidesStuckToRootContent(const HitTestingTreeNode* aNode,
+                                   AsyncTransformConsumer aMode) const;
   SideBits SidesStuckToRootContent(const StickyPositionInfo& aStickyInfo,
+                                   AsyncTransformConsumer aMode,
                                    const MutexAutoLock& aProofOfMapLock) const;
 
   /**
@@ -742,10 +778,10 @@ class APZCTreeManager : public IAPZCTreeManager, public APZInputBridge {
   void NotifyScrollbarDragRejected(const ScrollableLayerGuid& aGuid) const;
   void NotifyAutoscrollRejected(const ScrollableLayerGuid& aGuid) const;
 
-  // Returns the transform that converts from |aNode|'s coordinates to
-  // the coordinates of |aNode|'s parent in the hit-testing tree.
-  // Requires the caller to hold mTreeLock.
-  LayerToParentLayerMatrix4x4 ComputeTransformForNode(
+  // Returns the transform that converts from |aNode|'s coordinates
+  // to the coordinates of |aNode|'s parent in the hit-testing tree. Requires
+  // the caller to hold mTreeLock.
+  LayerToParentLayerMatrix4x4 ComputeTransformForScrollThumbNode(
       const HitTestingTreeNode* aNode) const MOZ_REQUIRES(mTreeLock);
 
   // Look up the GeckoContentController for the given layers id.
@@ -816,11 +852,6 @@ class APZCTreeManager : public IAPZCTreeManager, public APZInputBridge {
    */
   std::unordered_set<LayersId, LayersId::HashFn> mDetachedLayersIds
       MOZ_GUARDED_BY(mTreeLock);
-
-  /* If the current hit-testing tree contains an async zoom container
-   * node, this is set to the layers id of subtree that has the node.
-   */
-  Maybe<LayersId> mAsyncZoomContainerSubtree;
 
   /** A lock that protects mApzcMap, mScrollThumbInfo, mRootScrollbarInfo,
    * mFixedPositionInfo, and mStickyPositionInfo.

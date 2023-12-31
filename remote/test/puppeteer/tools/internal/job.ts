@@ -4,7 +4,7 @@ import {mkdir, readFile, stat, writeFile} from 'fs/promises';
 import {tmpdir} from 'os';
 import {dirname, join} from 'path';
 
-import glob from 'glob';
+import {hasMagic, globSync} from 'glob';
 
 interface JobContext {
   name: string;
@@ -41,8 +41,8 @@ class JobBuilder {
 
   inputs(inputs: string[]): JobBuilder {
     this.#inputs = inputs.flatMap(value => {
-      if (glob.hasMagic(value)) {
-        return glob.sync(value);
+      if (hasMagic(value)) {
+        return globSync(value);
       }
       return value;
     });
@@ -62,28 +62,28 @@ class JobBuilder {
     console.log(`Running job ${this.#name}...`);
     // For debugging.
     if (this.#force) {
-      return this.#run();
+      return await this.#run();
     }
     // In case we deleted an output file on purpose.
     if (!this.getOutputStats()) {
-      return this.#run();
+      return await this.#run();
     }
     // Run if the job has a value, but it changes.
     if (this.#value) {
       if (!(await this.isValueDifferent())) {
         return;
       }
-      return this.#run();
+      return await this.#run();
     }
     // Always run when there is no output.
     if (!this.#outputs.length) {
-      return this.#run();
+      return await this.#run();
     }
     // Make-like comparator.
     if (!(await this.areInputsNewer())) {
       return;
     }
-    return this.#run();
+    return await this.#run();
   }
 
   async isValueDifferent(): Promise<boolean> {

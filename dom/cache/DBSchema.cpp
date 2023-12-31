@@ -25,7 +25,6 @@
 #include "mozilla/dom/cache/TypeUtils.h"
 #include "mozilla/dom/cache/Types.h"
 #include "mozilla/dom/quota/ResultExtensions.h"
-#include "mozilla/net/MozURL.h"
 #include "mozilla/psm/TransportSecurityInfo.h"
 #include "nsCOMPtr.h"
 #include "nsCharSeparatedTokenizer.h"
@@ -33,6 +32,7 @@
 #include "nsHttp.h"
 #include "nsIContentPolicy.h"
 #include "nsICryptoHash.h"
+#include "nsIURI.h"
 #include "nsNetCID.h"
 #include "nsPrintfCString.h"
 #include "nsTArray.h"
@@ -1011,7 +1011,7 @@ Result<EntryIds, nsresult> QueryCache(mozIStorageConnection& aConn,
   }
 
   nsAutoCString query(
-      "SELECT id, COUNT(response_headers.name) AS vary_count "
+      "SELECT id, COUNT(response_headers.name) AS vary_count, response_type "
       "FROM entries "
       "LEFT OUTER JOIN response_headers ON "
       "entries.id=response_headers.entry_id "
@@ -1073,13 +1073,20 @@ Result<EntryIds, nsresult> QueryCache(mozIStorageConnection& aConn,
         }
         QM_TRY_RETURN(MOZ_TO_RESULT_INVOKE_MEMBER(state, ExecuteStep));
       },
-      [&state, &entryIdList, ignoreVary = aParams.ignoreVary(), &aConn,
+      [&state, &entryIdList, &aParams, &aConn,
        &aRequest]() -> Result<Ok, nsresult> {
         QM_TRY_INSPECT(const EntryId& entryId,
                        MOZ_TO_RESULT_INVOKE_MEMBER(state, GetInt32, 0));
 
         QM_TRY_INSPECT(const int32_t& varyCount,
                        MOZ_TO_RESULT_INVOKE_MEMBER(state, GetInt32, 1));
+
+        QM_TRY_INSPECT(const int32_t& responseType,
+                       MOZ_TO_RESULT_INVOKE_MEMBER(state, GetInt32, 2));
+
+        auto ignoreVary =
+            aParams.ignoreVary() ||
+            responseType == static_cast<int>(ResponseType::Opaque);
 
         if (!ignoreVary && varyCount > 0) {
           QM_TRY_INSPECT(const bool& matchedByVary,
@@ -1965,11 +1972,12 @@ Result<SavedResponse, nsresult> ReadResponse(mozIStorageConnection& aConn,
       return Err(NS_ERROR_FAILURE);
     }
 
-    RefPtr<net::MozURL> url;
-    QM_TRY(MOZ_TO_RESULT(net::MozURL::Init(getter_AddRefs(url), specNoSuffix)));
+    nsCOMPtr<nsIURI> url;
+    QM_TRY(MOZ_TO_RESULT(NS_NewURI(getter_AddRefs(url), specNoSuffix)));
 
 #ifdef DEBUG
-    nsDependentCSubstring scheme = url->Scheme();
+    nsAutoCString scheme;
+    QM_TRY(MOZ_TO_RESULT(url->GetScheme(scheme)));
 
     MOZ_ASSERT(
         scheme == "http" || scheme == "https" || scheme == "file" ||
@@ -1991,11 +1999,17 @@ Result<SavedResponse, nsresult> ReadResponse(mozIStorageConnection& aConn,
         scheme == "moz-extension");
 #endif
 
+    nsCOMPtr<nsIPrincipal> principal =
+        BasePrincipal::CreateContentPrincipal(url, attrs);
+    if (!principal) {
+      return Err(NS_ERROR_NULL_POINTER);
+    }
+
     nsCString origin;
-    url->Origin(origin);
+    QM_TRY(MOZ_TO_RESULT(principal->GetOriginNoSuffix(origin)));
 
     nsCString baseDomain;
-    QM_TRY(MOZ_TO_RESULT(url->BaseDomain(baseDomain)));
+    QM_TRY(MOZ_TO_RESULT(principal->GetBaseDomain(baseDomain)));
 
     savedResponse.mValue.principalInfo() =
         Some(mozilla::ipc::ContentPrincipalInfo(attrs, origin, specNoSuffix,

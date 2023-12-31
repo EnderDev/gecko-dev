@@ -85,6 +85,7 @@ class XRSystem;
 class StorageManager;
 class MediaCapabilities;
 class MediaSession;
+class UserActivation;
 struct ShareData;
 class WindowGlobalChild;
 
@@ -107,7 +108,7 @@ class Navigator final : public nsISupports, public nsWrapperCache {
 
   void GetProduct(nsAString& aProduct);
   void GetLanguage(nsAString& aLanguage);
-  void GetAppName(nsAString& aAppName, CallerType aCallerType) const;
+  void GetAppName(nsAString& aAppName) const;
   void GetAppVersion(nsAString& aAppName, CallerType aCallerType,
                      ErrorResult& aRv) const;
   void GetPlatform(nsAString& aPlatform, CallerType aCallerType,
@@ -131,9 +132,6 @@ class Navigator final : public nsISupports, public nsWrapperCache {
 
   bool CanShare(const ShareData& aData);
   already_AddRefed<Promise> Share(const ShareData& aData, ErrorResult& aRv);
-
-  static void AppName(nsAString& aAppName, Document* aCallerDoc,
-                      bool aUsePrefOverriddenValue);
 
   static nsresult GetPlatform(nsAString& aPlatform, Document* aCallerDoc,
                               bool aUsePrefOverriddenValue);
@@ -252,6 +250,8 @@ class Navigator final : public nsISupports, public nsWrapperCache {
   AutoplayPolicy GetAutoplayPolicy(HTMLMediaElement& aElement);
   AutoplayPolicy GetAutoplayPolicy(AudioContext& aContext);
 
+  already_AddRefed<dom::UserActivation> UserActivation();
+
  private:
   void ValidateShareData(const ShareData& aData, ErrorResult& aRv);
   RefPtr<MediaKeySystemAccessManager> mMediaKeySystemAccessManager;
@@ -299,6 +299,7 @@ class Navigator final : public nsISupports, public nsWrapperCache {
   RefPtr<webgpu::Instance> mWebGpu;
   RefPtr<Promise> mSharePromise;  // Web Share API related
   RefPtr<dom::LockManager> mLocks;
+  RefPtr<dom::UserActivation> mUserActivation;
 };
 
 }  // namespace mozilla::dom

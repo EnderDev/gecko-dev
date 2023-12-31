@@ -636,16 +636,6 @@ export class SpecialPowersChild extends JSWindowActorChild {
     return chromeScript;
   }
 
-  async importInMainProcess(importString) {
-    var message = await this.sendQuery("SPImportInMainProcess", importString);
-    if (message.hadError) {
-      throw new Error(
-        "SpecialPowers.importInMainProcess failed with error " +
-          message.errorMessage
-      );
-    }
-  }
-
   get Services() {
     return Services;
   }
@@ -1447,6 +1437,20 @@ export class SpecialPowersChild extends JSWindowActorChild {
     return this.docShell.nsILoadContext.useRemoteSubframes;
   }
 
+  ISOLATION_STRATEGY = {
+    IsolateNothing: 0,
+    IsolateEverything: 1,
+    IsolateHighValue: 2,
+  };
+
+  effectiveIsolationStrategy() {
+    // If remote subframes are disabled, we always use the IsolateNothing strategy.
+    if (!this.useRemoteSubframes) {
+      return this.ISOLATION_STRATEGY.IsolateNothing;
+    }
+    return this.getIntPref("fission.webContentIsolationStrategy");
+  }
+
   addSystemEventListener(target, type, listener, useCapture) {
     Services.els.addSystemEventListener(target, type, listener, useCapture);
   }
@@ -2188,11 +2192,11 @@ export class SpecialPowersChild extends JSWindowActorChild {
   }
 
   /**
-   * See \ref nsIContentViewerEdit.setCommandNode(in Node).
+   * See \ref nsIDocumentViewerEdit.setCommandNode(in Node).
    */
   setCommandNode(window, node) {
     return window.docShell.contentViewer
-      .QueryInterface(Ci.nsIContentViewerEdit)
+      .QueryInterface(Ci.nsIDocumentViewerEdit)
       .setCommandNode(node);
   }
 

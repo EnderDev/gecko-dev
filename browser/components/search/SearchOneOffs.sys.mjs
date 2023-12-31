@@ -273,7 +273,7 @@ export class SearchOneOffs {
   }
 
   /**
-   * The selected one-off, a xul:button, including the add-engine button
+   * The selected one-off including the add-engine button
    * and the search-settings button.
    *
    * @param {DOMElement|null} val
@@ -285,7 +285,7 @@ export class SearchOneOffs {
       previousButton.removeAttribute("selected");
     }
     if (val) {
-      val.setAttribute("selected", "true");
+      val.toggleAttribute("selected", true);
     }
     this._selectedButton = val;
 
@@ -365,11 +365,7 @@ export class SearchOneOffs {
   observe(aEngine, aTopic, aData) {
     // For the "browser-search-service" topic, we only need to invalidate
     // the cache on initialization complete or when the engines are reloaded.
-    if (
-      aTopic != "browser-search-service" ||
-      aData == "init-complete" ||
-      aData == "engines-reloaded"
-    ) {
+    if (aTopic != "browser-search-service" || aData == "engines-reloaded") {
       // Make sure the engine list was updated.
       this.invalidateCache();
     }
@@ -398,6 +394,7 @@ export class SearchOneOffs {
       console.error("Search-one-offs::_rebuild() error:", ex);
     } finally {
       this._rebuilding = false;
+      this.dispatchEvent(new Event("rebuild"));
     }
   }
 
@@ -470,8 +467,6 @@ export class SearchOneOffs {
 
     let engines = (await this.getEngineInfo()).engines;
     this._rebuildEngineList(engines, addEngines);
-
-    this.dispatchEvent(new Event("rebuild"));
   }
 
   /**

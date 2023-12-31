@@ -13,6 +13,7 @@ var { UrlbarMuxer, UrlbarProvider, UrlbarQueryContext, UrlbarUtils } =
 
 ChromeUtils.defineESModuleGetters(this, {
   AddonTestUtils: "resource://testing-common/AddonTestUtils.sys.mjs",
+  HttpServer: "resource://testing-common/httpd.sys.mjs",
   PlacesTestUtils: "resource://testing-common/PlacesTestUtils.sys.mjs",
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
   PromiseUtils: "resource://gre/modules/PromiseUtils.sys.mjs",
@@ -28,11 +29,7 @@ ChromeUtils.defineESModuleGetters(this, {
   sinon: "resource://testing-common/Sinon.sys.mjs",
 });
 
-XPCOMUtils.defineLazyModuleGetters(this, {
-  HttpServer: "resource://testing-common/httpd.js",
-});
-
-XPCOMUtils.defineLazyGetter(this, "QuickSuggestTestUtils", () => {
+ChromeUtils.defineLazyGetter(this, "QuickSuggestTestUtils", () => {
   const { QuickSuggestTestUtils: module } = ChromeUtils.importESModule(
     "resource://testing-common/QuickSuggestTestUtils.sys.mjs"
   );
@@ -40,7 +37,7 @@ XPCOMUtils.defineLazyGetter(this, "QuickSuggestTestUtils", () => {
   return module;
 });
 
-XPCOMUtils.defineLazyGetter(this, "MerinoTestUtils", () => {
+ChromeUtils.defineLazyGetter(this, "MerinoTestUtils", () => {
   const { MerinoTestUtils: module } = ChromeUtils.importESModule(
     "resource://testing-common/MerinoTestUtils.sys.mjs"
   );
@@ -56,7 +53,7 @@ ChromeUtils.defineLazyGetter(this, "UrlbarTestUtils", () => {
   return module;
 });
 
-XPCOMUtils.defineLazyGetter(this, "PlacesFrecencyRecalculator", () => {
+ChromeUtils.defineLazyGetter(this, "PlacesFrecencyRecalculator", () => {
   return Cc["@mozilla.org/places/frecency-recalculator;1"].getService(
     Ci.nsIObserver
   ).wrappedJSObject;
@@ -127,15 +124,6 @@ function createContext(searchString = "foo", properties = {}) {
       properties
     )
   );
-  context.view = {
-    get visibleResults() {
-      return context.results;
-    },
-    controller: {
-      removeResult() {},
-    },
-    acknowledgeDismissal() {},
-  };
   UrlbarTokenizer.tokenize(context);
   return context;
 }
@@ -246,11 +234,18 @@ function makeTestServer(port = -1) {
  * onto the search query.
  *
  * @param {Function} suggestionsFn
- *        A function that returns an array of suggestion strings given a
- *        search string.  If not given, a default function is used.
+ *   A function that returns an array of suggestion strings given a
+ *   search string.  If not given, a default function is used.
+ * @param {object} options
+ *   Options for the check.
+ * @param {string} [options.name]
+ *   The name of the engine to install.
  * @returns {nsISearchEngine} The new engine.
  */
-async function addTestSuggestionsEngine(suggestionsFn = null) {
+async function addTestSuggestionsEngine(
+  suggestionsFn = null,
+  { name = SUGGESTIONS_ENGINE_NAME } = {}
+) {
   // This port number should match the number in engine-suggestions.xml.
   let server = makeTestServer();
   server.registerPathHandler("/suggest", (req, resp) => {
@@ -264,14 +259,14 @@ async function addTestSuggestionsEngine(suggestionsFn = null) {
     resp.write(JSON.stringify(data));
   });
   await SearchTestUtils.installSearchExtension({
-    name: SUGGESTIONS_ENGINE_NAME,
+    name,
     search_url: `http://localhost:${server.identity.primaryPort}/search`,
     suggest_url: `http://localhost:${server.identity.primaryPort}/suggest`,
     suggest_url_get_params: "?q={searchTerms}",
     // test_search_suggestions_aliases.js uses the search form.
     search_form: `http://localhost:${server.identity.primaryPort}/search?q={searchTerms}`,
   });
-  let engine = Services.search.getEngineByName("Suggestions");
+  let engine = Services.search.getEngineByName(name);
   return engine;
 }
 
@@ -519,9 +514,14 @@ function makeOmniboxResult(
  *   The page title.
  * @param {string} [options.iconUri]
  *   A URI for the page icon.
+ * @param {number} [options.userContextId]
+ *   A id of the userContext in which the tab is located.
  * @returns {UrlbarResult}
  */
-function makeTabSwitchResult(queryContext, { uri, title, iconUri }) {
+function makeTabSwitchResult(
+  queryContext,
+  { uri, title, iconUri, userContextId }
+) {
   return new UrlbarResult(
     UrlbarUtils.RESULT_TYPE.TAB_SWITCH,
     UrlbarUtils.RESULT_SOURCE.TABS,
@@ -530,6 +530,7 @@ function makeTabSwitchResult(queryContext, { uri, title, iconUri }) {
       title: [title, UrlbarUtils.HIGHLIGHT.TYPED],
       // Check against undefined so consumers can pass in the empty string.
       icon: typeof iconUri != "undefined" ? iconUri : `page-icon:${uri}`,
+      userContextId: [userContextId || 0],
     })
   );
 }
@@ -884,7 +885,7 @@ async function check_results({
   // updates.
   // This is not a problem in real life, but autocomplete tests should
   // return reliable resultsets, thus we have to wait.
-  await PlacesTestUtils.promiseAsyncUpdates();
+  await PlacesFrecencyRecalculator.recalculateAnyOutdatedFrecencies();
 
   const controller = UrlbarTestUtils.newMockController({
     input: {
@@ -900,6 +901,14 @@ async function check_results({
           href: AppConstants.BROWSER_CHROME_URL,
         },
       },
+    },
+  });
+  controller.setView({
+    get visibleResults() {
+      return context.results;
+    },
+    controller: {
+      removeResult() {},
     },
   });
 

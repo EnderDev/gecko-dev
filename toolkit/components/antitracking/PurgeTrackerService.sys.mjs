@@ -21,11 +21,11 @@ XPCOMUtils.defineLazyServiceGetter(
   "nsIStorageActivityService"
 );
 
-XPCOMUtils.defineLazyGetter(lazy, "gClassifierFeature", () => {
+ChromeUtils.defineLazyGetter(lazy, "gClassifierFeature", () => {
   return lazy.gClassifier.getFeatureByName("tracking-annotation");
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "logger", () => {
+ChromeUtils.defineLazyGetter(lazy, "logger", () => {
   return console.createInstance({
     prefix: "*** PurgeTrackerService:",
     maxLogLevelPref: "privacy.purge_trackers.logging.level",
@@ -210,7 +210,8 @@ PurgeTrackerService.prototype = {
           Ci.nsIClearDataService.CLEAR_MEDIA_DEVICES |
           Ci.nsIClearDataService.CLEAR_STORAGE_ACCESS |
           Ci.nsIClearDataService.CLEAR_AUTH_TOKENS |
-          Ci.nsIClearDataService.CLEAR_AUTH_CACHE,
+          Ci.nsIClearDataService.CLEAR_AUTH_CACHE |
+          Ci.nsIClearDataService.CLEAR_COOKIE_BANNER_EXECUTED_RECORD,
         resolve
       );
     });

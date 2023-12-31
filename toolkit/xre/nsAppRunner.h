@@ -54,6 +54,10 @@ extern nsString gAbsoluteArgv0Path;
 
 extern bool gIsGtest;
 
+extern bool gKioskMode;
+extern int gKioskMonitor;
+extern bool gAllowContentAnalysis;
+
 namespace mozilla {
 nsresult AppInfoConstructor(const nsID& aIID, void** aResult);
 }  // namespace mozilla
@@ -100,8 +104,6 @@ nsresult NS_LockProfilePath(nsIFile* aPath, nsIFile* aTempPath,
                             nsIProfileLock** aResult);
 
 void WriteConsoleLog();
-
-void OverrideDefaultLocaleIfNeeded();
 
 /**
  * Allow exit() calls to complete. This should be done from a proper Gecko

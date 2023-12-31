@@ -55,7 +55,7 @@
 //! If parsing with [Syn], you'll use [`parse_macro_input!`] instead to
 //! propagate parse errors correctly back to the compiler when parsing fails.
 //!
-//! [`parse_macro_input!`]: https://docs.rs/syn/1.0/syn/macro.parse_macro_input.html
+//! [`parse_macro_input!`]: https://docs.rs/syn/2.0/syn/macro.parse_macro_input.html
 //!
 //! # Unstable features
 //!
@@ -65,7 +65,7 @@
 //!
 //! To opt into the additional APIs available in the most recent nightly
 //! compiler, the `procmacro2_semver_exempt` config flag must be passed to
-//! rustc. We will polyfill those nightly-only APIs back to Rust 1.31.0. As
+//! rustc. We will polyfill those nightly-only APIs back to Rust 1.56.0. As
 //! these are unstable APIs that track the nightly compiler, minor versions of
 //! proc-macro2 may make breaking changes to them at any time.
 //!
@@ -86,11 +86,8 @@
 //! a different thread.
 
 // Proc-macro2 types in rustdoc of other crates get linked to here.
-#![doc(html_root_url = "https://docs.rs/proc-macro2/1.0.59")]
-#![cfg_attr(
-    any(proc_macro_span, super_unstable),
-    feature(proc_macro_span, proc_macro_span_shrink)
-)]
+#![doc(html_root_url = "https://docs.rs/proc-macro2/1.0.69")]
+#![cfg_attr(any(proc_macro_span, super_unstable), feature(proc_macro_span))]
 #![cfg_attr(super_unstable, feature(proc_macro_def_site))]
 #![cfg_attr(doc_cfg, feature(doc_cfg))]
 #![allow(
@@ -98,8 +95,11 @@
     clippy::cast_possible_truncation,
     clippy::doc_markdown,
     clippy::items_after_statements,
+    clippy::iter_without_into_iter,
     clippy::let_underscore_untyped,
     clippy::manual_assert,
+    clippy::manual_range_contains,
+    clippy::missing_safety_doc,
     clippy::must_use_candidate,
     clippy::needless_doctest_main,
     clippy::new_without_default,
@@ -119,6 +119,8 @@ compile_error! {"\
     is turned on for the compilation of the proc-macro2 \
     build script as well.
 "}
+
+extern crate alloc;
 
 #[cfg(feature = "proc-macro")]
 extern crate proc_macro;
@@ -144,8 +146,6 @@ use crate::fallback as imp;
 mod imp;
 
 #[cfg(span_locations)]
-mod convert;
-#[cfg(span_locations)]
 mod location;
 
 use crate::extra::DelimSpan;
@@ -153,7 +153,6 @@ use crate::marker::Marker;
 use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display};
 use core::hash::{Hash, Hasher};
-use core::iter::FromIterator;
 use core::ops::RangeBounds;
 use core::str::FromStr;
 use std::error::Error;
@@ -405,9 +404,6 @@ impl Span {
     /// The span located at the invocation of the procedural macro, but with
     /// local variables, labels, and `$crate` resolved at the definition site
     /// of the macro. This is the same hygiene behavior as `macro_rules`.
-    ///
-    /// This function requires Rust 1.45 or later.
-    #[cfg(not(no_hygiene))]
     pub fn mixed_site() -> Self {
         Span::_new(imp::Span::mixed_site())
     }
@@ -492,24 +488,6 @@ impl Span {
     #[cfg_attr(doc_cfg, doc(cfg(feature = "span-locations")))]
     pub fn end(&self) -> LineColumn {
         self.inner.end()
-    }
-
-    /// Creates an empty span pointing to directly before this span.
-    ///
-    /// This method is semver exempt and not exposed by default.
-    #[cfg(all(procmacro2_semver_exempt, any(not(wrap_proc_macro), super_unstable)))]
-    #[cfg_attr(doc_cfg, doc(cfg(procmacro2_semver_exempt)))]
-    pub fn before(&self) -> Span {
-        Span::_new(self.inner.before())
-    }
-
-    /// Creates an empty span pointing to directly after this span.
-    ///
-    /// This method is semver exempt and not exposed by default.
-    #[cfg(all(procmacro2_semver_exempt, any(not(wrap_proc_macro), super_unstable)))]
-    #[cfg_attr(doc_cfg, doc(cfg(procmacro2_semver_exempt)))]
-    pub fn after(&self) -> Span {
-        Span::_new(self.inner.after())
     }
 
     /// Create a new span encompassing `self` and `other`.
@@ -876,7 +854,7 @@ impl Debug for Punct {
 /// Rust keywords. Use `input.call(Ident::parse_any)` when parsing to match the
 /// behaviour of `Ident::new`.
 ///
-/// [`Parse`]: https://docs.rs/syn/1.0/syn/parse/trait.Parse.html
+/// [`Parse`]: https://docs.rs/syn/2.0/syn/parse/trait.Parse.html
 ///
 /// # Examples
 ///
@@ -967,7 +945,7 @@ impl Ident {
     /// Panics if the input string is neither a keyword nor a legal variable
     /// name. If you are not sure whether the string contains an identifier and
     /// need to handle an error case, use
-    /// <a href="https://docs.rs/syn/1.0/syn/fn.parse_str.html"><code
+    /// <a href="https://docs.rs/syn/2.0/syn/fn.parse_str.html"><code
     ///   style="padding-right:0;">syn::parse_str</code></a><code
     ///   style="padding-left:0;">::&lt;Ident&gt;</code>
     /// rather than `Ident::new`.

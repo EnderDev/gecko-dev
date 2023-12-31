@@ -2,9 +2,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-fxviewtabrow-open-menu-button =
-  .title = Open menu
-
 # Variables:
 #   $date (string) - Date to be formatted based on locale
 fxviewtabrow-date = { DATETIME($date, dateStyle: "short") }
@@ -44,3 +41,20 @@ fxviewtabrow-save-to-pocket = Save to { -pocket-brand-name }
     .accesskey = o
 fxviewtabrow-copy-link = Copy Link
     .accesskey = L
+fxviewtabrow-close-tab = Close Tab
+    .accesskey = C
+fxviewtabrow-move-tab = Move Tab
+    .accesskey = v
+fxviewtabrow-move-tab-start = Move to Start
+    .accesskey = S
+fxviewtabrow-move-tab-end = Move to End
+    .accesskey = E
+fxviewtabrow-move-tab-window = Move to New Window
+    .accesskey = W
+fxviewtabrow-send-tab = Send Tab to Device
+    .accesskey = n
+
+# Variables:
+#   $tabTitle (string) - Title of the tab to which the context menu is associated
+fxviewtabrow-options-menu-button =
+  .title = Options for { $tabTitle }

@@ -46,13 +46,14 @@ const isExpectedLoginItemSelected = async ({ expectedGuid }) => {
 
   await ContentTaskUtils.waitForCondition(
     () =>
-      loginList.querySelector("li[aria-selected='true']")?.dataset?.guid ===
-      expectedGuid,
+      loginList.querySelector("login-list-item[aria-selected='true']")?.dataset
+        ?.guid === expectedGuid,
     "Wait for login item to be selected"
   );
 
   Assert.equal(
-    loginList.querySelector("li[aria-selected='true']")?.dataset?.guid,
+    loginList.querySelector("login-list-item[aria-selected='true']")?.dataset
+      ?.guid,
     expectedGuid,
     "Expected login is preselected"
   );
@@ -98,15 +99,15 @@ add_task(
         await openACPopup(popup, browser, "#form-basic-username");
 
         const secondLoginItem = popup.firstChild.getItemAtIndex(1);
-        const secondLoginItemSettingsIcon = secondLoginItem.querySelector(
-          ".ac-settings-button"
+        const secondLoginItemSecondaryAction = secondLoginItem.querySelector(
+          ".ac-secondary-action"
         );
 
         Assert.ok(
-          !secondLoginItemSettingsIcon.checkVisibility({
+          !secondLoginItemSecondaryAction.checkVisibility({
             checkVisibilityCSS: true,
           }),
-          "Gear icon should not be visible initially"
+          "Secondary action should not be visible initially"
         );
 
         await EventUtils.synthesizeKey("KEY_ArrowDown");
@@ -118,10 +119,10 @@ add_task(
         );
 
         Assert.ok(
-          secondLoginItemSettingsIcon.checkVisibility({
+          secondLoginItemSecondaryAction.checkVisibility({
             checkVisibilityCSS: true,
           }),
-          "Gear icon should be visible when login item is active"
+          "Secondary action should be visible when item is active"
         );
 
         const aboutLoginsTabPromise = BrowserTestUtils.waitForNewTab(
@@ -130,7 +131,7 @@ add_task(
           true
         );
 
-        EventUtils.synthesizeMouseAtCenter(secondLoginItemSettingsIcon, {});
+        EventUtils.synthesizeMouseAtCenter(secondLoginItemSecondaryAction, {});
         const aboutLoginsTab = await aboutLoginsTabPromise;
 
         await SpecialPowers.spawn(
@@ -193,7 +194,7 @@ add_task(async function test_new_login_url_has_correct_hash() {
         const loginList =
           content.document.querySelector("login-list").shadowRoot;
         const createLoginButton = loginList.querySelector(
-          "button.create-login-button"
+          "login-command-button.create-login-button"
         );
 
         createLoginButton.click();
@@ -212,6 +213,35 @@ add_task(async function test_new_login_url_has_correct_hash() {
           "Location hash should be empty"
         );
       });
+    }
+  );
+});
+
+add_task(async function test_no_logins_empty_url_hash() {
+  Services.logins.removeAllUserFacingLogins();
+  await BrowserTestUtils.withNewTab(
+    {
+      gBrowser,
+      url: TEST_URL_PATH,
+    },
+    async function () {
+      await waitForAppMenu();
+
+      const appMenuPasswordsButton = document.getElementById(
+        "appMenu-passwords-button"
+      );
+
+      const aboutLoginsTabPromise = BrowserTestUtils.waitForNewTab(
+        gBrowser,
+        url => new URL(url).hash === "",
+        true
+      );
+
+      EventUtils.synthesizeMouseAtCenter(appMenuPasswordsButton, {});
+
+      const aboutLoginsTab = await aboutLoginsTabPromise;
+
+      gBrowser.removeTab(aboutLoginsTab);
     }
   );
 });

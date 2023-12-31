@@ -25,6 +25,7 @@
 #include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
+#include "rtc_base/string_encode.h"
 #include "rtc_base/trace_event.h"
 #include "system_wrappers/include/clock.h"
 
@@ -32,10 +33,7 @@ namespace webrtc {
 
 namespace {
 
-// Changed from 10 to 30 in Mozilla Bug 989944: Increase decode
-// timestamp map to handle delayed decode on 8x10.  The map is
-// now a deque (as of libwebrtc upstream commit 1c51ec4d74).
-constexpr size_t kDecoderFrameMemoryLength = 30;
+constexpr size_t kDecoderFrameMemoryLength = 10;
 
 }
 
@@ -302,8 +300,14 @@ int32_t VCMGenericDecoder::Decode(const VCMEncodedFrame& frame, Timestamp now) {
     _callback->OnDecoderInfoChanged(std::move(decoder_info));
   }
   if (ret < WEBRTC_VIDEO_CODEC_OK) {
+    const absl::optional<uint32_t> ssrc =
+        !frame_info.packet_infos.empty()
+            ? absl::make_optional(frame_info.packet_infos[0].ssrc())
+            : absl::nullopt;
     RTC_LOG(LS_WARNING) << "Failed to decode frame with timestamp "
-                        << frame.Timestamp() << ", error code: " << ret;
+                        << frame.Timestamp() << ", ssrc "
+                        << (ssrc ? rtc::ToString(*ssrc) : "<not set>")
+                        << ", error code: " << ret;
     _callback->ClearTimestampMap();
   } else if (ret == WEBRTC_VIDEO_CODEC_NO_OUTPUT) {
     // No output.

@@ -63,20 +63,24 @@ DynFn DynamicFunction(Sig fun) {
 inline DynFn JitPreWriteBarrier(MIRType type) {
   switch (type) {
     case MIRType::Value: {
-      using Fn = void (*)(JSRuntime * rt, Value * vp);
+      using Fn = void (*)(JSRuntime* rt, Value* vp);
       return DynamicFunction<Fn>(JitValuePreWriteBarrier);
     }
     case MIRType::String: {
-      using Fn = void (*)(JSRuntime * rt, JSString * *stringp);
+      using Fn = void (*)(JSRuntime* rt, JSString** stringp);
       return DynamicFunction<Fn>(JitStringPreWriteBarrier);
     }
     case MIRType::Object: {
-      using Fn = void (*)(JSRuntime * rt, JSObject * *objp);
+      using Fn = void (*)(JSRuntime* rt, JSObject** objp);
       return DynamicFunction<Fn>(JitObjectPreWriteBarrier);
     }
     case MIRType::Shape: {
-      using Fn = void (*)(JSRuntime * rt, Shape * *shapep);
+      using Fn = void (*)(JSRuntime* rt, Shape** shapep);
       return DynamicFunction<Fn>(JitShapePreWriteBarrier);
+    }
+    case MIRType::WasmAnyRef: {
+      using Fn = void (*)(JSRuntime* rt, wasm::AnyRef* refp);
+      return DynamicFunction<Fn>(JitWasmAnyRefPreWriteBarrier);
     }
     default:
       MOZ_CRASH();
@@ -348,11 +352,13 @@ uint32_t MacroAssembler::buildFakeExitFrame(Register scratch) {
 // Exit frame footer.
 
 void MacroAssembler::enterExitFrame(Register cxreg, Register scratch,
-                                    const VMFunctionData* f) {
-  MOZ_ASSERT(f);
+                                    VMFunctionId f) {
   linkExitFrame(cxreg, scratch);
-  // Push VMFunction pointer, to mark arguments.
-  Push(ImmPtr(f));
+  // Push `ExitFrameType::VMFunction + VMFunctionId`, for marking the arguments.
+  // See ExitFooterFrame::data_.
+  uintptr_t type = uintptr_t(ExitFrameType::VMFunction) + uintptr_t(f);
+  MOZ_ASSERT(type <= INT32_MAX);
+  Push(Imm32(type));
 }
 
 void MacroAssembler::enterFakeExitFrame(Register cxreg, Register scratch,
@@ -384,6 +390,24 @@ void MacroAssembler::moveValue(const ConstantOrRegister& src,
   }
 
   moveValue(src.reg(), dest);
+}
+
+// ===============================================================
+// Copy instructions
+
+void MacroAssembler::copy64(const Address& src, const Address& dest,
+                            Register scratch) {
+#if JS_BITS_PER_WORD == 32
+  MOZ_RELEASE_ASSERT(src.base != scratch && dest.base != scratch);
+  load32(LowWord(src), scratch);
+  store32(scratch, LowWord(dest));
+  load32(HighWord(src), scratch);
+  store32(scratch, HighWord(dest));
+#else
+  Register64 scratch64(scratch);
+  load64(src, scratch64);
+  store64(scratch64, dest);
+#endif
 }
 
 // ===============================================================
@@ -735,22 +759,6 @@ void MacroAssembler::branchTestObjectIsProxy(bool proxy, Register object,
                Imm32(ShiftedMask), label);
 }
 
-void MacroAssembler::branchTestObjectIsWasmGcObject(bool isGcObject,
-                                                    Register object,
-                                                    Register scratch,
-                                                    Label* label) {
-  constexpr uint32_t ShiftedMask = (Shape::kindMask() << Shape::kindShift());
-  constexpr uint32_t ShiftedKind =
-      (uint32_t(Shape::Kind::WasmGC) << Shape::kindShift());
-  MOZ_ASSERT(object != scratch);
-
-  loadPtr(Address(object, JSObject::offsetOfShape()), scratch);
-  load32(Address(scratch, Shape::offsetOfImmutableFlags()), scratch);
-  and32(Imm32(ShiftedMask), scratch);
-  branch32(isGcObject ? Assembler::Equal : Assembler::NotEqual, scratch,
-           Imm32(ShiftedKind), label);
-}
-
 void MacroAssembler::branchTestProxyHandlerFamily(Condition cond,
                                                   Register proxy,
                                                   Register scratch,
@@ -895,15 +903,16 @@ void MacroAssembler::canonicalizeDoubleIfDeterministic(FloatRegister reg) {
 // ========================================================================
 // Memory access primitives.
 template <class T>
-void MacroAssembler::storeDouble(FloatRegister src, const T& dest) {
+FaultingCodeOffset MacroAssembler::storeDouble(FloatRegister src,
+                                               const T& dest) {
   canonicalizeDoubleIfDeterministic(src);
-  storeUncanonicalizedDouble(src, dest);
+  return storeUncanonicalizedDouble(src, dest);
 }
 
-template void MacroAssembler::storeDouble(FloatRegister src,
-                                          const Address& dest);
-template void MacroAssembler::storeDouble(FloatRegister src,
-                                          const BaseIndex& dest);
+template FaultingCodeOffset MacroAssembler::storeDouble(FloatRegister src,
+                                                        const Address& dest);
+template FaultingCodeOffset MacroAssembler::storeDouble(FloatRegister src,
+                                                        const BaseIndex& dest);
 
 template <class T>
 void MacroAssembler::boxDouble(FloatRegister src, const T& dest) {
@@ -911,15 +920,16 @@ void MacroAssembler::boxDouble(FloatRegister src, const T& dest) {
 }
 
 template <class T>
-void MacroAssembler::storeFloat32(FloatRegister src, const T& dest) {
+FaultingCodeOffset MacroAssembler::storeFloat32(FloatRegister src,
+                                                const T& dest) {
   canonicalizeFloatIfDeterministic(src);
-  storeUncanonicalizedFloat32(src, dest);
+  return storeUncanonicalizedFloat32(src, dest);
 }
 
-template void MacroAssembler::storeFloat32(FloatRegister src,
-                                           const Address& dest);
-template void MacroAssembler::storeFloat32(FloatRegister src,
-                                           const BaseIndex& dest);
+template FaultingCodeOffset MacroAssembler::storeFloat32(FloatRegister src,
+                                                         const Address& dest);
+template FaultingCodeOffset MacroAssembler::storeFloat32(FloatRegister src,
+                                                         const BaseIndex& dest);
 
 template <typename T>
 void MacroAssembler::fallibleUnboxInt32(const T& src, Register dest,

@@ -509,6 +509,7 @@ struct GeckoFontMetrics {
   mozilla::Length mCapHeight;  // negatives indicate not found.
   mozilla::Length mIcWidth;    // negatives indicate not found.
   mozilla::Length mAscent;
+  mozilla::Length mComputedEmSize;
   float mScriptPercentScaleDown;        // zero is invalid or means not found.
   float mScriptScriptPercentScaleDown;  // zero is invalid or means not found.
 };
@@ -527,6 +528,8 @@ void Gecko_StyleSheet_AddRef(const mozilla::StyleSheet* aSheet);
 void Gecko_StyleSheet_Release(const mozilla::StyleSheet* aSheet);
 bool Gecko_IsDocumentBody(const mozilla::dom::Element* element);
 
+bool Gecko_IsDarkColorScheme(const mozilla::dom::Document*,
+                             const mozilla::StyleColorScheme*);
 nscolor Gecko_ComputeSystemColor(mozilla::StyleSystemColor,
                                  const mozilla::dom::Document*,
                                  const mozilla::StyleColorScheme*);
@@ -586,9 +589,7 @@ const nsTArray<mozilla::dom::Element*>* Gecko_Document_GetElementsWithId(
 const nsTArray<mozilla::dom::Element*>* Gecko_ShadowRoot_GetElementsWithId(
     const mozilla::dom::ShadowRoot*, nsAtom* aId);
 
-// Check the value of the given bool preference. The pref name needs to
-// be null-terminated.
-bool Gecko_GetBoolPrefValue(const char* pref_name);
+bool Gecko_ComputeBoolPrefMediaQuery(nsAtom*);
 
 // Check whether font format/tech is supported.
 bool Gecko_IsFontFormatSupported(
@@ -606,13 +607,15 @@ bool Gecko_IsMainThread();
 // Returns true if we're currently on a DOM worker thread.
 bool Gecko_IsDOMWorkerThread();
 
+// Returns the preferred number of style threads to use, or -1 for no
+// preference.
+int32_t Gecko_GetNumStyleThreads();
+
 // Media feature helpers.
 //
 // Defined in nsMediaFeatures.cpp.
 mozilla::StyleDisplayMode Gecko_MediaFeatures_GetDisplayMode(
     const mozilla::dom::Document*);
-
-bool Gecko_MediaFeatures_WindowsNonNativeMenus(const mozilla::dom::Document*);
 
 bool Gecko_MediaFeatures_ShouldAvoidNativeTheme(const mozilla::dom::Document*);
 bool Gecko_MediaFeatures_UseOverlayScrollbars(const mozilla::dom::Document*);

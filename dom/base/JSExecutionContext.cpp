@@ -21,7 +21,6 @@
 #include "js/Conversions.h"
 #include "js/experimental/JSStencil.h"
 #include "js/HeapAPI.h"
-#include "js/OffThreadScriptCompilation.h"
 #include "js/ProfilingCategory.h"
 #include "js/Promise.h"
 #include "js/SourceText.h"
@@ -30,6 +29,7 @@
 #include "js/Wrapper.h"
 #include "jsapi.h"
 #include "mozilla/CycleCollectedJSContext.h"
+#include "mozilla/dom/ScriptLoadContext.h"
 #include "mozilla/Likely.h"
 #include "nsContentUtils.h"
 #include "nsTPromiseFlatString.h"
@@ -87,25 +87,22 @@ JSExecutionContext::JSExecutionContext(
   }
 }
 
-nsresult JSExecutionContext::JoinOffThread(
-    JS::OffThreadToken** aOffThreadToken) {
+nsresult JSExecutionContext::JoinOffThread(ScriptLoadContext* aContext) {
   if (mSkip) {
     return mRv;
   }
 
   MOZ_ASSERT(!mWantsReturnValue);
 
-  JS::Rooted<JS::InstantiationStorage> storage(mCx);
-  RefPtr<JS::Stencil> stencil =
-      JS::FinishOffThreadStencil(mCx, *aOffThreadToken, storage.address());
-  *aOffThreadToken = nullptr;  // Mark the token as having been finished.
+  JS::InstantiationStorage storage;
+  RefPtr<JS::Stencil> stencil = aContext->StealOffThreadResult(mCx, &storage);
   if (!stencil) {
     mSkip = true;
     mRv = EvaluationExceptionToNSResult(mCx);
     return mRv;
   }
 
-  return InstantiateStencil(std::move(stencil), storage.address());
+  return InstantiateStencil(std::move(stencil), &storage);
 }
 
 template <typename Unit>

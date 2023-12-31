@@ -56,13 +56,14 @@
 #include "mozilla/StaticPrefs_print.h"
 #include "mozilla/StyleSheet.h"
 #include "mozilla/StyleSheetInlines.h"
+#include "mozilla/Try.h"
 
 #include "nsViewManager.h"
 #include "nsView.h"
 
 #include "nsPageSequenceFrame.h"
 #include "nsNetUtil.h"
-#include "nsIContentViewerEdit.h"
+#include "nsIDocumentViewerEdit.h"
 #include "mozilla/css/Loader.h"
 #include "nsIInterfaceRequestor.h"
 #include "nsIInterfaceRequestorUtils.h"
@@ -78,7 +79,8 @@
 #include "nsIClipboardHelper.h"
 
 #include "nsPIDOMWindow.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowInner.h"
+#include "nsGlobalWindowOuter.h"
 #include "nsDOMNavigationTiming.h"
 #include "nsPIWindowRoot.h"
 #include "nsJSEnvironment.h"
@@ -93,8 +95,6 @@
 #include "imgIContainer.h"  // image animation mode constants
 #include "nsIXULRuntime.h"
 #include "nsSandboxFlags.h"
-
-#include "mozilla/DocLoadingTimelineMarker.h"
 
 //--------------------------
 // Printing Include
@@ -303,7 +303,7 @@ using viewer_detail::BFCachePreventionObserver;
 
 //-------------------------------------------------------------
 class nsDocumentViewer final : public nsIContentViewer,
-                               public nsIContentViewerEdit,
+                               public nsIDocumentViewerEdit,
                                public nsIDocumentViewerPrint
 #ifdef NS_PRINTING
     ,
@@ -324,8 +324,8 @@ class nsDocumentViewer final : public nsIContentViewer,
   // nsIContentViewer interface...
   NS_DECL_NSICONTENTVIEWER
 
-  // nsIContentViewerEdit
-  NS_DECL_NSICONTENTVIEWEREDIT
+  // nsIDocumentViewerEdit
+  NS_DECL_NSIDOCUMENTVIEWEREDIT
 
 #ifdef NS_PRINTING
   // nsIWebBrowserPrint
@@ -534,7 +534,7 @@ NS_IMPL_RELEASE(nsDocumentViewer)
 
 NS_INTERFACE_MAP_BEGIN(nsDocumentViewer)
   NS_INTERFACE_MAP_ENTRY(nsIContentViewer)
-  NS_INTERFACE_MAP_ENTRY(nsIContentViewerEdit)
+  NS_INTERFACE_MAP_ENTRY(nsIDocumentViewerEdit)
   NS_INTERFACE_MAP_ENTRY(nsIDocumentViewerPrint)
   NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsIContentViewer)
 #ifdef NS_PRINTING
@@ -1021,12 +1021,6 @@ nsDocumentViewer::LoadComplete(nsresult aStatus) {
                             nullptr);
       }
 
-      // Notify any devtools about the load.
-      if (TimelineConsumers::HasConsumer(docShell)) {
-        TimelineConsumers::AddMarkerForDocShell(
-            docShell, MakeUnique<DocLoadingTimelineMarker>("document::Load"));
-      }
-
       nsPIDOMWindowInner* innerWindow = window->GetCurrentInnerWindow();
       RefPtr<DocGroup> docGroup = d->GetDocGroup();
       // It is possible that the parent document's load event fires earlier than
@@ -1079,7 +1073,10 @@ nsDocumentViewer::LoadComplete(nsresult aStatus) {
 
       d->SetLoadEventFiring(true);
       RefPtr<nsPresContext> presContext = mPresContext;
-      EventDispatcher::Dispatch(window, presContext, &event, nullptr, &status);
+      // MOZ_KnownLive due to bug 1506441
+      EventDispatcher::Dispatch(
+          MOZ_KnownLive(nsGlobalWindowOuter::Cast(window)), presContext, &event,
+          nullptr, &status);
       d->SetLoadEventFiring(false);
 
       if (docGroup && docShell->TreatAsBackgroundLoad()) {
@@ -1334,9 +1331,8 @@ nsDocumentViewer::DispatchBeforeUnload() {
 
     mInPermitUnload = true;
     RefPtr<nsPresContext> presContext = mPresContext;
-    // TODO: Bug 1506441
-    EventDispatcher::DispatchDOMEvent(MOZ_KnownLive(ToSupports(window)),
-                                      nullptr, event, presContext, nullptr);
+    EventDispatcher::DispatchDOMEvent(window, nullptr, event, presContext,
+                                      nullptr);
     mInPermitUnload = false;
   }
 
@@ -1425,7 +1421,9 @@ nsDocumentViewer::PageHide(bool aIsUnload) {
     Document::PageUnloadingEventTimeStamp timestamp(mDocument);
 
     RefPtr<nsPresContext> presContext = mPresContext;
-    EventDispatcher::Dispatch(window, presContext, &event, nullptr, &status);
+    // MOZ_KnownLive due to bug 1506441
+    EventDispatcher::Dispatch(MOZ_KnownLive(nsGlobalWindowOuter::Cast(window)),
+                              presContext, &event, nullptr, &status);
   }
 
   // look for open menupopups and close them after the unload event, in case
@@ -2148,7 +2146,7 @@ nsDocumentViewer::Show() {
   // from the event loop after we actually draw the page.
   RefPtr<nsDocumentShownDispatcher> event =
       new nsDocumentShownDispatcher(document);
-  document->Dispatch(TaskCategory::Other, event.forget());
+  document->Dispatch(event.forget());
 
   return NS_OK;
 }
@@ -2401,7 +2399,7 @@ mozilla::dom::Selection* nsDocumentViewer::GetDocumentSelection() {
 }
 
 /* ============================================================================
- * nsIContentViewerEdit
+ * nsIDocumentViewerEdit
  * ============================================================================
  */
 
@@ -2844,7 +2842,7 @@ NS_IMETHODIMP nsDocViewerSelectionListener::NotifySelectionChanged(
   // might need another update string for simple selection changes, but that
   // would be expenseive.
   if (mSelectionWasCollapsed != selectionCollapsed) {
-    domWindow->UpdateCommands(u"select"_ns, selection, aReason);
+    domWindow->UpdateCommands(u"select"_ns);
     mSelectionWasCollapsed = selectionCollapsed;
   }
 

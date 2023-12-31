@@ -66,6 +66,7 @@ export let RemotePageAccessManager = {
     },
     "about:httpsonlyerror": {
       RPMGetFormatURLPref: ["app.support.baseURL"],
+      RPMGetIntPref: ["security.dialog_enable_delay"],
       RPMSendAsyncMessage: ["goBack", "openInsecure"],
       RPMAddMessageListener: ["WWWReachable"],
       RPMTryPingSecureWWWLink: ["*"],
@@ -101,7 +102,7 @@ export let RemotePageAccessManager = {
         "security.xfocsp.errorReporting.enabled",
         "network.trr.display_fallback_warning",
       ],
-      RPMSetBoolPref: [
+      RPMSetPref: [
         "security.xfocsp.errorReporting.automatic",
         "network.trr.display_fallback_warning",
       ],
@@ -121,9 +122,6 @@ export let RemotePageAccessManager = {
     "about:newtab": {
       RPMSendAsyncMessage: ["ActivityStream:ContentToMain"],
       RPMAddMessageListener: ["ActivityStream:MainToContent"],
-    },
-    "about:plugins": {
-      RPMSendQuery: ["RequestPlugins"],
     },
     "about:pocket-saved": {
       RPMSendAsyncMessage: ["*"],
@@ -169,6 +167,7 @@ export let RemotePageAccessManager = {
         "browser.privatebrowsing.vpnpromourl",
       ],
       RPMIsWindowPrivate: ["*"],
+      RPMGetBoolPref: ["browser.privatebrowsing.felt-privacy-v1"],
     },
     "about:protections": {
       RPMSendAsyncMessage: [
@@ -190,7 +189,7 @@ export let RemotePageAccessManager = {
       ],
       RPMAddMessageListener: ["*"],
       RPMRemoveMessageListener: ["*"],
-      RPMSetBoolPref: [
+      RPMSetPref: [
         "browser.contentblocking.report.show_mobile_app",
         "browser.contentblocking.report.hide_vpn_banner",
       ],
@@ -235,6 +234,14 @@ export let RemotePageAccessManager = {
         "browser.contentblocking.report.cryptominer.url",
       ],
       RPMRecordTelemetryEvent: ["*"],
+    },
+    "about:shoppingsidebar": {
+      RPMSetPref: [
+        "browser.shopping.experience2023.optedIn",
+        "browser.shopping.experience2023.active",
+        "browser.shopping.experience2023.ads.userEnabled",
+      ],
+      RPMGetFormatURLPref: ["app.support.baseURL"],
     },
     "about:tabcrashed": {
       RPMSendAsyncMessage: ["Load", "closeTab", "restoreTab", "restoreAll"],

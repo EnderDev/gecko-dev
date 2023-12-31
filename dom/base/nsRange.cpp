@@ -204,8 +204,8 @@ already_AddRefed<nsRange> nsRange::Create(
  * nsISupports
  ******************************************************/
 
-NS_IMPL_MAIN_THREAD_ONLY_CYCLE_COLLECTING_ADDREF(nsRange)
-NS_IMPL_MAIN_THREAD_ONLY_CYCLE_COLLECTING_RELEASE_WITH_INTERRUPTABLE_LAST_RELEASE(
+NS_IMPL_CYCLE_COLLECTING_ADDREF(nsRange)
+NS_IMPL_CYCLE_COLLECTING_RELEASE_WITH_INTERRUPTABLE_LAST_RELEASE(
     nsRange, DoSetRange(RawRangeBoundary(), RawRangeBoundary(), nullptr),
     MaybeInterruptLastRelease())
 
@@ -3185,13 +3185,13 @@ void nsRange::GetInnerTextNoFlush(DOMString& aValue, ErrorResult& aError,
       if (currentNode->IsHTMLElement(nsGkAtoms::br)) {
         result.Append('\n');
       }
-      switch (f->StyleDisplay()->mDisplay) {
-        case StyleDisplay::TableCell:
+      switch (f->StyleDisplay()->DisplayInside()) {
+        case StyleDisplayInside::TableCell:
           if (!IsLastCellOfRow(f)) {
             result.Append('\t');
           }
           break;
-        case StyleDisplay::TableRow:
+        case StyleDisplayInside::TableRow:
           if (!IsLastRowOfRowGroup(f) ||
               !IsLastNonemptyRowGroupOfTable(f->GetParent())) {
             result.Append('\n');

@@ -6,9 +6,7 @@ import { Log } from "resource://gre/modules/Log.sys.mjs";
 
 import { TelemetryUtils } from "resource://gre/modules/TelemetryUtils.sys.mjs";
 
-const { ObjectUtils } = ChromeUtils.import(
-  "resource://gre/modules/ObjectUtils.jsm"
-);
+import { ObjectUtils } from "resource://gre/modules/ObjectUtils.sys.mjs";
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { UpdateUtils } from "resource://gre/modules/UpdateUtils.sys.mjs";
 
@@ -28,9 +26,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
   WindowsVersionInfo:
     "resource://gre/modules/components-utils/WindowsVersionInfo.sys.mjs",
 });
-import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-XPCOMUtils.defineLazyGetter(lazy, "fxAccounts", () => {
+ChromeUtils.defineLazyGetter(lazy, "fxAccounts", () => {
   return ChromeUtils.importESModule(
     "resource://gre/modules/FxAccounts.sys.mjs"
   ).getFxAccountsSingleton();
@@ -225,12 +222,12 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
   ["browser.cache.disk.capacity", { what: RECORD_PREF_VALUE }],
   ["browser.cache.memory.enable", { what: RECORD_PREF_VALUE }],
   ["browser.formfill.enable", { what: RECORD_PREF_VALUE }],
-  ["browser.fixup.alternate.enabled", { what: RECORD_DEFAULTPREF_VALUE }],
   ["browser.migrate.interactions.bookmarks", { what: RECORD_PREF_VALUE }],
   ["browser.migrate.interactions.csvpasswords", { what: RECORD_PREF_VALUE }],
   ["browser.migrate.interactions.history", { what: RECORD_PREF_VALUE }],
   ["browser.migrate.interactions.passwords", { what: RECORD_PREF_VALUE }],
   ["browser.newtabpage.enabled", { what: RECORD_PREF_VALUE }],
+  ["browser.privatebrowsing.autostart", { what: RECORD_PREF_VALUE }],
   ["browser.shell.checkDefaultBrowser", { what: RECORD_PREF_VALUE }],
   ["browser.search.region", { what: RECORD_PREF_VALUE }],
   ["browser.search.suggest.enabled", { what: RECORD_PREF_VALUE }],
@@ -238,6 +235,7 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
   ["browser.startup.homepage", { what: RECORD_PREF_STATE }],
   ["browser.startup.page", { what: RECORD_PREF_VALUE }],
   ["browser.tabs.firefox-view", { what: RECORD_PREF_VALUE }],
+  ["browser.tabs.firefox-view-next", { what: RECORD_PREF_VALUE }],
   ["browser.urlbar.autoFill", { what: RECORD_DEFAULTPREF_VALUE }],
   [
     "browser.urlbar.autoFill.adaptiveHistory.enabled",
@@ -265,7 +263,6 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
     "browser.urlbar.suggest.quicksuggest.sponsored",
     { what: RECORD_DEFAULTPREF_VALUE },
   ],
-  ["browser.urlbar.suggest.bestmatch", { what: RECORD_DEFAULTPREF_VALUE }],
   ["browser.urlbar.suggest.searches", { what: RECORD_PREF_VALUE }],
   ["devtools.chrome.enabled", { what: RECORD_PREF_VALUE }],
   ["devtools.debugger.enabled", { what: RECORD_PREF_VALUE }],
@@ -273,6 +270,7 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
   ["doh-rollout.doorhanger-decision", { what: RECORD_PREF_VALUE }],
   ["dom.ipc.processCount", { what: RECORD_PREF_VALUE }],
   ["dom.max_script_run_time", { what: RECORD_PREF_VALUE }],
+  ["dom.popup_allowed_events", { what: RECORD_PREF_VALUE }],
   ["editor.truncate_user_pastes", { what: RECORD_PREF_VALUE }],
   ["extensions.InstallTrigger.enabled", { what: RECORD_PREF_VALUE }],
   ["extensions.InstallTriggerImpl.enabled", { what: RECORD_PREF_VALUE }],
@@ -286,10 +284,6 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
     { what: RECORD_PREF_VALUE },
   ],
   ["extensions.formautofill.creditCards.enabled", { what: RECORD_PREF_VALUE }],
-  [
-    "extensions.formautofill.creditCards.available",
-    { what: RECORD_PREF_VALUE },
-  ],
   ["extensions.manifestV3.enabled", { what: RECORD_PREF_VALUE }],
   ["extensions.quarantinedDomains.enabled", { what: RECORD_PREF_VALUE }],
   ["extensions.strictCompatibility", { what: RECORD_PREF_VALUE }],
@@ -306,7 +300,6 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
   ["layers.acceleration.force-enabled", { what: RECORD_PREF_VALUE }],
   ["layers.async-pan-zoom.enabled", { what: RECORD_PREF_VALUE }],
   ["layers.async-video-oop.enabled", { what: RECORD_PREF_VALUE }],
-  ["layers.async-video.enabled", { what: RECORD_PREF_VALUE }],
   ["layers.d3d11.disable-warp", { what: RECORD_PREF_VALUE }],
   ["layers.d3d11.force-warp", { what: RECORD_PREF_VALUE }],
   [
@@ -346,6 +339,8 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
   ["places.history.enabled", { what: RECORD_PREF_VALUE }],
   ["privacy.firstparty.isolate", { what: RECORD_PREF_VALUE }],
   ["privacy.resistFingerprinting", { what: RECORD_PREF_VALUE }],
+  ["privacy.fingerprintingProtection", { what: RECORD_PREF_VALUE }],
+  ["privacy.fingerprintingProtection.pbmode", { what: RECORD_PREF_VALUE }],
   ["privacy.trackingprotection.enabled", { what: RECORD_PREF_VALUE }],
   ["privacy.donottrackheader.enabled", { what: RECORD_PREF_VALUE }],
   ["security.enterprise_roots.auto-enabled", { what: RECORD_PREF_VALUE }],
@@ -367,6 +362,13 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
   ["xpinstall.signatures.required", { what: RECORD_PREF_VALUE }],
   ["nimbus.debug", { what: RECORD_PREF_VALUE }],
 ]);
+
+if (AppConstants.platform == "linux" || AppConstants.platform == "macosx") {
+  DEFAULT_ENVIRONMENT_PREFS.set(
+    "intl.ime.use_composition_events_for_insert_text",
+    { what: RECORD_PREF_VALUE }
+  );
+}
 
 const LOGGER_NAME = "Toolkit.Telemetry";
 
@@ -2086,13 +2088,9 @@ EnvironmentCache.prototype = {
         data = { winPackageFamilyName, ...data };
       }
       data = { ...this._getProcessData(), ...data };
+      data.sec = this._getSecurityAppData();
     } else if (AppConstants.platform == "android") {
       data.device = this._getDeviceData();
-    }
-
-    // Windows 8+
-    if (AppConstants.isPlatformAndVersionAtLeast("win", "6.2")) {
-      data.sec = this._getSecurityAppData();
     }
 
     return data;

@@ -27,14 +27,15 @@ NS_IMPL_CYCLE_COLLECTION_CLASS(ModuleLoadRequest)
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(ModuleLoadRequest,
                                                 ScriptLoadRequest)
-  NS_IMPL_CYCLE_COLLECTION_UNLINK(mLoader, mModuleScript, mImports, mRootModule)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mLoader, mRootModule, mModuleScript, mImports,
+                                  mWaitingParentRequest)
   tmp->ClearDynamicImport();
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(ModuleLoadRequest,
                                                   ScriptLoadRequest)
-  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLoader, mModuleScript, mImports,
-                                    mRootModule)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLoader, mRootModule, mModuleScript,
+                                    mImports, mWaitingParentRequest)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
 NS_IMPL_CYCLE_COLLECTION_TRACE_BEGIN_INHERITED(ModuleLoadRequest,
@@ -52,13 +53,14 @@ VisitedURLSet* ModuleLoadRequest::NewVisitedSetForTopLevelImport(nsIURI* aURI) {
 }
 
 ModuleLoadRequest::ModuleLoadRequest(
-    nsIURI* aURI, ScriptFetchOptions* aFetchOptions,
+    nsIURI* aURI, mozilla::dom::ReferrerPolicy aReferrerPolicy,
+    ScriptFetchOptions* aFetchOptions,
     const mozilla::dom::SRIMetadata& aIntegrity, nsIURI* aReferrer,
     LoadContextBase* aContext, bool aIsTopLevel, bool aIsDynamicImport,
     ModuleLoaderBase* aLoader, VisitedURLSet* aVisitedSet,
     ModuleLoadRequest* aRootModule)
-    : ScriptLoadRequest(ScriptKind::eModule, aURI, aFetchOptions, aIntegrity,
-                        aReferrer, aContext),
+    : ScriptLoadRequest(ScriptKind::eModule, aURI, aReferrerPolicy,
+                        aFetchOptions, aIntegrity, aReferrer, aContext),
       mIsTopLevel(aIsTopLevel),
       mIsDynamicImport(aIsDynamicImport),
       mLoader(aLoader),
@@ -81,25 +83,34 @@ void ModuleLoadRequest::Cancel() {
     return;
   }
 
+  if (IsFinished()) {
+    return;
+  }
+
   ScriptLoadRequest::Cancel();
+
   mModuleScript = nullptr;
   CancelImports();
-  mReady.RejectIfExists(NS_ERROR_DOM_ABORT_ERR, __func__);
+
+  if (mWaitingParentRequest) {
+    ChildLoadComplete(false);
+  }
 }
 
 void ModuleLoadRequest::SetReady() {
+  MOZ_ASSERT(!IsFinished());
+
   // Mark a module as ready to execute. This means that this module and all it
   // dependencies have had their source loaded, parsed as a module and the
   // modules instantiated.
-  //
-  // The mReady promise is used to ensure that when all dependencies of a module
-  // have become ready, DependenciesLoaded is called on that module
-  // request. This is set up in StartFetchingModuleDependencies.
 
-  AssertAllImportsReady();
+  AssertAllImportsFinished();
 
   ScriptLoadRequest::SetReady();
-  mReady.ResolveIfExists(true, __func__);
+
+  if (mWaitingParentRequest) {
+    ChildLoadComplete(true);
+  }
 }
 
 void ModuleLoadRequest::ModuleLoaded() {
@@ -151,12 +162,17 @@ void ModuleLoadRequest::ModuleErrored() {
     return;
   }
 
-  MOZ_ASSERT(!IsReadyToRun());
+  MOZ_ASSERT(!IsFinished());
 
   CheckModuleDependenciesLoaded();
   MOZ_ASSERT(IsErrored());
 
   CancelImports();
+  if (IsFinished()) {
+    // Cancelling an outstanding import will error this request.
+    return;
+  }
+
   SetReady();
   LoadFinished();
 }
@@ -219,10 +235,10 @@ void ModuleLoadRequest::ClearDynamicImport() {
   mDynamicPromise = nullptr;
 }
 
-inline void ModuleLoadRequest::AssertAllImportsReady() const {
+inline void ModuleLoadRequest::AssertAllImportsFinished() const {
 #ifdef DEBUG
   for (const auto& request : mImports) {
-    MOZ_ASSERT(request->IsReadyToRun());
+    MOZ_ASSERT(request->IsFinished());
   }
 #endif
 }

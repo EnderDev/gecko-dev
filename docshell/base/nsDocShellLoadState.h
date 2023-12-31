@@ -113,6 +113,14 @@ class nsDocShellLoadState final {
 
   void SetTriggeringSandboxFlags(uint32_t aTriggeringSandboxFlags);
 
+  uint64_t TriggeringWindowId() const;
+
+  void SetTriggeringWindowId(uint64_t aTriggeringWindowId);
+
+  bool TriggeringStorageAccess() const;
+
+  void SetTriggeringStorageAccess(bool aTriggeringStorageAccess);
+
   nsIContentSecurityPolicy* Csp() const;
 
   void SetCsp(nsIContentSecurityPolicy* aCsp);
@@ -136,9 +144,9 @@ class nsDocShellLoadState final {
 
   void SetForceAllowDataURI(bool aForceAllowDataURI);
 
-  bool IsExemptFromHTTPSOnlyMode() const;
+  bool IsExemptFromHTTPSFirstMode() const;
 
-  void SetIsExemptFromHTTPSOnlyMode(bool aIsExemptFromHTTPSOnlyMode);
+  void SetIsExemptFromHTTPSFirstMode(bool aIsExemptFromHTTPSFirstMode);
 
   bool OriginalFrameSrc() const;
 
@@ -319,6 +327,12 @@ class nsDocShellLoadState final {
     mRemoteTypeOverride = mozilla::Some(aRemoteTypeOverride);
   }
 
+  void SetWasSchemelessInput(bool aWasSchemelessInput) {
+    mWasSchemelessInput = aWasSchemelessInput;
+  }
+
+  bool GetWasSchemelessInput() { return mWasSchemelessInput; }
+
   // Determine the remote type of the process which should be considered
   // responsible for this load for the purposes of security checks.
   //
@@ -329,6 +343,18 @@ class nsDocShellLoadState final {
   const nsCString& GetEffectiveTriggeringRemoteType() const;
 
   void SetTriggeringRemoteType(const nsACString& aTriggeringRemoteType);
+
+  // Diagnostic assert if this is a system-principal triggered load, and it is
+  // trivial to determine that the effective triggering remote type would not be
+  // allowed to perform this load.
+  //
+  // This is called early during the load to crash as close to the cause as
+  // possible. See bug 1838686 for details.
+#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
+  void AssertProcessCouldTriggerLoadIfSystem();
+#else
+  void AssertProcessCouldTriggerLoadIfSystem() {}
+#endif
 
   // When loading a document through nsDocShell::LoadURI(), a special set of
   // flags needs to be set based on other values in nsDocShellLoadState. This
@@ -401,6 +427,12 @@ class nsDocShellLoadState final {
   // SandboxFlags of the document that started the load.
   uint32_t mTriggeringSandboxFlags;
 
+  // The window ID and current "has storage access" value of the entity
+  // triggering the load. This allows the identification of self-initiated
+  // same-origin navigations that should propogate unpartitioned storage access.
+  uint64_t mTriggeringWindowId;
+  bool mTriggeringStorageAccess;
+
   // The CSP of the load, that is, the CSP of the entity responsible for causing
   // the load to occur. Most likely this is the CSP of the document that started
   // the load. In case the entity starting the load did not use a CSP, then mCsp
@@ -450,7 +482,7 @@ class nsDocShellLoadState final {
 
   // If this attribute is true, then the top-level navigaion
   // will be exempt from HTTPS-Only-Mode upgrades.
-  bool mIsExemptFromHTTPSOnlyMode;
+  bool mIsExemptFromHTTPSFirstMode;
 
   // If this attribute is true, this load corresponds to a frame
   // element loading its original src (or srcdoc) attribute.
@@ -568,6 +600,9 @@ class nsDocShellLoadState final {
 
   // Remote type of the process which originally requested the load.
   nsCString mTriggeringRemoteType;
+
+  // if the to-be-loaded address had it protocol added through a fixup
+  bool mWasSchemelessInput = false;
 };
 
 #endif /* nsDocShellLoadState_h__ */

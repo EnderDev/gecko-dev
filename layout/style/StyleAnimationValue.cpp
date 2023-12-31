@@ -116,6 +116,10 @@ const mozilla::StyleOffsetPosition& AnimationValue::GetOffsetPositionProperty()
   return *Servo_AnimationValue_GetOffsetPosition(mServo);
 }
 
+bool AnimationValue::IsOffsetPathUrl() const {
+  return mServo && Servo_AnimationValue_IsOffsetPathUrl(mServo);
+}
+
 MatrixScales AnimationValue::GetScaleValue(const nsIFrame* aFrame) const {
   using namespace nsStyleTransformMatrix;
 
@@ -208,7 +212,8 @@ AnimationValue AnimationValue::FromString(nsCSSPropertyID aProperty,
 
   RefPtr<StyleLockedDeclarationBlock> declarations =
       ServoCSSParser::ParseProperty(aProperty, aValue,
-                                    ServoCSSParser::GetParsingEnvironment(doc));
+                                    ServoCSSParser::GetParsingEnvironment(doc),
+                                    StyleParsingMode::DEFAULT);
 
   if (!declarations) {
     return result;

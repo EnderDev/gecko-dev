@@ -87,6 +87,7 @@
 #include "mozilla/Range.h"
 #include "mozilla/RangedPtr.h"
 #include "mozilla/Span.h"  // mozilla::Span
+#include "mozilla/Try.h"
 #include "mozilla/WrappingOperations.h"
 
 #include <functional>
@@ -96,14 +97,13 @@
 
 #include "jsnum.h"
 
-#include "gc/Allocator.h"
+#include "gc/GCEnum.h"
 #include "js/BigInt.h"
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/StableStringChars.h"
 #include "js/Utility.h"
 #include "util/CheckedArithmetic.h"
 #include "util/DifferentialTesting.h"
-#include "vm/JSContext.h"
 #include "vm/StaticStrings.h"
 
 #include "gc/GCContext-inl.h"
@@ -154,7 +154,7 @@ BigInt* BigInt::createUninitialized(JSContext* cx, size_t digitLength,
   MOZ_ASSERT(x->isNegative() == isNegative);
 
   if (digitLength > InlineDigitsLength) {
-    x->heapDigits_ = js::AllocateBigIntDigits(cx, x, digitLength);
+    x->heapDigits_ = js::AllocateCellBuffer<Digit>(cx, x, digitLength);
     if (!x->heapDigits_) {
       // |x| is partially initialized, expose it as a BigInt using inline digits
       // to the GC.
@@ -201,7 +201,7 @@ size_t BigInt::sizeOfExcludingThisInNursery(
 
   const Nursery& nursery = runtimeFromMainThread()->gc.nursery();
   if (nursery.isInside(heapDigits_)) {
-    // See |AllocateBigIntDigits()|.
+    // Buffer allocations are aligned to the size of JS::Value.
     return RoundUp(digitLength() * sizeof(Digit), sizeof(Value));
   }
 
@@ -1453,8 +1453,6 @@ JSLinearString* BigInt::toStringGeneric(JSContext* cx, HandleBigInt x,
 
 static void FreeDigits(JSContext* cx, BigInt* bi, BigInt::Digit* digits,
                        size_t nbytes) {
-  MOZ_ASSERT(cx->isMainThreadContext());
-
   if (bi->isTenured()) {
     MOZ_ASSERT(!cx->nursery().isInside(digits));
     js_free(digits);
@@ -1489,8 +1487,8 @@ BigInt* BigInt::destructivelyTrimHighZeroDigits(JSContext* cx, BigInt* x) {
     MOZ_ASSERT(x->hasHeapDigits());
 
     size_t oldLength = x->digitLength();
-    Digit* newdigits =
-        js::ReallocateBigIntDigits(cx, x, x->heapDigits_, oldLength, newLength);
+    Digit* newdigits = js::ReallocateCellBuffer<Digit>(cx, x, x->heapDigits_,
+                                                       oldLength, newLength);
     if (!newdigits) {
       return nullptr;
     }
@@ -2252,8 +2250,7 @@ BigInt* BigInt::lshByAbsolute(JSContext* cx, HandleBigInt x, HandleBigInt y) {
   }
 
   if (y->digitLength() > 1 || y->digit(0) > MaxBitLength) {
-    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
-                              JSMSG_BIGINT_TOO_LARGE);
+    ReportOversizedAllocation(cx, JSMSG_BIGINT_TOO_LARGE);
     if (js::SupportDifferentialTesting()) {
       fprintf(stderr, "ReportOutOfMemory called\n");
     }

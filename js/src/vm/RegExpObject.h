@@ -52,6 +52,9 @@ class RegExpObject : public NativeObject {
   static const unsigned SHARED_SLOT = 3;
   static const unsigned RESERVED_SLOTS = 4;
 
+  // This must match RESERVED_SLOTS. See assertions in CloneRegExpObject.
+  static constexpr gc::AllocKind AllocKind = gc::AllocKind::OBJECT4_BACKGROUND;
+
   static const JSClass class_;
   static const JSClass protoClass_;
 
@@ -126,6 +129,10 @@ class RegExpObject : public NativeObject {
 
   static constexpr size_t offsetOfFlags() {
     return getFixedSlotOffset(flagsSlot());
+  }
+
+  static constexpr size_t offsetOfShared() {
+    return getFixedSlotOffset(SHARED_SLOT);
   }
 
   JS::RegExpFlags getFlags() const {

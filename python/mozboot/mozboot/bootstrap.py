@@ -129,6 +129,7 @@ FEDORA_DISTROS = (
     "centos",
     "fedora",
     "rocky",
+    "nobara",
     "oracle",
 )
 
@@ -491,22 +492,6 @@ class Bootstrapper(object):
 
     def _validate_python_environment(self, topsrcdir):
         valid = True
-        try:
-            # distutils is singled out here because some distros (namely Ubuntu)
-            # include it in a separate package outside of the main Python
-            # installation.
-            import distutils.spawn
-            import distutils.sysconfig
-
-            assert distutils.sysconfig is not None and distutils.spawn is not None
-        except ImportError as e:
-            print("ERROR: Could not import package %s" % e.name, file=sys.stderr)
-            self.instance.suggest_install_distutils()
-            valid = False
-        except AssertionError:
-            print("ERROR: distutils is not behaving as expected.", file=sys.stderr)
-            self.instance.suggest_install_distutils()
-            valid = False
         pip3 = to_optional_path(which("pip3"))
         if not pip3:
             print("ERROR: Could not find pip3.", file=sys.stderr)
@@ -600,7 +585,7 @@ def current_firefox_checkout(env, hg: Optional[Path] = None):
     while path:
         hg_dir = path / ".hg"
         git_dir = path / ".git"
-        moz_configure = path / "moz.configure"
+        known_file = path / "config" / "milestone.txt"
         if hg and hg_dir.exists():
             # Verify the hg repo is a Firefox repo by looking at rev 0.
             try:
@@ -622,11 +607,10 @@ def current_firefox_checkout(env, hg: Optional[Path] = None):
         # foot-shootings.  Determining a canonical git checkout of mozilla-unified
         # is...complicated
         elif git_dir.exists() or hg_dir.exists():
-            moz_configure = path / "moz.configure"
-            if moz_configure.exists():
+            if known_file.exists():
                 _warn_if_risky_revision(path)
                 return ("git" if git_dir.exists() else "hg"), path
-        elif moz_configure.exists():
+        elif known_file.exists():
             return "SOURCE", path
 
         if not len(path.parents):

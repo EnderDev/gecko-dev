@@ -421,9 +421,6 @@
       // ////////////////////////////////////////////////////////////////////////
       // HTML:dialog
 
-      // XXX: Remove the pushing of the pref and just run the test once the
-      // dialog element is enabled by default.
-      await SpecialPowers.pushPrefEnv({ set: [["dom.dialog_element.enabled", true]] });
       obj = {
         role: ROLE_DIALOG,
         children: [
@@ -710,10 +707,8 @@
       // HTML:input@type="file"
 
       obj = {
-        GROUPING: [
-          { role: ROLE_PUSHBUTTON },
-          { role: ROLE_LABEL },
-        ],
+        role: ROLE_PUSHBUTTON,
+        actions: "press",
       };
       testElm("input_file", obj);
 
@@ -1330,6 +1325,16 @@
         ],
       };
       testElm("samp_container", obj);
+
+      // ////////////////////////////////////////////////////////////////////////
+      // HTML:search
+
+      obj = {
+        role: ROLE_LANDMARK,
+        attributes: { "xml-roles": "search" },
+        interfaces: [ nsIAccessibleText, nsIAccessibleHyperText ],
+      };
+      testElm("search", obj);
 
       // ////////////////////////////////////////////////////////////////////////
       // HTML:section without an accessible name
@@ -1994,6 +1999,7 @@
 
   <p id="s_container">normal<s>Removed</s></p>
   <p id="samp_container">normal<samp>sample</samp></p>
+  <search id="search">search</search>
   <section id="section">section</section>
   <section id="named_section" aria-label="foo">named section</section>
   <p id="small_container">normal<small>small</small></p>

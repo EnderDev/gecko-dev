@@ -29,7 +29,6 @@
 #include "nsQueryObject.h"
 
 #include "nsPIDOMWindow.h"
-#include "nsGlobalWindow.h"
 
 #include "nsIStringBundle.h"
 
@@ -39,7 +38,6 @@
 #include "nsPresContext.h"
 #include "nsIAsyncVerifyRedirectCallback.h"
 #include "nsIBrowserDOMWindow.h"
-#include "nsGlobalWindow.h"
 #include "mozilla/ThrottledEventQueue.h"
 using namespace mozilla;
 using mozilla::DebugOnly;
@@ -842,8 +840,10 @@ void nsDocLoader::DocLoaderIsEmpty(bool aFlushLayout,
                 event.mTarget = doc;
                 nsEventStatus unused = nsEventStatus_eIgnore;
                 doc->SetLoadEventFiring(true);
-                EventDispatcher::Dispatch(window, nullptr, &event, nullptr,
-                                          &unused);
+                // MOZ_KnownLive due to bug 1506441
+                EventDispatcher::Dispatch(
+                    MOZ_KnownLive(nsGlobalWindowOuter::Cast(window)), nullptr,
+                    &event, nullptr, &unused);
                 doc->SetLoadEventFiring(false);
 
                 // Now unsuppress painting on the presshell, if we
@@ -1052,15 +1052,7 @@ nsDocLoader::GetLoadType(uint32_t* aLoadType) {
 
 NS_IMETHODIMP
 nsDocLoader::GetTarget(nsIEventTarget** aTarget) {
-  nsCOMPtr<mozIDOMWindowProxy> window;
-  nsresult rv = GetDOMWindow(getter_AddRefs(window));
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  nsCOMPtr<nsIGlobalObject> global = do_QueryInterface(window);
-  NS_ENSURE_STATE(global);
-
-  nsCOMPtr<nsIEventTarget> target =
-      global->EventTargetFor(mozilla::TaskCategory::Other);
+  nsCOMPtr<nsIEventTarget> target = GetMainThreadSerialEventTarget();
   target.forget(aTarget);
   return NS_OK;
 }

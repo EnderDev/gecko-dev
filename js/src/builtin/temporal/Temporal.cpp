@@ -7,7 +7,6 @@
 #include "builtin/temporal/Temporal.h"
 
 #include "mozilla/CheckedInt.h"
-#include "mozilla/FloatingPoint.h"
 #include "mozilla/Likely.h"
 #include "mozilla/Maybe.h"
 
@@ -17,13 +16,13 @@
 #include <initializer_list>
 #include <iterator>
 #include <stdint.h>
-#include <string>
 #include <string_view>
 #include <utility>
 
 #include "jsfriendapi.h"
 #include "jsnum.h"
 #include "jspubtd.h"
+#include "NamespaceImports.h"
 
 #include "builtin/temporal/Instant.h"
 #include "builtin/temporal/PlainDate.h"
@@ -47,14 +46,12 @@
 #include "js/PropertySpec.h"
 #include "js/RootingAPI.h"
 #include "js/String.h"
-#include "js/Utility.h"
 #include "js/Value.h"
-#include "util/StringBuffer.h"
 #include "vm/BigIntType.h"
 #include "vm/BytecodeUtil.h"
 #include "vm/GlobalObject.h"
-#include "vm/JSAtom.h"
 #include "vm/JSAtomState.h"
+#include "vm/JSAtomUtils.h"
 #include "vm/JSContext.h"
 #include "vm/JSObject.h"
 #include "vm/ObjectOperations.h"
@@ -723,45 +720,6 @@ static BigInt* RoundNumberToIncrementSlow(JSContext* cx, Handle<BigInt*> x,
 /**
  * RoundNumberToIncrement ( x, increment, roundingMode )
  */
-BigInt* js::temporal::RoundNumberToIncrement(
-    JSContext* cx, Handle<BigInt*> x, int64_t increment,
-    TemporalRoundingMode roundingMode) {
-  MOZ_ASSERT(increment > 0);
-  MOZ_ASSERT(increment <= ToNanoseconds(TemporalUnit::Day));
-
-  // Fast path for the default case.
-  if (increment == 1) {
-    return x;
-  }
-
-  // Dividing zero is always zero.
-  if (x->isZero()) {
-    return x;
-  }
-
-  // Fast-path when we can perform the whole computation with int64 values.
-  int64_t num;
-  if (BigInt::isInt64(x, &num)) {
-    // Steps 1-8.
-    int64_t rounded = Divide(num, increment, roundingMode);
-
-    // Step 9.
-    mozilla::CheckedInt64 result = rounded;
-    result *= increment;
-    if (result.isValid()) {
-      if (result.value() == num) {
-        return x;
-      }
-      return BigInt::createFromInt64(cx, result.value());
-    }
-  }
-
-  return RoundNumberToIncrementSlow(cx, x, increment, roundingMode);
-}
-
-/**
- * RoundNumberToIncrement ( x, increment, roundingMode )
- */
 bool js::temporal::RoundNumberToIncrement(JSContext* cx, const Instant& x,
                                           int64_t increment,
                                           TemporalRoundingMode roundingMode,
@@ -1157,7 +1115,7 @@ SecondsStringPrecision js::temporal::ToSecondsStringPrecision(
     TemporalUnit smallestUnit, Precision fractionalDigitCount) {
   MOZ_ASSERT(smallestUnit == TemporalUnit::Auto ||
              smallestUnit >= TemporalUnit::Minute);
-  MOZ_ASSERT(fractionalDigitCount.isAuto() ||
+  MOZ_ASSERT(fractionalDigitCount == Precision::Auto() ||
              fractionalDigitCount.value() <= 9);
 
   // Steps 1-5.
@@ -1196,7 +1154,7 @@ SecondsStringPrecision js::temporal::ToSecondsStringPrecision(
   // Step 6. (Not applicable in our implementation.)
 
   // Step 7.
-  if (fractionalDigitCount.isAuto()) {
+  if (fractionalDigitCount == Precision::Auto()) {
     return {Precision::Auto(), TemporalUnit::Nanosecond, Increment{1}};
   }
 
@@ -1231,70 +1189,6 @@ SecondsStringPrecision js::temporal::ToSecondsStringPrecision(
   // Step 12.
   return {fractionalDigitCount, TemporalUnit::Nanosecond,
           increments[9 - digitCount]};
-}
-
-/**
- * FormatSecondsStringPart ( second, millisecond, microsecond, nanosecond,
- * precision )
- */
-void js::temporal::FormatSecondsStringPart(JSStringBuilder& result,
-                                           const PlainTime& time,
-                                           Precision precision) {
-  // Note: The caller is responsible for allocating enough space.
-
-  // Step 1. (Not applicable in our implementation.)
-
-  // Step 2.
-  if (precision.isMinute()) {
-    return;
-  }
-
-  // Step 3.
-  int32_t second = time.second;
-  result.infallibleAppend(':');
-  result.infallibleAppend(char('0' + (second / 10)));
-  result.infallibleAppend(char('0' + (second % 10)));
-
-  // Step 4.
-  int32_t fraction =
-      time.millisecond * 1'000'000 + time.microsecond * 1'000 + time.nanosecond;
-  MOZ_ASSERT(0 <= fraction && fraction < 1'000'000'000);
-
-  // Steps 5-6.
-  if (precision.isAuto()) {
-    // Step 5.a.
-    if (fraction == 0) {
-      return;
-    }
-
-    // Step 7. (Reordered)
-    result.infallibleAppend('.');
-
-    // Steps 5.b-c.
-    uint32_t k = 100'000'000;
-    do {
-      result.infallibleAppend(char('0' + (fraction / k)));
-      fraction %= k;
-      k /= 10;
-    } while (fraction);
-  } else {
-    // Step 6.a.
-    uint8_t p = precision.value();
-    if (p == 0) {
-      return;
-    }
-
-    // Step 7. (Reordered)
-    result.infallibleAppend('.');
-
-    // Steps 6.b-c.
-    uint32_t k = 100'000'000;
-    for (uint8_t i = 0; i < p; i++) {
-      result.infallibleAppend(char('0' + (fraction / k)));
-      fraction %= k;
-      k /= 10;
-    }
-  }
 }
 
 /**
@@ -1515,13 +1409,11 @@ static JSObject* MaybeUnwrapIf(JSObject* object) {
 // https://github.com/tc39/proposal-temporal/issues/2534
 
 /**
- * RejectObjectWithCalendarOrTimeZone ( object )
+ * RejectTemporalLikeObject ( object )
  */
-bool js::temporal::RejectObjectWithCalendarOrTimeZone(
-    JSContext* cx, Handle<JSObject*> object) {
-  // Step 1. (Not applicable in our implementation.)
-
-  // Step 2.
+bool js::temporal::RejectTemporalLikeObject(JSContext* cx,
+                                            Handle<JSObject*> object) {
+  // Step 1.
   if (auto* unwrapped =
           MaybeUnwrapIf<PlainDateObject, PlainDateTimeObject,
                         PlainMonthDayObject, PlainTimeObject,
@@ -1534,30 +1426,31 @@ bool js::temporal::RejectObjectWithCalendarOrTimeZone(
 
   Rooted<Value> property(cx);
 
-  // Step 3.
+  // Step 2.
   if (!GetProperty(cx, object, object, cx->names().calendar, &property)) {
     return false;
   }
 
-  // Step 4.
+  // Step 3.
   if (!property.isUndefined()) {
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
                               JSMSG_TEMPORAL_UNEXPECTED_PROPERTY, "calendar");
     return false;
   }
 
-  // Step 5.
+  // Step 4.
   if (!GetProperty(cx, object, object, cx->names().timeZone, &property)) {
     return false;
   }
 
-  // Step 6.
+  // Step 5.
   if (!property.isUndefined()) {
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
                               JSMSG_TEMPORAL_UNEXPECTED_PROPERTY, "timeZone");
     return false;
   }
 
+  // Step 6.
   return true;
 }
 
@@ -1682,8 +1575,8 @@ bool js::temporal::GetMethodForCall(JSContext* cx, Handle<JSObject*> object,
  * Implementation when |excludedKeys| and |excludedValues| are both empty lists.
  */
 bool js::temporal::CopyDataProperties(JSContext* cx,
-                                      JS::Handle<PlainObject*> target,
-                                      JS::Handle<JSObject*> source) {
+                                      Handle<PlainObject*> target,
+                                      Handle<JSObject*> source) {
   // Optimization for the common case when |source| is a native object.
   if (source->is<NativeObject>()) {
     bool optimized = false;
@@ -1746,9 +1639,9 @@ bool js::temporal::CopyDataProperties(JSContext* cx,
  * Implementation when |excludedKeys| is an empty list and |excludedValues| is
  * the list «undefined».
  */
-bool js::temporal::CopyDataPropertiesIgnoreUndefined(
-    JSContext* cx, JS::Handle<PlainObject*> target,
-    JS::Handle<JSObject*> source) {
+static bool CopyDataPropertiesIgnoreUndefined(JSContext* cx,
+                                              Handle<PlainObject*> target,
+                                              Handle<JSObject*> source) {
   // Step 1-2. (Not applicable)
 
   // Step 3.
@@ -1794,6 +1687,49 @@ bool js::temporal::CopyDataPropertiesIgnoreUndefined(
 
   // Step 5.
   return true;
+}
+
+/**
+ * SnapshotOwnProperties ( source, proto [, excludedKeys [, excludedValues ] ] )
+ */
+PlainObject* js::temporal::SnapshotOwnProperties(JSContext* cx,
+                                                 Handle<JSObject*> source) {
+  // Step 1.
+  Rooted<PlainObject*> copy(cx, NewPlainObjectWithProto(cx, nullptr));
+  if (!copy) {
+    return nullptr;
+  }
+
+  // Steps 2-4.
+  if (!CopyDataProperties(cx, copy, source)) {
+    return nullptr;
+  }
+
+  // Step 3.
+  return copy;
+}
+
+/**
+ * SnapshotOwnProperties ( source, proto [, excludedKeys [, excludedValues ] ] )
+ *
+ * Implementation when |excludedKeys| is an empty list and |excludedValues| is
+ * the list «undefined».
+ */
+PlainObject* js::temporal::SnapshotOwnPropertiesIgnoreUndefined(
+    JSContext* cx, Handle<JSObject*> source) {
+  // Step 1.
+  Rooted<PlainObject*> copy(cx, NewPlainObjectWithProto(cx, nullptr));
+  if (!copy) {
+    return nullptr;
+  }
+
+  // Steps 2-4.
+  if (!CopyDataPropertiesIgnoreUndefined(cx, copy, source)) {
+    return nullptr;
+  }
+
+  // Step 3.
+  return copy;
 }
 
 /**
@@ -1885,7 +1821,7 @@ bool js::temporal::GetDifferenceSettings(
 }
 
 static JSObject* CreateTemporalObject(JSContext* cx, JSProtoKey key) {
-  RootedObject proto(cx, &cx->global()->getObjectPrototype());
+  Rooted<JSObject*> proto(cx, &cx->global()->getObjectPrototype());
 
   // The |Temporal| object is just a plain object with some "static" data
   // properties and some constructor properties.

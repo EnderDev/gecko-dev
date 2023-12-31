@@ -1,86 +1,56 @@
-From: Andreas Pehrson <apehrson@mozilla.com>
-Date: Wed, 10 May 2023 07:06:00 +0000
-Subject: Bug 1810949 - cherry-pick upstream libwebrtc commit 7e5d9edfdf.
- r=webrtc-reviewers,mjf
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From: Michael Froman <mfroman@mozilla.com>
+Date: Thu, 28 Sep 2023 14:12:00 +0000
+Subject: Bug 1832465 - remove libXtst usage from libwebrtc.
+ r=ng,webrtc-reviewers
 
-Upstream commit: https://webrtc.googlesource.com/src/+/7e5d9edfdfe82e06182b790afe848cd0da179a87
-    webrtc_libyuv: Raise warnings for unhandled types at compile time
-
-    Bug: webrtc:14830
-    Change-Id: Ib5141e585f673098bbedd2872dbd6e6ed9df4864
-    Reviewed-on: https://webrtc-review.googlesource.com/c/src/+/291528
-    Reviewed-by: Erik Språng <sprang@webrtc.org>
-    Reviewed-by: Stefan Holmer <stefan@webrtc.org>
-    Commit-Queue: Erik Språng <sprang@webrtc.org>
-    Cr-Commit-Position: refs/heads/main@{#39408}
-
-Differential Revision: https://phabricator.services.mozilla.com/D177228
-Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/2bc179dfe25391e4b621ce407239beaebbe09be8
+Differential Revision: https://phabricator.services.mozilla.com/D189386
+Mercurial Revision: https://hg.mozilla.org/mozilla-central/rev/0ec1b33b95dbb2d39355f28b2812fe25b4ad9f20
 ---
- common_video/libyuv/webrtc_libyuv.cc | 22 +++++++++-------------
- 1 file changed, 9 insertions(+), 13 deletions(-)
+ modules/desktop_capture/BUILD.gn                      | 3 +++
+ modules/desktop_capture/linux/x11/shared_x_display.cc | 4 ++++
+ 2 files changed, 7 insertions(+)
 
-diff --git a/common_video/libyuv/webrtc_libyuv.cc b/common_video/libyuv/webrtc_libyuv.cc
-index 8998af191d..4c6911b4a3 100644
---- a/common_video/libyuv/webrtc_libyuv.cc
-+++ b/common_video/libyuv/webrtc_libyuv.cc
-@@ -22,7 +22,6 @@ namespace webrtc {
- size_t CalcBufferSize(VideoType type, int width, int height) {
-   RTC_DCHECK_GE(width, 0);
-   RTC_DCHECK_GE(height, 0);
--  size_t buffer_size = 0;
-   switch (type) {
-     case VideoType::kI420:
-     case VideoType::kNV21:
-@@ -31,28 +30,25 @@ size_t CalcBufferSize(VideoType type, int width, int height) {
-     case VideoType::kNV12: {
-       int half_width = (width + 1) >> 1;
-       int half_height = (height + 1) >> 1;
--      buffer_size = width * height + half_width * half_height * 2;
--      break;
-+      return width * height + half_width * half_height * 2;
-     }
-     case VideoType::kARGB4444:
-     case VideoType::kRGB565:
-     case VideoType::kARGB1555:
-     case VideoType::kYUY2:
-     case VideoType::kUYVY:
--      buffer_size = width * height * 2;
--      break;
-+      return width * height * 2;
-     case VideoType::kRGB24:
--      buffer_size = width * height * 3;
--      break;
-+      return width * height * 3;
-     case VideoType::kBGRA:
-     case VideoType::kARGB:
--      buffer_size = width * height * 4;
--      break;
--    default:
--      RTC_DCHECK_NOTREACHED();
-+      return width * height * 4;
-+    case VideoType::kMJPEG:
-+    case VideoType::kUnknown:
-       break;
+diff --git a/modules/desktop_capture/BUILD.gn b/modules/desktop_capture/BUILD.gn
+index c184e2fbbc..bcea427de7 100644
+--- a/modules/desktop_capture/BUILD.gn
++++ b/modules/desktop_capture/BUILD.gn
+@@ -382,6 +382,9 @@ rtc_library("desktop_capture") {
+       "Xrandr",
+       "Xtst",
+     ]
++    if (build_with_mozilla) {
++      libs -= [ "Xtst" ]
++    }
    }
--  return buffer_size;
-+  RTC_DCHECK_NOTREACHED() << "Unexpected pixel format " << type;
-+  return 0;
+ 
+   if (!is_win && !is_mac && !rtc_use_x11_extensions && !rtc_use_pipewire &&
+diff --git a/modules/desktop_capture/linux/x11/shared_x_display.cc b/modules/desktop_capture/linux/x11/shared_x_display.cc
+index d690b0e2ba..3f3617b074 100644
+--- a/modules/desktop_capture/linux/x11/shared_x_display.cc
++++ b/modules/desktop_capture/linux/x11/shared_x_display.cc
+@@ -11,7 +11,9 @@
+ #include "modules/desktop_capture/linux/x11/shared_x_display.h"
+ 
+ #include <X11/Xlib.h>
++#if !defined(WEBRTC_MOZILLA_BUILD)
+ #include <X11/extensions/XTest.h>
++#endif
+ 
+ #include <algorithm>
+ 
+@@ -95,6 +97,7 @@ void SharedXDisplay::ProcessPendingXEvents() {
  }
  
- int ExtractBuffer(const rtc::scoped_refptr<I420BufferInterface>& input_frame,
-@@ -120,7 +116,7 @@ int ConvertVideoType(VideoType video_type) {
-     case VideoType::kNV12:
-       return libyuv::FOURCC_NV12;
+ void SharedXDisplay::IgnoreXServerGrabs() {
++#if !defined(WEBRTC_MOZILLA_BUILD)
+   int test_event_base = 0;
+   int test_error_base = 0;
+   int major = 0;
+@@ -103,6 +106,7 @@ void SharedXDisplay::IgnoreXServerGrabs() {
+                           &minor)) {
+     XTestGrabControl(display(), true);
    }
--  RTC_DCHECK_NOTREACHED();
-+  RTC_DCHECK_NOTREACHED() << "Unexpected pixel format " << video_type;
-   return libyuv::FOURCC_ANY;
++#endif
  }
  
--- 
-2.34.1
-
+ }  // namespace webrtc

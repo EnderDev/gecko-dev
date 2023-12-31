@@ -108,8 +108,8 @@ impl Encoder<'_> {
 
     fn custom_sections(&mut self, place: CustomPlace) {
         for entry in self.customs.iter() {
-            if entry.place == place {
-                self.section(0, &(entry.name, entry));
+            if entry.place() == place {
+                self.section(0, &(entry.name(), entry));
             }
         }
     }
@@ -173,10 +173,25 @@ impl Encode for RecOrType<'_> {
 
 impl Encode for Type<'_> {
     fn encode(&self, e: &mut Vec<u8>) {
-        if let Some(parent) = &self.parent {
-            e.push(0x50);
-            (1 as usize).encode(e);
-            parent.encode(e);
+        match (&self.parent, self.final_type) {
+            (Some(parent), Some(true)) => {
+                // Type is final with a supertype
+                e.push(0x4f);
+                e.push(0x01);
+                parent.encode(e);
+            }
+            (Some(parent), Some(false) | None) => {
+                // Type is not final and has a declared supertype
+                e.push(0x50);
+                e.push(0x01);
+                parent.encode(e);
+            }
+            (None, Some(false)) => {
+                // Sub was used without any declared supertype
+                e.push(0x50);
+                e.push(0x00);
+            }
+            (None, _) => {} // No supertype, sub wasn't used
         }
         match &self.def {
             TypeDef::Func(func) => {
@@ -197,12 +212,7 @@ impl Encode for Type<'_> {
 
 impl Encode for Rec<'_> {
     fn encode(&self, e: &mut Vec<u8>) {
-        if self.types.len() == 1 {
-            self.types[0].encode(e);
-            return;
-        }
-
-        e.push(0x4f);
+        e.push(0x4e);
         self.types.len().encode(e);
         for ty in &self.types {
             ty.encode(e);
@@ -238,12 +248,12 @@ impl<'a> Encode for HeapType<'a> {
             HeapType::Extern => e.push(0x6f),
             HeapType::Any => e.push(0x6e),
             HeapType::Eq => e.push(0x6d),
-            HeapType::Struct => e.push(0x67),
-            HeapType::Array => e.push(0x66),
-            HeapType::I31 => e.push(0x6a),
-            HeapType::NoFunc => e.push(0x68),
-            HeapType::NoExtern => e.push(0x69),
-            HeapType::None => e.push(0x65),
+            HeapType::Struct => e.push(0x6b),
+            HeapType::Array => e.push(0x6a),
+            HeapType::I31 => e.push(0x6c),
+            HeapType::NoFunc => e.push(0x73),
+            HeapType::NoExtern => e.push(0x72),
+            HeapType::None => e.push(0x71),
             // Note that this is encoded as a signed leb128 so be sure to cast
             // to an i64 first
             HeapType::Index(Index::Num(n, _)) => i64::from(*n).encode(e),
@@ -276,34 +286,34 @@ impl<'a> Encode for RefType<'a> {
             RefType {
                 nullable: true,
                 heap: HeapType::Struct,
-            } => e.push(0x67),
+            } => e.push(0x6b),
             // The 'i31ref' binary abbreviation
             RefType {
                 nullable: true,
                 heap: HeapType::I31,
-            } => e.push(0x6a),
+            } => e.push(0x6c),
             // The 'nullfuncref' binary abbreviation
             RefType {
                 nullable: true,
                 heap: HeapType::NoFunc,
-            } => e.push(0x68),
+            } => e.push(0x73),
             // The 'nullexternref' binary abbreviation
             RefType {
                 nullable: true,
                 heap: HeapType::NoExtern,
-            } => e.push(0x69),
+            } => e.push(0x72),
             // The 'nullref' binary abbreviation
             RefType {
                 nullable: true,
                 heap: HeapType::None,
-            } => e.push(0x65),
+            } => e.push(0x71),
 
             // Generic 'ref null <heaptype>' encoding
             RefType {
                 nullable: true,
                 heap,
             } => {
-                e.push(0x6c);
+                e.push(0x63);
                 heap.encode(e);
             }
             // Generic 'ref <heaptype>' encoding
@@ -311,7 +321,7 @@ impl<'a> Encode for RefType<'a> {
                 nullable: false,
                 heap,
             } => {
-                e.push(0x6b);
+                e.push(0x64);
                 heap.encode(e);
             }
         }
@@ -321,8 +331,8 @@ impl<'a> Encode for RefType<'a> {
 impl<'a> Encode for StorageType<'a> {
     fn encode(&self, e: &mut Vec<u8>) {
         match self {
-            StorageType::I8 => e.push(0x7a),
-            StorageType::I16 => e.push(0x79),
+            StorageType::I8 => e.push(0x78),
+            StorageType::I16 => e.push(0x77),
             StorageType::Val(ty) => {
                 ty.encode(e);
             }
@@ -530,6 +540,10 @@ impl Encode for Elem<'_> {
                 offset.encode(e);
                 e.push(0x00); // extern_kind
             }
+            (ElemKind::Declared, ElemPayload::Indices(_)) => {
+                e.push(0x03); // flags
+                e.push(0x00); // extern_kind
+            }
             (
                 ElemKind::Active {
                     table: Index::Num(0, _),
@@ -556,10 +570,6 @@ impl Encode for Elem<'_> {
                 table.encode(e);
                 offset.encode(e);
                 ty.encode(e);
-            }
-            (ElemKind::Declared, ElemPayload::Indices(_)) => {
-                e.push(0x03); // flags
-                e.push(0x00); // extern_kind
             }
             (ElemKind::Declared, ElemPayload::Exprs { ty, .. }) => {
                 e.push(0x07); // flags
@@ -626,10 +636,10 @@ impl Encode for Func<'_> {
     }
 }
 
-impl Encode for Vec<Local<'_>> {
+impl Encode for Box<[Local<'_>]> {
     fn encode(&self, e: &mut Vec<u8>) {
         let mut locals_compressed = Vec::<(u32, ValType)>::new();
-        for local in self {
+        for local in self.iter() {
             if let Some((cnt, prev)) = locals_compressed.last_mut() {
                 if *prev == local.ty {
                     *cnt += 1;
@@ -904,7 +914,7 @@ fn find_names<'a>(
                 locals, expression, ..
             } = &f.kind
             {
-                for local in locals {
+                for local in locals.iter() {
                     if let Some(name) = get_name(&local.id, &local.name) {
                         local_names.push((local_idx, name));
                     }
@@ -1044,8 +1054,56 @@ impl<'a> Encode for SelectTypes<'a> {
 
 impl Encode for Custom<'_> {
     fn encode(&self, e: &mut Vec<u8>) {
+        match self {
+            Custom::Raw(r) => r.encode(e),
+            Custom::Producers(p) => p.encode(e),
+            Custom::Dylink0(p) => p.encode(e),
+        }
+    }
+}
+
+impl Encode for RawCustomSection<'_> {
+    fn encode(&self, e: &mut Vec<u8>) {
         for list in self.data.iter() {
             e.extend_from_slice(list);
+        }
+    }
+}
+
+impl Encode for Producers<'_> {
+    fn encode(&self, e: &mut Vec<u8>) {
+        self.fields.encode(e);
+    }
+}
+
+impl Encode for Dylink0<'_> {
+    fn encode(&self, e: &mut Vec<u8>) {
+        for section in self.subsections.iter() {
+            e.push(section.id());
+            let mut tmp = Vec::new();
+            section.encode(&mut tmp);
+            tmp.encode(e);
+        }
+    }
+}
+
+impl Encode for Dylink0Subsection<'_> {
+    fn encode(&self, e: &mut Vec<u8>) {
+        match self {
+            Dylink0Subsection::MemInfo {
+                memory_size,
+                memory_align,
+                table_size,
+                table_align,
+            } => {
+                memory_size.encode(e);
+                memory_align.encode(e);
+                table_size.encode(e);
+                table_align.encode(e);
+            }
+            Dylink0Subsection::Needed(libs) => libs.encode(e),
+            Dylink0Subsection::ExportInfo(list) => list.encode(e),
+            Dylink0Subsection::ImportInfo(list) => list.encode(e),
         }
     }
 }
@@ -1123,9 +1181,9 @@ impl Encode for RefTest<'_> {
     fn encode(&self, e: &mut Vec<u8>) {
         e.push(0xfb);
         if self.r#type.nullable {
-            e.push(0x48);
+            e.push(0x15);
         } else {
-            e.push(0x40);
+            e.push(0x14);
         }
         self.r#type.heap.encode(e);
     }
@@ -1135,15 +1193,15 @@ impl Encode for RefCast<'_> {
     fn encode(&self, e: &mut Vec<u8>) {
         e.push(0xfb);
         if self.r#type.nullable {
-            e.push(0x49);
+            e.push(0x17);
         } else {
-            e.push(0x41);
+            e.push(0x16);
         }
         self.r#type.heap.encode(e);
     }
 }
 
-fn br_on_cast_flags(on_fail: bool, from_nullable: bool, to_nullable: bool) -> u8 {
+fn br_on_cast_flags(from_nullable: bool, to_nullable: bool) -> u8 {
     let mut flag = 0;
     if from_nullable {
         flag |= 1 << 0;
@@ -1151,17 +1209,17 @@ fn br_on_cast_flags(on_fail: bool, from_nullable: bool, to_nullable: bool) -> u8
     if to_nullable {
         flag |= 1 << 1;
     }
-    if on_fail {
-        flag |= 1 << 2;
-    }
     flag
 }
 
 impl Encode for BrOnCast<'_> {
     fn encode(&self, e: &mut Vec<u8>) {
         e.push(0xfb);
-        e.push(0x4f);
-        e.push(br_on_cast_flags(false, self.from_type.nullable, self.to_type.nullable));
+        e.push(0x18);
+        e.push(br_on_cast_flags(
+            self.from_type.nullable,
+            self.to_type.nullable,
+        ));
         self.label.encode(e);
         self.from_type.heap.encode(e);
         self.to_type.heap.encode(e);
@@ -1171,8 +1229,11 @@ impl Encode for BrOnCast<'_> {
 impl Encode for BrOnCastFail<'_> {
     fn encode(&self, e: &mut Vec<u8>) {
         e.push(0xfb);
-        e.push(0x4f);
-        e.push(br_on_cast_flags(true, self.from_type.nullable, self.to_type.nullable));
+        e.push(0x19);
+        e.push(br_on_cast_flags(
+            self.from_type.nullable,
+            self.to_type.nullable,
+        ));
         self.label.encode(e);
         self.from_type.heap.encode(e);
         self.to_type.heap.encode(e);

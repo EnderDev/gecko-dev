@@ -7,9 +7,11 @@
 #ifndef mozilla_dom_HTMLScriptElement_h
 #define mozilla_dom_HTMLScriptElement_h
 
-#include "nsGenericHTMLElement.h"
+#include "mozilla/dom/FetchPriority.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/dom/ScriptElement.h"
+#include "nsGenericHTMLElement.h"
+#include "nsStringFwd.h"
 
 namespace mozilla::dom {
 
@@ -32,8 +34,9 @@ class HTMLScriptElement final : public nsGenericHTMLElement,
   // nsIScriptElement
   virtual void GetScriptText(nsAString& text) const override;
   virtual void GetScriptCharset(nsAString& charset) override;
-  virtual void FreezeExecutionAttrs(Document* aOwnerDoc) override;
+  virtual void FreezeExecutionAttrs(const Document* aOwnerDoc) override;
   virtual CORSMode GetCORSMode() const override;
+  virtual FetchPriority GetFetchPriority() const override;
   virtual mozilla::dom::ReferrerPolicy GetReferrerPolicy() override;
 
   // nsIContent
@@ -127,6 +130,9 @@ class HTMLScriptElement final : public nsGenericHTMLElement,
   void GetReferrerPolicy(nsAString& aReferrerPolicy) {
     GetEnumAttr(nsGkAtoms::referrerpolicy, "", aReferrerPolicy);
   }
+
+  // Required for the webidl-binding because `GetFetchPriority` is overloaded.
+  using nsGenericHTMLElement::GetFetchPriority;
 
   [[nodiscard]] static bool Supports(const GlobalObject& aGlobal,
                                      const nsAString& aType);

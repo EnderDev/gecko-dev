@@ -5,16 +5,18 @@
 
 #include "lib/jxl/test_utils.h"
 
+#include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "lib/extras/metrics.h"
 #include "lib/extras/packed_image_convert.h"
-#include "lib/jxl/base/file_io.h"
+#include "lib/jxl/base/float.h"
 #include "lib/jxl/base/printf_macros.h"
+#include "lib/jxl/cms/jxl_cms.h"
 #include "lib/jxl/enc_butteraugli_comparator.h"
-#include "lib/jxl/enc_butteraugli_pnorm.h"
 #include "lib/jxl/enc_cache.h"
-#include "lib/jxl/enc_color_management.h"
 #include "lib/jxl/enc_external_image.h"
 #include "lib/jxl/enc_file.h"
 
@@ -40,17 +42,33 @@ std::string GetTestDataPath(const std::string& filename) {
 
 PaddedBytes ReadTestData(const std::string& filename) {
   std::string full_path = GetTestDataPath(filename);
-  PaddedBytes data;
   fprintf(stderr, "ReadTestData %s\n", full_path.c_str());
-  JXL_CHECK(jxl::ReadFile(full_path, &data));
+  std::ifstream file(full_path, std::ios::binary);
+  std::vector<char> str((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+  JXL_CHECK(file.good());
+  const uint8_t* raw = reinterpret_cast<const uint8_t*>(str.data());
+  std::vector<uint8_t> data(raw, raw + str.size());
   printf("Test data %s is %d bytes long.\n", filename.c_str(),
          static_cast<int>(data.size()));
-  return data;
+  PaddedBytes result;
+  result.append(data);
+  return result;
+}
+
+void DefaultAcceptedFormats(extras::JXLDecompressParams& dparams) {
+  if (dparams.accepted_formats.empty()) {
+    for (const uint32_t num_channels : {1, 2, 3, 4}) {
+      dparams.accepted_formats.push_back(
+          {num_channels, JXL_TYPE_FLOAT, JXL_LITTLE_ENDIAN, /*align=*/0});
+    }
+  }
 }
 
 Status DecodeFile(extras::JXLDecompressParams dparams,
                   const Span<const uint8_t> file, CodecInOut* JXL_RESTRICT io,
                   ThreadPool* pool) {
+  DefaultAcceptedFormats(dparams);
   SetThreadParallelRunner(dparams, pool);
   extras::PackedPixelFile ppf;
   JXL_RETURN_IF_ERROR(DecodeImageJXL(file.data(), file.size(), dparams,
@@ -101,11 +119,13 @@ ColorEncoding ColorEncodingFromDescriptor(const ColorEncodingDescriptor& desc) {
   ColorEncoding c;
   c.SetColorSpace(desc.color_space);
   if (desc.color_space != ColorSpace::kXYB) {
-    c.white_point = desc.white_point;
-    c.primaries = desc.primaries;
-    c.tf.SetTransferFunction(desc.tf);
+    JXL_CHECK(c.SetWhitePointType(desc.white_point));
+    if (desc.color_space != ColorSpace::kGray) {
+      JXL_CHECK(c.SetPrimariesType(desc.primaries));
+    }
+    c.Tf().SetTransferFunction(desc.tf);
   }
-  c.rendering_intent = desc.rendering_intent;
+  c.SetRenderingIntent(desc.rendering_intent);
   JXL_CHECK(c.CreateICC());
   return c;
 }
@@ -118,7 +138,8 @@ void CheckSameEncodings(const std::vector<ColorEncoding>& a,
   JXL_CHECK(a.size() == b.size());
   for (size_t i = 0; i < a.size(); ++i) {
     if ((a[i].ICC() == b[i].ICC()) ||
-        ((a[i].primaries == b[i].primaries) && a[i].tf.IsSame(b[i].tf))) {
+        ((a[i].GetPrimariesType() == b[i].GetPrimariesType()) &&
+         a[i].Tf().IsSame(b[i].Tf()))) {
       continue;
     }
     failures << "CheckSameEncodings " << check_name << ": " << i
@@ -131,6 +152,7 @@ bool Roundtrip(const CodecInOut* io, const CompressParams& cparams,
                extras::JXLDecompressParams dparams,
                CodecInOut* JXL_RESTRICT io2, std::stringstream& failures,
                size_t* compressed_size, ThreadPool* pool, AuxOut* aux_out) {
+  DefaultAcceptedFormats(dparams);
   if (compressed_size) {
     *compressed_size = static_cast<size_t>(-1);
   }
@@ -156,8 +178,8 @@ bool Roundtrip(const CodecInOut* io, const CompressParams& cparams,
 
   std::unique_ptr<PassesEncoderState> enc_state =
       jxl::make_unique<PassesEncoderState>();
-  JXL_CHECK(EncodeFile(cparams, io, enc_state.get(), &compressed, GetJxlCms(),
-                       aux_out, pool));
+  JXL_CHECK(EncodeFile(cparams, io, enc_state.get(), &compressed,
+                       *JxlGetDefaultCms(), aux_out, pool));
 
   for (const ImageBundle& ib1 : io->frames) {
     metadata_encodings_1.push_back(ib1.metadata()->color_encoding);
@@ -195,6 +217,7 @@ size_t Roundtrip(const extras::PackedPixelFile& ppf_in,
                  extras::JXLCompressParams cparams,
                  extras::JXLDecompressParams dparams, ThreadPool* pool,
                  extras::PackedPixelFile* ppf_out) {
+  DefaultAcceptedFormats(dparams);
   SetThreadParallelRunner(cparams, pool);
   SetThreadParallelRunner(dparams, pool);
   std::vector<uint8_t> compressed;
@@ -210,30 +233,19 @@ size_t Roundtrip(const extras::PackedPixelFile& ppf_in,
 std::vector<ColorEncodingDescriptor> AllEncodings() {
   std::vector<ColorEncodingDescriptor> all_encodings;
   all_encodings.reserve(300);
-  ColorEncoding c;
 
   for (ColorSpace cs : Values<ColorSpace>()) {
-    if (cs == ColorSpace::kUnknown || cs == ColorSpace::kXYB) continue;
-    c.SetColorSpace(cs);
+    if (cs == ColorSpace::kUnknown || cs == ColorSpace::kXYB ||
+        cs == ColorSpace::kGray) {
+      continue;
+    }
 
     for (WhitePoint wp : Values<WhitePoint>()) {
       if (wp == WhitePoint::kCustom) continue;
-      if (c.ImplicitWhitePoint() && c.white_point != wp) continue;
-      c.white_point = wp;
-
       for (Primaries primaries : Values<Primaries>()) {
         if (primaries == Primaries::kCustom) continue;
-        if (!c.HasPrimaries()) continue;
-        c.primaries = primaries;
-
         for (TransferFunction tf : Values<TransferFunction>()) {
           if (tf == TransferFunction::kUnknown) continue;
-          if (c.tf.SetImplicit() &&
-              (c.tf.IsGamma() || c.tf.GetTransferFunction() != tf)) {
-            continue;
-          }
-          c.tf.SetTransferFunction(tf);
-
           for (RenderingIntent ri : Values<RenderingIntent>()) {
             ColorEncodingDescriptor cdesc;
             cdesc.color_space = cs;
@@ -273,27 +285,6 @@ jxl::CodecInOut SomeTestImageToCodecInOut(const std::vector<uint8_t>& buf,
 bool Near(double expected, double value, double max_dist) {
   double dist = expected > value ? expected - value : value - expected;
   return dist <= max_dist;
-}
-
-float LoadFloat16(uint16_t bits16) {
-  const uint32_t sign = bits16 >> 15;
-  const uint32_t biased_exp = (bits16 >> 10) & 0x1F;
-  const uint32_t mantissa = bits16 & 0x3FF;
-
-  // Subnormal or zero
-  if (biased_exp == 0) {
-    const float subnormal = (1.0f / 16384) * (mantissa * (1.0f / 1024));
-    return sign ? -subnormal : subnormal;
-  }
-
-  // Normalized: convert the representation directly (faster than ldexp/tables).
-  const uint32_t biased_exp32 = biased_exp + (127 - 15);
-  const uint32_t mantissa32 = mantissa << (23 - 10);
-  const uint32_t bits32 = (sign << 31) | (biased_exp32 << 23) | mantissa32;
-
-  float result;
-  memcpy(&result, &bits32, 4);
-  return result;
 }
 
 float LoadLEFloat16(const uint8_t* p) {
@@ -545,7 +536,7 @@ float ButteraugliDistance(const extras::PackedPixelFile& a,
   JXL_CHECK(ConvertPackedPixelFileToCodecInOut(b, pool, &io1));
   // TODO(eustas): simplify?
   return ButteraugliDistance(io0.frames, io1.frames, ButteraugliParams(),
-                             GetJxlCms(),
+                             *JxlGetDefaultCms(),
                              /*distmap=*/nullptr, pool);
 }
 
@@ -557,7 +548,8 @@ float Butteraugli3Norm(const extras::PackedPixelFile& a,
   JXL_CHECK(ConvertPackedPixelFileToCodecInOut(b, pool, &io1));
   ButteraugliParams ba;
   ImageF distmap;
-  ButteraugliDistance(io0.frames, io1.frames, ba, GetJxlCms(), &distmap, pool);
+  ButteraugliDistance(io0.frames, io1.frames, ba, *JxlGetDefaultCms(), &distmap,
+                      pool);
   return ComputeDistanceP(distmap, ba, 3);
 }
 
@@ -567,7 +559,7 @@ float ComputeDistance2(const extras::PackedPixelFile& a,
   JXL_CHECK(ConvertPackedPixelFileToCodecInOut(a, nullptr, &io0));
   CodecInOut io1;
   JXL_CHECK(ConvertPackedPixelFileToCodecInOut(b, nullptr, &io1));
-  return ComputeDistance2(io0.Main(), io1.Main(), GetJxlCms());
+  return ComputeDistance2(io0.Main(), io1.Main(), *JxlGetDefaultCms());
 }
 
 bool SameAlpha(const extras::PackedPixelFile& a,

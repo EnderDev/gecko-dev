@@ -150,6 +150,7 @@ nsresult TRR::CreateQueryURI(nsIURI** aOutURI) {
 
   nsresult rv = NS_NewURI(getter_AddRefs(dnsURI), uri);
   if (NS_FAILED(rv)) {
+    RecordReason(TRRSkippedReason::TRR_BAD_URL);
     return rv;
   }
 
@@ -785,7 +786,8 @@ nsresult TRR::ReturnData(nsIChannel* aChannel) {
     mHostResolver = nullptr;
     mRec = nullptr;
   } else {
-    (void)mHostResolver->CompleteLookupByType(mRec, NS_OK, mResult, mTTL, mPB);
+    (void)mHostResolver->CompleteLookupByType(mRec, NS_OK, mResult,
+                                              mTRRSkippedReason, mTTL, mPB);
   }
   return NS_OK;
 }
@@ -800,7 +802,8 @@ nsresult TRR::FailData(nsresult error) {
 
   if (mType == TRRTYPE_TXT || mType == TRRTYPE_HTTPSSVC) {
     TypeRecordResultType empty(Nothing{});
-    (void)mHostResolver->CompleteLookupByType(mRec, error, empty, 0, mPB);
+    (void)mHostResolver->CompleteLookupByType(mRec, error, empty,
+                                              mTRRSkippedReason, 0, mPB);
   } else {
     // create and populate an TRR AddrInfo instance to pass on to signal that
     // this comes from TRR

@@ -6,8 +6,6 @@
  * This module exports a component used to sort results in a UrlbarQueryContext.
  */
 
-import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-
 import {
   UrlbarMuxer,
   UrlbarUtils,
@@ -26,9 +24,27 @@ ChromeUtils.defineESModuleGetters(lazy, {
   UrlbarSearchUtils: "resource:///modules/UrlbarSearchUtils.sys.mjs",
 });
 
-XPCOMUtils.defineLazyGetter(lazy, "logger", () =>
+ChromeUtils.defineLazyGetter(lazy, "logger", () =>
   UrlbarUtils.getLogger({ prefix: "MuxerUnifiedComplete" })
 );
+
+/**
+ * Constructs the map key by joining the url with the userContextId if
+ * 'browser.urlbar.switchTabs.searchAllContainers' is set to true.
+ * Otherwise, just the url is used.
+ *
+ * @param   {UrlbarResult} result The result object.
+ * @returns {string} map key
+ */
+function makeMapKeyForTabResult(result) {
+  return UrlbarUtils.tupleString(
+    result.payload.url,
+    lazy.UrlbarPrefs.get("switchTabs.searchAllContainers") &&
+      result.type == UrlbarUtils.RESULT_TYPE.TAB_SWITCH
+      ? result.payload.userContextId
+      : undefined
+  );
+}
 
 /**
  * Class used to create a muxer.
@@ -78,6 +94,7 @@ class MuxerUnifiedComplete extends UrlbarMuxer {
       urlToTabResultType: new Map(),
       addedRemoteTabUrls: new Set(),
       addedSwitchTabUrls: new Set(),
+      addedResultUrls: new Set(),
       canShowPrivateSearch: unsortedResults.length > 1,
       canShowTailSuggestions: true,
       // Form history and remote suggestions added so far.  Used for deduping
@@ -134,11 +151,16 @@ class MuxerUnifiedComplete extends UrlbarMuxer {
       }
     }
 
+    // Show Top Sites above trending results.
+    let showSearchSuggestionsFirst = !(
+      lazy.UrlbarPrefs.get("suggest.trending") && !context.searchString
+    );
     // Determine the result groups to use for this sort.  In search mode with
     // an engine, show search suggestions first.
-    let rootGroup = context.searchMode?.engineName
-      ? lazy.UrlbarPrefs.makeResultGroups({ showSearchSuggestionsFirst: true })
-      : lazy.UrlbarPrefs.resultGroups;
+    let rootGroup =
+      context.searchMode?.engineName || !showSearchSuggestionsFirst
+        ? lazy.UrlbarPrefs.makeResultGroups({ showSearchSuggestionsFirst })
+        : lazy.UrlbarPrefs.resultGroups;
     lazy.logger.debug(`Groups: ${JSON.stringify(rootGroup)}`);
 
     // Fill the root group.
@@ -192,6 +214,7 @@ class MuxerUnifiedComplete extends UrlbarMuxer {
       addedRemoteTabUrls: new Set(state.addedRemoteTabUrls),
       addedSwitchTabUrls: new Set(state.addedSwitchTabUrls),
       suggestions: new Set(state.suggestions),
+      addedResultUrls: new Set(state.addedResultUrls),
     });
 
     // Deep copy the `resultsByGroup` maps.
@@ -806,10 +829,13 @@ class MuxerUnifiedComplete extends UrlbarMuxer {
     }
 
     // Discard form history and remote suggestions that dupe previously added
-    // suggestions or the heuristic.
+    // suggestions or the heuristic. We do not deduplicate rich suggestions so
+    // they do not visually disapear as the suggestion is completed and
+    // becomes the same url as the heuristic result.
     if (
       result.type == UrlbarUtils.RESULT_TYPE.SEARCH &&
-      result.payload.lowerCaseSuggestion
+      result.payload.lowerCaseSuggestion &&
+      !result.isRichSuggestion
     ) {
       let suggestion = result.payload.lowerCaseSuggestion.trim();
       if (!suggestion || state.suggestions.has(suggestion)) {
@@ -842,7 +868,7 @@ class MuxerUnifiedComplete extends UrlbarMuxer {
     // Discard switch-to-tab results that dupes another switch-to-tab result.
     if (
       result.type == UrlbarUtils.RESULT_TYPE.TAB_SWITCH &&
-      state.addedSwitchTabUrls.has(result.payload.url)
+      state.addedSwitchTabUrls.has(makeMapKeyForTabResult(result))
     ) {
       return false;
     }
@@ -966,6 +992,17 @@ class MuxerUnifiedComplete extends UrlbarMuxer {
       return false;
     }
 
+    // Discard results that have an embedded "url" param with the same value
+    // as another result's url
+    if (result.payload.url) {
+      let urlParams = result.payload.url.split("?").pop();
+      let embeddedUrl = new URLSearchParams(urlParams).get("url");
+
+      if (state.addedResultUrls.has(embeddedUrl)) {
+        return false;
+      }
+    }
+
     // Include the result.
     return true;
   }
@@ -1063,10 +1100,10 @@ class MuxerUnifiedComplete extends UrlbarMuxer {
       result.payload.url &&
       (result.type == UrlbarUtils.RESULT_TYPE.TAB_SWITCH ||
         (result.type == UrlbarUtils.RESULT_TYPE.REMOTE_TAB &&
-          !state.urlToTabResultType.has(result.payload.url)))
+          !state.urlToTabResultType.has(makeMapKeyForTabResult(result))))
     ) {
       // url => result type
-      state.urlToTabResultType.set(result.payload.url, result.type);
+      state.urlToTabResultType.set(makeMapKeyForTabResult(result), result.type);
     }
 
     // If we find results other than the heuristic, "Search in Private
@@ -1091,6 +1128,12 @@ class MuxerUnifiedComplete extends UrlbarMuxer {
 
     state.hasUnitConversionResult =
       state.hasUnitConversionResult || result.providerName == "UnitConversion";
+
+    // Keep track of result urls to dedupe results with the same url embedded
+    // in its query string
+    if (result.payload.url) {
+      state.addedResultUrls.add(result.payload.url);
+    }
   }
 
   /**
@@ -1175,7 +1218,7 @@ class MuxerUnifiedComplete extends UrlbarMuxer {
 
     // Keep track of which switch tabs we've added to dedupe switch tabs.
     if (result.type == UrlbarUtils.RESULT_TYPE.TAB_SWITCH) {
-      state.addedSwitchTabUrls.add(result.payload.url);
+      state.addedSwitchTabUrls.add(makeMapKeyForTabResult(result));
     }
   }
 

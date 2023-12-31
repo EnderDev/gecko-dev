@@ -89,6 +89,7 @@ ADD_TEST_SUPPORTED_SUITES = [
     "mochitest-chrome",
     "mochitest-plain",
     "mochitest-browser-chrome",
+    "web-platform-tests-privatebrowsing",
     "web-platform-tests-testharness",
     "web-platform-tests-reftest",
     "xpcshell",
@@ -97,6 +98,7 @@ ADD_TEST_SUPPORTED_DOCS = ["js", "html", "xhtml", "xul"]
 
 SUITE_SYNONYMS = {
     "wpt": "web-platform-tests-testharness",
+    "wpt-privatebrowsing": "web-platform-tests-privatebrowsing",
     "wpt-testharness": "web-platform-tests-testharness",
     "wpt-reftest": "web-platform-tests-reftest",
 }
@@ -299,9 +301,13 @@ def guess_suite(abs_test):
     filename = os.path.basename(abs_test)
 
     has_browser_ini = os.path.isfile(os.path.join(parent, "browser.ini"))
+    has_browser_toml = os.path.isfile(os.path.join(parent, "browser.toml"))
     has_chrome_ini = os.path.isfile(os.path.join(parent, "chrome.ini"))
+    has_chrome_toml = os.path.isfile(os.path.join(parent, "chrome.toml"))
     has_plain_ini = os.path.isfile(os.path.join(parent, "mochitest.ini"))
+    has_plain_toml = os.path.isfile(os.path.join(parent, "mochitest.toml"))
     has_xpcshell_ini = os.path.isfile(os.path.join(parent, "xpcshell.ini"))
+    has_xpcshell_toml = os.path.isfile(os.path.join(parent, "xpcshell.toml"))
 
     in_wpt_folder = abs_test.startswith(
         os.path.abspath(os.path.join("testing", "web-platform"))
@@ -313,24 +319,33 @@ def guess_suite(abs_test):
             guessed_suite = "web-platform-tests-reftest"
     elif (
         filename.startswith("test_")
-        and has_xpcshell_ini
+        and (has_xpcshell_ini or has_xpcshell_toml)
         and guess_doc(abs_test) == "js"
     ):
         guessed_suite = "xpcshell"
     else:
-        if filename.startswith("browser_") and has_browser_ini:
+        if filename.startswith("browser_") and (has_browser_ini or has_browser_toml):
             guessed_suite = "mochitest-browser-chrome"
         elif filename.startswith("test_"):
-            if has_chrome_ini and has_plain_ini:
+            if (has_chrome_ini or has_chrome_toml) and (
+                has_plain_ini or has_plain_toml
+            ):
                 err = (
-                    "Error: directory contains both a chrome.ini and mochitest.ini. "
+                    "Error: directory contains both a chrome.{ini|toml} and mochitest.{ini|toml}. "
                     "Please set --suite=mochitest-chrome or --suite=mochitest-plain."
                 )
-            elif has_chrome_ini:
+            elif has_chrome_ini or has_chrome_toml:
                 guessed_suite = "mochitest-chrome"
-            elif has_plain_ini:
+            elif has_plain_ini or has_plain_toml:
                 guessed_suite = "mochitest-plain"
     return guessed_suite, err
+
+
+class MachTestRunner:
+    """Adapter for mach test to simplify it's import externally."""
+
+    def test(command_context, what, extra_args, **log_args):
+        return test(command_context, what, extra_args, **log_args)
 
 
 @Command(
@@ -349,6 +364,7 @@ def test(command_context, what, extra_args, **log_args):
     * A directory containing tests
     * A test suite name
     * An alias to a test suite name (codes used on TreeHerder)
+    * path to a test manifest
 
     When paths or directories are given, they are first resolved to test
     files known to the build system.
@@ -415,6 +431,9 @@ def test(command_context, what, extra_args, **log_args):
         if isinstance(handler, StreamHandler):
             handler.formatter.inner.summary_on_shutdown = True
 
+    if log_args.get("custom_handler", None) is not None:
+        log.add_handler(log_args.get("custom_handler"))
+
     status = None
     for suite_name in run_suites:
         suite = TEST_SUITES[suite_name]
@@ -459,7 +478,8 @@ def test(command_context, what, extra_args, **log_args):
         if res:
             status = res
 
-    log.shutdown()
+    if not log.has_shutdown:
+        log.shutdown()
     return status
 
 
@@ -978,16 +998,20 @@ def test_info_testrun_report(command_context, output_file):
     import testinfo
 
     ti = testinfo.TestInfoReport(verbose=True)
-    runcounts = ti.get_runcounts()
-    if output_file:
-        output_file = os.path.abspath(output_file)
-        output_dir = os.path.dirname(output_file)
-        if not os.path.isdir(output_dir):
-            os.makedirs(output_dir)
-        with open(output_file, "w") as f:
-            json.dump(runcounts, f)
-    else:
-        print(runcounts)
+    if os.environ.get("GECKO_HEAD_REPOSITORY", "") in [
+        "https://hg.mozilla.org/mozilla-central",
+        "https://hg.mozilla.org/try",
+    ]:
+        runcounts = ti.get_runcounts()
+        if output_file:
+            output_file = os.path.abspath(output_file)
+            output_dir = os.path.dirname(output_file)
+            if not os.path.isdir(output_dir):
+                os.makedirs(output_dir)
+            with open(output_file, "w") as f:
+                json.dump(runcounts, f)
+        else:
+            print(runcounts)
 
 
 @SubCommand(

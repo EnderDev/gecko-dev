@@ -649,7 +649,7 @@ export class ContextMenuChild extends JSWindowActorChild {
     // determine what was context-clicked on. Then, update the state of the
     // commands on the context menu.
     this.docShell.contentViewer
-      .QueryInterface(Ci.nsIContentViewerEdit)
+      .QueryInterface(Ci.nsIDocumentViewerEdit)
       .setCommandNode(aEvent.composedTarget);
     aEvent.composedTarget.ownerGlobal.updateCommands("contentcontextmenu");
 
@@ -770,7 +770,7 @@ export class ContextMenuChild extends JSWindowActorChild {
     context.timeStamp = aEvent.timeStamp;
     context.screenXDevPx = aEvent.screenX * this.contentWindow.devicePixelRatio;
     context.screenYDevPx = aEvent.screenY * this.contentWindow.devicePixelRatio;
-    context.mozInputSource = aEvent.mozInputSource;
+    context.inputSource = aEvent.inputSource;
 
     let node = aEvent.composedTarget;
 
@@ -944,7 +944,11 @@ export class ContextMenuChild extends JSWindowActorChild {
         currentSrc: context.target.currentSrc,
         width: context.target.width,
         height: context.target.height,
-        imageText: context.target.title || context.target.alt,
+        imageText: this.contentWindow.ImageDocument.isInstance(
+          context.target.ownerDocument
+        )
+          ? undefined
+          : context.target.title || context.target.alt,
       };
       const { SVGAnimatedLength } = context.target.ownerGlobal;
       if (SVGAnimatedLength.isInstance(context.imageInfo.height)) {

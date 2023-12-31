@@ -18,14 +18,13 @@ import {Protocol} from 'devtools-protocol';
 
 import {TargetFilterCallback} from '../api/Browser.js';
 import {assert} from '../util/assert.js';
-import {createDeferredPromise} from '../util/DeferredPromise.js';
+import {Deferred} from '../util/Deferred.js';
 
-import {CDPSession, Connection} from './Connection.js';
+import {CDPSession, CDPSessionEmittedEvents, Connection} from './Connection.js';
 import {EventEmitter} from './EventEmitter.js';
-import {Target} from './Target.js';
+import {CDPTarget} from './Target.js';
 import {
   TargetFactory,
-  TargetInterceptor,
   TargetManagerEmittedEvents,
   TargetManager,
 } from './TargetManager.js';
@@ -59,19 +58,18 @@ export class FirefoxTargetManager
    *
    * `targetFilterCallback` has no effect on this map.
    */
-  #discoveredTargetsByTargetId: Map<string, Protocol.Target.TargetInfo> =
-    new Map();
+  #discoveredTargetsByTargetId = new Map<string, Protocol.Target.TargetInfo>();
   /**
    * Keeps track of targets that were created via 'Target.targetCreated'
    * and which one are not filtered out by `targetFilterCallback`.
    *
    * The target is removed from here once it's been destroyed.
    */
-  #availableTargetsByTargetId: Map<string, Target> = new Map();
+  #availableTargetsByTargetId = new Map<string, CDPTarget>();
   /**
    * Tracks which sessions attach to which target.
    */
-  #availableTargetsBySessionId: Map<string, Target> = new Map();
+  #availableTargetsBySessionId = new Map<string, CDPTarget>();
   /**
    * If a target was filtered out by `targetFilterCallback`, we still receive
    * events about it from CDP, but we don't forward them to the rest of Puppeteer.
@@ -80,16 +78,13 @@ export class FirefoxTargetManager
   #targetFilterCallback: TargetFilterCallback | undefined;
   #targetFactory: TargetFactory;
 
-  #targetInterceptors: WeakMap<CDPSession | Connection, TargetInterceptor[]> =
-    new WeakMap();
-
-  #attachedToTargetListenersBySession: WeakMap<
+  #attachedToTargetListenersBySession = new WeakMap<
     CDPSession | Connection,
     (event: Protocol.Target.AttachedToTargetEvent) => Promise<void>
-  > = new WeakMap();
+  >();
 
-  #initializePromise = createDeferredPromise<void>();
-  #targetsIdsForInit: Set<string> = new Set();
+  #initializeDeferred = Deferred.create<void>();
+  #targetsIdsForInit = new Set<string>();
 
   constructor(
     connection: Connection,
@@ -107,28 +102,6 @@ export class FirefoxTargetManager
     this.setupAttachmentListeners(this.#connection);
   }
 
-  addTargetInterceptor(
-    client: CDPSession | Connection,
-    interceptor: TargetInterceptor
-  ): void {
-    const interceptors = this.#targetInterceptors.get(client) || [];
-    interceptors.push(interceptor);
-    this.#targetInterceptors.set(client, interceptors);
-  }
-
-  removeTargetInterceptor(
-    client: CDPSession | Connection,
-    interceptor: TargetInterceptor
-  ): void {
-    const interceptors = this.#targetInterceptors.get(client) || [];
-    this.#targetInterceptors.set(
-      client,
-      interceptors.filter(currentInterceptor => {
-        return currentInterceptor !== interceptor;
-      })
-    );
-  }
-
   setupAttachmentListeners(session: CDPSession | Connection): void {
     const listener = (event: Protocol.Target.AttachedToTargetEvent) => {
       return this.#onAttachedToTarget(session, event);
@@ -140,7 +113,6 @@ export class FirefoxTargetManager
 
   #onSessionDetached = (session: CDPSession) => {
     this.removeSessionListeners(session);
-    this.#targetInterceptors.delete(session);
     this.#availableTargetsBySessionId.delete(session.id());
   };
 
@@ -154,7 +126,7 @@ export class FirefoxTargetManager
     }
   }
 
-  getAvailableTargets(): Map<string, Target> {
+  getAvailableTargets(): Map<string, CDPTarget> {
     return this.#availableTargetsByTargetId;
   }
 
@@ -169,7 +141,7 @@ export class FirefoxTargetManager
       filter: [{}],
     });
     this.#targetsIdsForInit = new Set(this.#discoveredTargetsByTargetId.keys());
-    await this.#initializePromise;
+    await this.#initializeDeferred.valueOrThrow();
   }
 
   #onTargetCreated = async (
@@ -186,21 +158,19 @@ export class FirefoxTargetManager
 
     if (event.targetInfo.type === 'browser' && event.targetInfo.attached) {
       const target = this.#targetFactory(event.targetInfo, undefined);
+      target._initialize();
       this.#availableTargetsByTargetId.set(event.targetInfo.targetId, target);
       this.#finishInitializationIfReady(target._targetId);
       return;
     }
 
-    if (
-      this.#targetFilterCallback &&
-      !this.#targetFilterCallback(event.targetInfo)
-    ) {
+    const target = this.#targetFactory(event.targetInfo, undefined);
+    if (this.#targetFilterCallback && !this.#targetFilterCallback(target)) {
       this.#ignoredTargets.add(event.targetInfo.targetId);
       this.#finishInitializationIfReady(event.targetInfo.targetId);
       return;
     }
-
-    const target = this.#targetFactory(event.targetInfo, undefined);
+    target._initialize();
     this.#availableTargetsByTargetId.set(event.targetInfo.targetId, target);
     this.emit(TargetManagerEmittedEvents.TargetAvailable, target);
     this.#finishInitializationIfReady(target._targetId);
@@ -237,23 +207,13 @@ export class FirefoxTargetManager
       this.#availableTargetsByTargetId.get(targetInfo.targetId)!
     );
 
-    for (const hook of this.#targetInterceptors.get(parentSession) || []) {
-      if (!(parentSession instanceof Connection)) {
-        assert(this.#availableTargetsBySessionId.has(parentSession.id()));
-      }
-      await hook(
-        target,
-        parentSession instanceof Connection
-          ? null
-          : this.#availableTargetsBySessionId.get(parentSession.id())!
-      );
-    }
+    parentSession.emit(CDPSessionEmittedEvents.Ready, session);
   };
 
   #finishInitializationIfReady(targetId: string): void {
     this.#targetsIdsForInit.delete(targetId);
     if (this.#targetsIdsForInit.size === 0) {
-      this.#initializePromise.resolve();
+      this.#initializeDeferred.resolve();
     }
   }
 }

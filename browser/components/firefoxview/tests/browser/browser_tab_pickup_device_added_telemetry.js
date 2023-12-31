@@ -15,12 +15,14 @@ function setupWithFxaDevices() {
         name: "My desktop",
         isCurrentDevice: true,
         type: "desktop",
+        tabs: [],
       },
       {
         id: 2,
         name: "Other device",
         isCurrentDevice: false,
         type: "mobile",
+        tabs: [],
       },
     ],
   }));
@@ -61,11 +63,9 @@ const mockMobileTab1 = {
 };
 
 const NO_TABS_EVENTS = [
-  ["firefoxview", "entered", "firefoxview", undefined],
   ["firefoxview", "synced_tabs", "tabs", undefined, { count: "0" }],
 ];
 const SINGLE_TAB_EVENTS = [
-  ["firefoxview", "entered", "firefoxview", undefined],
   ["firefoxview", "synced_tabs", "tabs", undefined, { count: "1" }],
 ];
 const DEVICE_ADDED_NO_TABS_EVENTS = [
@@ -98,7 +98,6 @@ async function test_device_added({
   expectedDeviceAddedTelementryEvents,
 }) {
   const recentTabsResult = initialRecentTabsResult;
-  await clearAllParentTelemetryEvents();
   const sandbox = setupWithFxaDevices();
   const syncedTabsMock = sandbox.stub(SyncedTabs, "getRecentTabs");
 
@@ -129,7 +128,7 @@ async function test_device_added({
       TabsSetupFlowManager,
       "onSignedInChange"
     );
-
+    await clearAllParentTelemetryEvents();
     await setupListState(browser);
     info("setupListState finished");
 

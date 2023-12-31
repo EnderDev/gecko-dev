@@ -13,7 +13,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
 });
 loader.lazyRequireGetter(
   this,
-  ["formatCommand", "isCommand"],
+  ["getCommandAndArgs", "isCommand"],
   "resource://devtools/server/actors/webconsole/commands/parser.js",
   true
 );
@@ -108,24 +108,58 @@ function isObject(value) {
  *         - global: the Debugger.Object for the global where the string was evaluated in.
  *         - result: the result of the evaluation.
  */
-exports.evalWithDebugger = function (string, options = {}, webConsole) {
-  if (isCommand(string.trim()) && options.eager) {
+function evalWithDebugger(string, options = {}, webConsole) {
+  if (string.trim() === "?") {
+    return evalWithDebugger(":help", options, webConsole);
+  }
+
+  const isCmd = isCommand(string.trim());
+
+  if (isCmd && options.eager) {
     return {
       result: null,
     };
   }
 
-  const evalString = getEvalInput(string);
   const { frame, dbg } = getFrameDbg(options, webConsole);
 
   const { dbgGlobal, bindSelf } = getDbgGlobal(options, dbg, webConsole);
+
+  if (isCmd) {
+    try {
+      const { command, args } = getCommandAndArgs(string);
+
+      const helpers = WebConsoleCommandsManager.getColonCommandFunction(
+        webConsole,
+        dbgGlobal,
+        string,
+        options.selectedNodeActor,
+        command
+      );
+
+      const result = helpers.commandFunc(args);
+
+      return {
+        result,
+        helperResult: helpers.getHelperResult(),
+      };
+    } catch (e) {
+      return {
+        helperResult: {
+          type: "exception",
+          message: e.message,
+        },
+      };
+    }
+  }
 
   const helpers = WebConsoleCommandsManager.getWebConsoleCommands(
     webConsole,
     dbgGlobal,
     frame,
     string,
-    options.selectedNodeActor
+    options.selectedNodeActor,
+    !!options.disableBreaks
   );
   let { bindings } = helpers;
 
@@ -154,11 +188,15 @@ exports.evalWithDebugger = function (string, options = {}, webConsole) {
     evalOptions.lineNumber = options.lineNumber;
   }
 
-  // When we are disabling breakpoints for a given evaluation,
-  // also prevent spawning related Debugger.Source object to avoid showing it
-  // in the debugger UI
   if (options.disableBreaks) {
+    // When we are disabling breakpoints for a given evaluation,
+    // also prevent spawning related Debugger.Source object to avoid showing it
+    // in the debugger UI
     evalOptions.hideFromDebugger = true;
+
+    // disableBreaks is used for all non-user-provided code, and in this case
+    // extra bindings shouldn't be shadowed.
+    evalOptions.useInnerBindings = true;
   }
 
   updateConsoleInputEvaluation(dbg, webConsole);
@@ -170,6 +208,7 @@ exports.evalWithDebugger = function (string, options = {}, webConsole) {
 
   let result;
   try {
+    const evalString = getEvalInput(string, bindings);
     result = getEvalResult(
       dbg,
       evalString,
@@ -198,6 +237,11 @@ exports.evalWithDebugger = function (string, options = {}, webConsole) {
     );
   }
 
+  // The help function needs to be easy to guess, so we make the () optional.
+  if (string.trim() === "help" && isHelpFunction(result, bindings)) {
+    return evalWithDebugger(":help", options, webConsole);
+  }
+
   return {
     result,
     // Retrieve the result of commands, if any ran
@@ -206,7 +250,20 @@ exports.evalWithDebugger = function (string, options = {}, webConsole) {
     frame,
     dbgGlobal,
   };
-};
+}
+exports.evalWithDebugger = evalWithDebugger;
+
+/**
+ * Checks if the evaluation result is the 'help' function in bindings.
+ */
+function isHelpFunction(result, bindings) {
+  return (
+    "return" in result &&
+    result.return &&
+    result.return.class === "Function" &&
+    result.return === bindings.help
+  );
+}
 
 function getEvalResult(
   dbg,
@@ -517,22 +574,8 @@ function updateConsoleInputEvaluation(dbg, webConsole) {
   }
 }
 
-function getEvalInput(string) {
+function getEvalInput(string, bindings) {
   const trimmedString = string.trim();
-  // The help function needs to be easy to guess, so we make the () optional.
-  if (trimmedString === "help" || trimmedString === "?") {
-    return "help()";
-  }
-  // we support Unix like syntax for commands if it is preceeded by `:`
-  if (isCommand(string)) {
-    try {
-      return formatCommand(string);
-    } catch (e) {
-      console.log(e);
-      return `throw "${e}"`;
-    }
-  }
-
   // Add easter egg for console.mihai().
   if (
     trimmedString == "console.mihai()" ||

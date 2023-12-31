@@ -19,7 +19,7 @@
 #include "nsFrameLoaderOwner.h"
 #include "nsFrameLoader.h"
 #include "nsQueryActor.h"
-#include "nsGlobalWindow.h"
+#include "nsGlobalWindowOuter.h"
 #include "nsFocusManager.h"
 #include "nsIContent.h"
 #include "nsIControllers.h"
@@ -39,7 +39,10 @@
 using namespace mozilla;
 using namespace mozilla::dom;
 
-nsWindowRoot::nsWindowRoot(nsPIDOMWindowOuter* aWindow) { mWindow = aWindow; }
+nsWindowRoot::nsWindowRoot(nsPIDOMWindowOuter* aWindow) {
+  SetIsOnMainThread();
+  mWindow = aWindow;
+}
 
 nsWindowRoot::~nsWindowRoot() {
   if (mListenerManager) {

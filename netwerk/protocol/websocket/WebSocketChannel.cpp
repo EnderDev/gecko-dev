@@ -489,7 +489,7 @@ class nsWSAdmissionManager {
 
     nsCString mAddress;
     nsCString mOriginSuffix;
-    WebSocketChannel* mChannel;
+    RefPtr<WebSocketChannel> mChannel;
   };
 
   void ConnectNext(nsCString& hostName, nsCString& originSuffix) {
@@ -1149,7 +1149,6 @@ WebSocketChannel::WebSocketChannel()
       mInnerWindowID(0),
       mGotUpgradeOK(0),
       mRecvdHttpUpgradeTransport(0),
-      mAutoFollowRedirects(0),
       mAllowPMCE(1),
       mPingOutstanding(0),
       mReleaseOnTransmit(0),
@@ -1175,6 +1174,7 @@ WebSocketChannel::WebSocketChannel()
       mCurrentOutSent(0),
       mHdrOutToSend(0),
       mHdrOut(nullptr),
+      mCompressorMutex("WebSocketChannel::mCompressorMutex"),
       mDynamicOutputSize(0),
       mDynamicOutput(nullptr),
       mPrivateBrowsing(false),
@@ -1560,6 +1560,7 @@ nsresult WebSocketChannel::ProcessInput(uint8_t* buffer, uint32_t count) {
     if (rsvBits) {
       // PMCE sets RSV1 bit in the first fragment when the non-control frame
       // is deflated
+      MutexAutoLock lock(mCompressorMutex);
       if (mPMCECompressor && rsvBits == kRsv1Bit && mFragmentAccumulator == 0 &&
           !(opcode & kControlFrameMask)) {
         mPMCECompressor->SetMessageDeflated();
@@ -1632,26 +1633,29 @@ nsresult WebSocketChannel::ProcessInput(uint8_t* buffer, uint32_t count) {
       LOG(("WebSocketChannel:: ignoring read frame code %d after completion\n",
            opcode));
     } else if (opcode == nsIWebSocketFrame::OPCODE_TEXT) {
-      bool isDeflated = mPMCECompressor && mPMCECompressor->IsMessageDeflated();
-      LOG(("WebSocketChannel:: %stext frame received\n",
-           isDeflated ? "deflated " : ""));
-
       if (mListenerMT) {
         nsCString utf8Data;
+        {
+          MutexAutoLock lock(mCompressorMutex);
+          bool isDeflated =
+              mPMCECompressor && mPMCECompressor->IsMessageDeflated();
+          LOG(("WebSocketChannel:: %stext frame received\n",
+               isDeflated ? "deflated " : ""));
 
-        if (isDeflated) {
-          rv = mPMCECompressor->Inflate(payload, payloadLength, utf8Data);
-          if (NS_FAILED(rv)) {
-            return rv;
-          }
-          LOG(
-              ("WebSocketChannel:: message successfully inflated "
-               "[origLength=%d, newLength=%zd]\n",
-               payloadLength, utf8Data.Length()));
-        } else {
-          if (!utf8Data.Assign((const char*)payload, payloadLength,
-                               mozilla::fallible)) {
-            return NS_ERROR_OUT_OF_MEMORY;
+          if (isDeflated) {
+            rv = mPMCECompressor->Inflate(payload, payloadLength, utf8Data);
+            if (NS_FAILED(rv)) {
+              return rv;
+            }
+            LOG(
+                ("WebSocketChannel:: message successfully inflated "
+                 "[origLength=%d, newLength=%zd]\n",
+                 payloadLength, utf8Data.Length()));
+          } else {
+            if (!utf8Data.Assign((const char*)payload, payloadLength,
+                                 mozilla::fallible)) {
+              return NS_ERROR_OUT_OF_MEMORY;
+            }
           }
         }
 
@@ -1772,26 +1776,29 @@ nsresult WebSocketChannel::ProcessInput(uint8_t* buffer, uint32_t count) {
         mService->FrameReceived(mSerial, mInnerWindowID, frame.forget());
       }
     } else if (opcode == nsIWebSocketFrame::OPCODE_BINARY) {
-      bool isDeflated = mPMCECompressor && mPMCECompressor->IsMessageDeflated();
-      LOG(("WebSocketChannel:: %sbinary frame received\n",
-           isDeflated ? "deflated " : ""));
-
       if (mListenerMT) {
         nsCString binaryData;
+        {
+          MutexAutoLock lock(mCompressorMutex);
+          bool isDeflated =
+              mPMCECompressor && mPMCECompressor->IsMessageDeflated();
+          LOG(("WebSocketChannel:: %sbinary frame received\n",
+               isDeflated ? "deflated " : ""));
 
-        if (isDeflated) {
-          rv = mPMCECompressor->Inflate(payload, payloadLength, binaryData);
-          if (NS_FAILED(rv)) {
-            return rv;
-          }
-          LOG(
-              ("WebSocketChannel:: message successfully inflated "
-               "[origLength=%d, newLength=%zd]\n",
-               payloadLength, binaryData.Length()));
-        } else {
-          if (!binaryData.Assign((const char*)payload, payloadLength,
-                                 mozilla::fallible)) {
-            return NS_ERROR_OUT_OF_MEMORY;
+          if (isDeflated) {
+            rv = mPMCECompressor->Inflate(payload, payloadLength, binaryData);
+            if (NS_FAILED(rv)) {
+              return rv;
+            }
+            LOG(
+                ("WebSocketChannel:: message successfully inflated "
+                 "[origLength=%d, newLength=%zd]\n",
+                 payloadLength, binaryData.Length()));
+          } else {
+            if (!binaryData.Assign((const char*)payload, payloadLength,
+                                   mozilla::fallible)) {
+              return NS_ERROR_OUT_OF_MEMORY;
+            }
           }
         }
 
@@ -2089,6 +2096,7 @@ void WebSocketChannel::PrimeNewOutgoingMessage() {
     }
 
     // deflate the payload if PMCE is negotiated
+    MutexAutoLock lock(mCompressorMutex);
     if (mPMCECompressor &&
         (msgType == kMsgTypeString || msgType == kMsgTypeBinaryString)) {
       if (mCurrentOut->DeflatePayload(mPMCECompressor.get())) {
@@ -2125,10 +2133,8 @@ void WebSocketChannel::PrimeNewOutgoingMessage() {
   if (!mIsServerSide) {
     // Perform the sending mask. Never use a zero mask
     do {
-      uint8_t* buffer;
       static_assert(4 == sizeof(mask), "Size of the mask should be equal to 4");
-      nsresult rv =
-          mRandomGenerator->GenerateRandomBytes(sizeof(mask), &buffer);
+      nsresult rv = mRandomGenerator->GenerateRandomBytesInto(mask);
       if (NS_FAILED(rv)) {
         LOG(
             ("WebSocketChannel::PrimeNewOutgoingMessage(): "
@@ -2137,8 +2143,6 @@ void WebSocketChannel::PrimeNewOutgoingMessage() {
         AbortSession(rv);
         return;
       }
-      memcpy(&mask, buffer, sizeof(mask));
-      free(buffer);
     } while (!mask);
     NetworkEndian::writeUint32(payload - sizeof(uint32_t), mask);
   }
@@ -2409,8 +2413,10 @@ void WebSocketChannel::DoStopSession(nsresult reason) {
     }
   }
 
-  mPMCECompressor = nullptr;
-
+  {
+    MutexAutoLock lock(mCompressorMutex);
+    mPMCECompressor = nullptr;
+  }
   if (!mCalledOnStop) {
     mCalledOnStop = true;
 
@@ -2674,6 +2680,7 @@ nsresult WebSocketChannel::HandleExtensions() {
     serverMaxWindowBits = 15;
   }
 
+  MutexAutoLock lock(mCompressorMutex);
   mPMCECompressor = MakeUnique<PMCECompression>(
       clientNoContextTakeover, clientMaxWindowBits, serverMaxWindowBits);
   if (mPMCECompressor->Active()) {
@@ -3160,20 +3167,17 @@ WebSocketChannel::AsyncOnChannelRedirect(
   // newuri is expected to be http or https
   bool newuriIsHttps = newuri->SchemeIs("https");
 
-  if (!mAutoFollowRedirects) {
-    // Even if redirects configured off, still allow them for HTTP Strict
-    // Transport Security (from ws://FOO to https://FOO (mapped to wss://FOO)
+  // allow insecure->secure redirects for HTTP Strict Transport Security (from
+  // ws://FOO to https://FOO (mapped to wss://FOO)
+  if (!(flags & (nsIChannelEventSink::REDIRECT_INTERNAL |
+                 nsIChannelEventSink::REDIRECT_STS_UPGRADE))) {
+    nsAutoCString newSpec;
+    rv = newuri->GetSpec(newSpec);
+    NS_ENSURE_SUCCESS(rv, rv);
 
-    if (!(flags & (nsIChannelEventSink::REDIRECT_INTERNAL |
-                   nsIChannelEventSink::REDIRECT_STS_UPGRADE))) {
-      nsAutoCString newSpec;
-      rv = newuri->GetSpec(newSpec);
-      NS_ENSURE_SUCCESS(rv, rv);
-
-      LOG(("WebSocketChannel: Redirect to %s denied by configuration\n",
-           newSpec.get()));
-      return NS_ERROR_FAILURE;
-    }
+    LOG(("WebSocketChannel: Redirect to %s denied by configuration\n",
+         newSpec.get()));
+    return NS_ERROR_FAILURE;
   }
 
   if (mEncrypted && !newuriIsHttps) {
@@ -3446,11 +3450,6 @@ WebSocketChannel::AsyncOpenNative(nsIURI* aURI, const nsACString& aOrigin,
         "network.websocket.extensions.permessage-deflate", &boolpref);
     if (NS_SUCCEEDED(rv)) {
       mAllowPMCE = boolpref ? 1 : 0;
-    }
-    rv = prefService->GetBoolPref(
-        "network.websocket.auto-follow-http-redirects", &boolpref);
-    if (NS_SUCCEEDED(rv)) {
-      mAutoFollowRedirects = boolpref ? 1 : 0;
     }
     rv = prefService->GetIntPref("network.websocket.max-connections", &intpref);
     if (NS_SUCCEEDED(rv)) {
@@ -3812,6 +3811,7 @@ nsresult WebSocketChannel::OnTransportAvailableInternal() {
         serverMaxWindowBits = 15;
       }
 
+      MutexAutoLock lock(mCompressorMutex);
       mPMCECompressor = MakeUnique<PMCECompression>(
           serverNoContextTakeover, serverMaxWindowBits, clientMaxWindowBits);
       if (mPMCECompressor->Active()) {
